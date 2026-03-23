@@ -12,6 +12,7 @@ class Settings:
     telegram_bot_token: str
     supabase_url: str
     supabase_service_role_key: str
+    db_table_prefix: str
     gemini_api_key: str
     gemini_model: str
     gemini_vision_model: str
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         supabase_url=_required("SUPABASE_URL"),
         supabase_service_role_key=_required("SUPABASE_SERVICE_ROLE_KEY"),
+        db_table_prefix=os.getenv("DB_TABLE_PREFIX", "").strip(),
         gemini_api_key=_required("GEMINI_API_KEY"),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
         gemini_vision_model=os.getenv("GEMINI_VISION_MODEL", "gemini-3-flash-preview"),

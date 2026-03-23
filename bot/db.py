@@ -15,6 +15,10 @@ class Database:
     def __init__(self, settings: Settings) -> None:
         self.client: Client = create_client(settings.supabase_url, settings.supabase_service_role_key)
         self.default_timezone = settings.app_timezone
+        self.table_prefix = settings.db_table_prefix
+
+    def _table(self, name: str) -> str:
+        return f"{self.table_prefix}{name}"
 
     def _zone(self, tz_name: str | None = None) -> ZoneInfo | timezone:
         key = str(tz_name or self.default_timezone or "UTC")
@@ -41,11 +45,11 @@ class Database:
             payload["language"] = language
             payload["timezone"] = timezone_name
             payload["currency"] = currency
-        self.client.table("users").upsert(payload, on_conflict="telegram_id").execute()
+        self.client.table(self._table("users")).upsert(payload, on_conflict="telegram_id").execute()
 
     def get_user(self, telegram_id: int) -> dict[str, Any] | None:
         data = (
-            self.client.table("users")
+            self.client.table(self._table("users"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .limit(1)
@@ -78,7 +82,7 @@ class Database:
         title = "NUTRI_V1:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
         if existing and existing.get("goal_id"):
-            self.client.table("goals").update(
+            self.client.table(self._table("goals")).update(
                 {
                     "goal_type": "weight",
                     "title": title,
@@ -88,7 +92,7 @@ class Database:
             ).eq("telegram_id", telegram_id).eq("id", existing["goal_id"]).execute()
             return
 
-        self.client.table("goals").insert(
+        self.client.table(self._table("goals")).insert(
             {
                 "telegram_id": telegram_id,
                 "goal_type": "weight",
@@ -99,7 +103,7 @@ class Database:
         ).execute()
 
     def add_goal(self, telegram_id: int, goal_type: str, title: str, target_value: float | None) -> None:
-        self.client.table("goals").insert(
+        self.client.table(self._table("goals")).insert(
             {
                 "telegram_id": telegram_id,
                 "goal_type": goal_type,
@@ -109,13 +113,13 @@ class Database:
         ).execute()
 
     def list_goals(self, telegram_id: int, only_active: bool = True) -> list[dict[str, Any]]:
-        query = self.client.table("goals").select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
+        query = self.client.table(self._table("goals")).select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
         if only_active:
             query = query.eq("active", True)
         return query.execute().data or []
 
     def add_habit(self, telegram_id: int, name: str, target_per_week: int = 7) -> None:
-        self.client.table("habits").insert(
+        self.client.table(self._table("habits")).insert(
             {
                 "telegram_id": telegram_id,
                 "name": name,
@@ -124,7 +128,7 @@ class Database:
         ).execute()
 
     def list_habits(self, telegram_id: int, only_active: bool = True) -> list[dict[str, Any]]:
-        query = self.client.table("habits").select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
+        query = self.client.table(self._table("habits")).select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
         if only_active:
             query = query.eq("active", True)
         return query.execute().data or []
@@ -133,7 +137,7 @@ class Database:
         if log_date is None:
             log_date = date.today()
 
-        self.client.table("habit_logs").upsert(
+        self.client.table(self._table("habit_logs")).upsert(
             {
                 "habit_id": habit_id,
                 "telegram_id": telegram_id,
@@ -153,7 +157,7 @@ class Database:
         today = datetime.now(tz).date().isoformat()
 
         logs = (
-            self.client.table("habit_logs")
+            self.client.table(self._table("habit_logs"))
             .select("habit_id")
             .eq("telegram_id", telegram_id)
             .eq("log_date", today)
@@ -180,7 +184,7 @@ class Database:
     ) -> None:
         if entry_date is None:
             entry_date = date.today()
-        self.client.table("finance_entries").insert(
+        self.client.table(self._table("finance_entries")).insert(
             {
                 "telegram_id": telegram_id,
                 "entry_type": entry_type,
@@ -195,7 +199,7 @@ class Database:
     def list_finance_entries(self, telegram_id: int, days: int = 7) -> list[dict[str, Any]]:
         start = (date.today() - timedelta(days=days - 1)).isoformat()
         return (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("entry_date", start)
@@ -209,7 +213,7 @@ class Database:
         tz = self._zone(tz_name)
         local_today = datetime.now(tz).date().isoformat()
         return (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("id,entry_type,amount,category,note,entry_date,created_at")
             .eq("telegram_id", telegram_id)
             .eq("entry_date", local_today)
@@ -220,11 +224,11 @@ class Database:
         )
 
     def delete_finance_entry(self, telegram_id: int, entry_id: str | int) -> None:
-        self.client.table("finance_entries").delete().eq("telegram_id", telegram_id).eq("id", entry_id).execute()
+        self.client.table(self._table("finance_entries")).delete().eq("telegram_id", telegram_id).eq("id", entry_id).execute()
 
     def get_finance_entry(self, telegram_id: int, entry_id: str | int) -> dict[str, Any] | None:
         rows = (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .eq("id", entry_id)
@@ -237,7 +241,7 @@ class Database:
 
     def list_finance_entries_all(self, telegram_id: int) -> list[dict[str, Any]]:
         return (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("id,entry_type,amount,category,note,entry_date,created_at")
             .eq("telegram_id", telegram_id)
             .order("created_at", desc=False)
@@ -250,7 +254,7 @@ class Database:
         tz = self._zone(tz_name)
         local_today = datetime.now(tz).date().isoformat()
         rows = (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("entry_type,amount")
             .eq("telegram_id", telegram_id)
             .eq("entry_date", local_today)
@@ -283,7 +287,7 @@ class Database:
         weight: float | None,
         note: str | None,
     ) -> None:
-        self.client.table("daily_checkins").upsert(
+        self.client.table(self._table("daily_checkins")).upsert(
             {
                 "telegram_id": telegram_id,
                 "checkin_date": checkin_date.isoformat(),
@@ -298,7 +302,7 @@ class Database:
     def list_checkins(self, telegram_id: int, days: int = 30) -> list[dict[str, Any]]:
         start = (date.today() - timedelta(days=days - 1)).isoformat()
         return (
-            self.client.table("daily_checkins")
+            self.client.table(self._table("daily_checkins"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("checkin_date", start)
@@ -312,7 +316,7 @@ class Database:
         tz = self._zone(tz_name)
         local_today = datetime.now(tz).date().isoformat()
         rows = (
-            self.client.table("daily_checkins")
+            self.client.table(self._table("daily_checkins"))
             .select("id")
             .eq("telegram_id", telegram_id)
             .eq("checkin_date", local_today)
@@ -349,7 +353,7 @@ class Database:
         confidence: float | None,
         advice: str | None,
     ) -> None:
-        self.client.table("calorie_logs").insert(
+        self.client.table(self._table("calorie_logs")).insert(
             {
                 "telegram_id": telegram_id,
                 "photo_url": photo_url,
@@ -366,7 +370,7 @@ class Database:
     def list_calorie_logs(self, telegram_id: int, days: int = 7) -> list[dict[str, Any]]:
         start = datetime.now(timezone.utc) - timedelta(days=days)
         return (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("created_at", start.isoformat())
@@ -385,7 +389,7 @@ class Database:
         utc_end = local_end.astimezone(timezone.utc)
 
         return (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("id,meal_desc,calories,created_at")
             .eq("telegram_id", telegram_id)
             .gte("created_at", utc_start.isoformat())
@@ -397,11 +401,11 @@ class Database:
         )
 
     def delete_calorie_log(self, telegram_id: int, log_id: str | int) -> None:
-        self.client.table("calorie_logs").delete().eq("telegram_id", telegram_id).eq("id", log_id).execute()
+        self.client.table(self._table("calorie_logs")).delete().eq("telegram_id", telegram_id).eq("id", log_id).execute()
 
     def get_calorie_log(self, telegram_id: int, log_id: str | int) -> dict[str, Any] | None:
         rows = (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .eq("id", log_id)
@@ -421,7 +425,7 @@ class Database:
         utc_end = local_end.astimezone(timezone.utc)
 
         rows = (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("calories,protein,fat,carbs")
             .eq("telegram_id", telegram_id)
             .gte("created_at", utc_start.isoformat())
@@ -453,7 +457,7 @@ class Database:
         utc_end = local_end.astimezone(timezone.utc)
 
         rows = (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("calories")
             .eq("telegram_id", telegram_id)
             .gte("created_at", utc_start.isoformat())
@@ -475,7 +479,7 @@ class Database:
         }
 
     def add_reminder(self, telegram_id: int, text: str, reminder_time: str, days_of_week: list[int], tz_name: str) -> None:
-        self.client.table("reminders").insert(
+        self.client.table(self._table("reminders")).insert(
             {
                 "telegram_id": telegram_id,
                 "reminder_text": text,
@@ -488,7 +492,7 @@ class Database:
 
     def list_reminders(self, telegram_id: int) -> list[dict[str, Any]]:
         return (
-            self.client.table("reminders")
+            self.client.table(self._table("reminders"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .order("created_at", desc=False)
@@ -498,10 +502,10 @@ class Database:
         )
 
     def delete_reminder(self, reminder_id: str, telegram_id: int) -> None:
-        self.client.table("reminders").delete().eq("id", reminder_id).eq("telegram_id", telegram_id).execute()
+        self.client.table(self._table("reminders")).delete().eq("id", reminder_id).eq("telegram_id", telegram_id).execute()
 
     def get_due_reminders(self, now_utc: datetime) -> list[dict[str, Any]]:
-        reminders = self.client.table("reminders").select("*").eq("enabled", True).execute().data or []
+        reminders = self.client.table(self._table("reminders")).select("*").eq("enabled", True).execute().data or []
         due: list[dict[str, Any]] = []
 
         for reminder in reminders:
@@ -531,13 +535,13 @@ class Database:
             due.append(reminder)
 
         for reminder in due:
-            self.client.table("reminders").update({"last_sent_key": reminder["_sent_key"]}).eq("id", reminder["id"]).execute()
+            self.client.table(self._table("reminders")).update({"last_sent_key": reminder["_sent_key"]}).eq("id", reminder["id"]).execute()
 
         return due
 
     def claim_weekly_report(self, telegram_id: int, iso_year: int, iso_week: int) -> bool:
         existing = (
-            self.client.table("weekly_report_runs")
+            self.client.table(self._table("weekly_report_runs"))
             .select("id")
             .eq("telegram_id", telegram_id)
             .eq("iso_year", iso_year)
@@ -550,13 +554,13 @@ class Database:
         if existing:
             return False
 
-        self.client.table("weekly_report_runs").insert(
+        self.client.table(self._table("weekly_report_runs")).insert(
             {"telegram_id": telegram_id, "iso_year": iso_year, "iso_week": iso_week}
         ).execute()
         return True
 
     def list_users(self) -> list[dict[str, Any]]:
-        return self.client.table("users").select("telegram_id,timezone,currency").execute().data or []
+        return self.client.table(self._table("users")).select("telegram_id,timezone,currency").execute().data or []
 
     def get_weekly_payload(self, telegram_id: int, end_date: date | None = None) -> dict[str, Any]:
         if end_date is None:
@@ -564,7 +568,7 @@ class Database:
         start_date = end_date - timedelta(days=6)
 
         finance_entries = (
-            self.client.table("finance_entries")
+            self.client.table(self._table("finance_entries"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("entry_date", start_date.isoformat())
@@ -576,7 +580,7 @@ class Database:
         )
 
         checkins = (
-            self.client.table("daily_checkins")
+            self.client.table(self._table("daily_checkins"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("checkin_date", start_date.isoformat())
@@ -588,7 +592,7 @@ class Database:
         )
 
         habit_logs = (
-            self.client.table("habit_logs")
+            self.client.table(self._table("habit_logs"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("log_date", start_date.isoformat())
@@ -604,7 +608,7 @@ class Database:
         start_dt = datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc)
         end_dt = datetime.combine(end_date + timedelta(days=1), time.min).replace(tzinfo=timezone.utc)
         calorie_logs = (
-            self.client.table("calorie_logs")
+            self.client.table(self._table("calorie_logs"))
             .select("*")
             .eq("telegram_id", telegram_id)
             .gte("created_at", start_dt.isoformat())
@@ -660,3 +664,4 @@ class Database:
             "habits_count": len(habits),
             "checkin_streak": checkin_streak,
         }
+
