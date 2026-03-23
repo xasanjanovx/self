@@ -335,7 +335,30 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     return "\n".join(lines), entries
 
 
+def _finance_transfer_from_note(note: str | None) -> tuple[str, str] | None:
+    raw = str(note or "").strip()
+    match = re.match(r"^\[x:(card|cash|lent|debt)>(card|cash|lent|debt)\]\s*", raw, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).lower(), match.group(2).lower()
+
+
+def _finance_strip_note_meta(note: str | None) -> str:
+    cleaned = str(note or "").strip()
+    pattern = r"^\[(?:b:(?:card|cash|lent|debt)|x:(?:card|cash|lent|debt)>(?:card|cash|lent|debt))\]\s*"
+    while cleaned:
+        next_value = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+        if next_value == cleaned:
+            break
+        cleaned = next_value
+    return cleaned
+
+
 def _finance_bucket_from_note(note: str | None) -> str:
+    transfer = _finance_transfer_from_note(note)
+    if transfer:
+        return transfer[0]
+
     raw = str(note or "").strip()
     match = re.match(r"^\[b:(card|cash|lent|debt)\]\s*", raw, flags=re.IGNORECASE)
     if not match:
@@ -344,8 +367,7 @@ def _finance_bucket_from_note(note: str | None) -> str:
 
 
 def _finance_note_without_bucket(note: str | None) -> str | None:
-    raw = str(note or "").strip()
-    cleaned = re.sub(r"^\[b:(card|cash|lent|debt)\]\s*", "", raw, flags=re.IGNORECASE).strip()
+    cleaned = _finance_strip_note_meta(note).strip()
     return cleaned or None
 
 
@@ -354,14 +376,31 @@ def _finance_note_with_bucket(note: str | None, bucket: str) -> str:
     return f"[b:{bucket}] {clean}".strip()
 
 
-def _finance_bucket_label(bucket: str) -> str:
-    labels = {
+def _finance_note_with_transfer(note: str | None, from_bucket: str, to_bucket: str) -> str:
+    clean = _finance_note_without_bucket(note) or ""
+    return f"[x:{from_bucket}>{to_bucket}] {clean}".strip()
+
+
+def _finance_bucket_label(bucket: str, lang: str = "ru") -> str:
+    labels_ru = {
         "card": "Карта",
         "cash": "Наличные",
         "lent": "Дал в долг",
         "debt": "Мои долги",
     }
-    return labels.get(bucket, "Карта")
+    labels_uz = {
+        "card": "Karta",
+        "cash": "Naqd",
+        "lent": "Qarzga berilgan",
+        "debt": "Mening qarzim",
+    }
+    labels = labels_uz if lang == "uz" else labels_ru
+    fallback = "Karta" if lang == "uz" else "Карта"
+    return labels.get(bucket, fallback)
+
+
+def _finance_transfer_label(from_bucket: str, to_bucket: str, lang: str = "ru") -> str:
+    return f"{_finance_bucket_label(from_bucket, lang)} → {_finance_bucket_label(to_bucket, lang)}"
 
 
 def _normalize_fin_bucket(bucket: str | None) -> str:
@@ -373,19 +412,167 @@ def _normalize_fin_bucket(bucket: str | None) -> str:
 
 def _infer_fin_bucket(text: str, entry_type: str) -> str:
     lower = text.lower()
-    if "нал" in lower or "налич" in lower:
+    if any(token in lower for token in ["нал", "налич", "naqd"]):
         return "cash"
-    if "долг" in lower or "в долг" in lower:
-        if any(token in lower for token in ["дал", "одолжил"]):
+    if any(token in lower for token in ["долг", "в долг", "qarz"]):
+        if any(token in lower for token in ["дал", "одолжил", "berdim"]):
             return "lent"
-        if any(token in lower for token in ["вернули", "получил обратно"]):
+        if any(token in lower for token in ["вернули", "получил обратно", "qaytar"]):
             return "lent"
-        if any(token in lower for token in ["занял", "взял"]):
+        if any(token in lower for token in ["занял", "взял", "oldim"]):
             return "debt"
-        if any(token in lower for token in ["вернул", "погасил"]):
+        if any(token in lower for token in ["вернул", "погасил", "to'ladim"]):
             return "debt"
         return "debt" if entry_type == "income" else "lent"
     return "card"
+
+
+def _extract_amount_from_text(text: str) -> float | None:
+    match = re.search(r"(\d[\d\s]*(?:[.,]\d+)?)", text)
+    if not match:
+        return None
+    raw = match.group(1).replace(" ", "").replace(",", ".")
+    try:
+        amount = float(raw)
+    except Exception:
+        return None
+    return amount if amount > 0 else None
+
+
+def _split_finance_chunks(text: str) -> list[str]:
+    chunks = [part.strip() for part in re.split(r"[\n;,]+", text) if part.strip()]
+    return chunks or ([text.strip()] if text.strip() else [])
+
+
+def _contains_any(text: str, tokens: list[str]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _pick_bucket_by_text(lower: str, *, for_destination: bool) -> str | None:
+    card_tokens = ["карт", "карта", "kart", "karta"]
+    cash_tokens = ["налич", "нал", "naqd"]
+
+    if for_destination:
+        if _contains_any(lower, ["на карту", "в карту", "kartaga", "to card"]):
+            return "card"
+        if _contains_any(lower, ["в налич", "наличными", "naqdga", "to cash"]):
+            return "cash"
+    else:
+        if _contains_any(lower, ["с карты", "из карты", "kartadan", "from card"]):
+            return "card"
+        if _contains_any(lower, ["с налич", "из налич", "наличными", "naqddan", "from cash"]):
+            return "cash"
+
+    has_card = _contains_any(lower, card_tokens)
+    has_cash = _contains_any(lower, cash_tokens)
+    if has_card and not has_cash:
+        return "card"
+    if has_cash and not has_card:
+        return "cash"
+    return None
+
+
+def _transfer_from_chunk(chunk: str, lang: str) -> dict[str, Any] | None:
+    lower = chunk.lower()
+    amount = _extract_amount_from_text(chunk)
+    if amount is None:
+        return None
+
+    transfer_words = ["перевод", "перевел", "перекинул", "o'tkaz", "transfer"]
+    give_loan_words = ["дал в долг", "одолжил", "qarzga berd"]
+    loan_back_words = ["вернули долг", "долг вернули", "получил обратно долг", "qarzni qaytardi", "qarz qaytdi"]
+    take_loan_words = ["взял в долг", "занял", "получил в долг", "qarz oldim"]
+    repay_loan_words = ["вернул долг", "погасил долг", "оплатил долг", "qarzni to'la", "qarzni yop"]
+    card_to_cash_words = ["снял с карты", "обналичил", "наличные с карты", "kartadan naqd"]
+    cash_to_card_words = ["внес на карту", "пополнил карту", "положил на карту", "naqdni kartaga", "kartaga naqd"]
+
+    from_bucket: str | None = None
+    to_bucket: str | None = None
+
+    if _contains_any(lower, give_loan_words):
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
+        to_bucket = "lent"
+    elif _contains_any(lower, loan_back_words):
+        from_bucket = "lent"
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
+    elif _contains_any(lower, take_loan_words):
+        from_bucket = "debt"
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
+    elif _contains_any(lower, repay_loan_words):
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
+        to_bucket = "debt"
+    elif _contains_any(lower, card_to_cash_words):
+        from_bucket, to_bucket = "card", "cash"
+    elif _contains_any(lower, cash_to_card_words):
+        from_bucket, to_bucket = "cash", "card"
+    elif _contains_any(lower, transfer_words):
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False)
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True)
+        if from_bucket is None and "долг" in lower:
+            from_bucket = "lent" if "вернули" in lower else "debt"
+        if to_bucket is None and "долг" in lower:
+            to_bucket = "debt" if "погас" in lower else "lent"
+
+    if not from_bucket or not to_bucket or from_bucket == to_bucket:
+        return None
+
+    if lang == "uz":
+        if to_bucket == "lent":
+            category = "Qarzga berish"
+        elif from_bucket == "lent":
+            category = "Qarzni qaytarish"
+        elif from_bucket == "debt":
+            category = "Qarz olish"
+        elif to_bucket == "debt":
+            category = "Qarz to'lovi"
+        else:
+            category = "Hisoblar o'tkazmasi"
+    else:
+        if to_bucket == "lent":
+            category = "Выдача долга"
+        elif from_bucket == "lent":
+            category = "Возврат долга"
+        elif from_bucket == "debt":
+            category = "Получение в долг"
+        elif to_bucket == "debt":
+            category = "Погашение долга"
+        else:
+            category = "Перевод между счетами"
+
+    return {
+        "kind": "transfer",
+        "amount": amount,
+        "category": category,
+        "note": chunk.strip(),
+        "from_bucket": from_bucket,
+        "to_bucket": to_bucket,
+    }
+
+
+def _extract_finance_transfers(raw_text: str, lang: str) -> list[dict[str, Any]]:
+    transfers: list[dict[str, Any]] = []
+    for chunk in _split_finance_chunks(raw_text):
+        transfer = _transfer_from_chunk(chunk, lang)
+        if transfer:
+            transfers.append(transfer)
+    return transfers
+
+
+def _is_transfer_like_item(item: dict[str, Any]) -> bool:
+    text = f"{item.get('category') or ''} {item.get('note') or ''}".lower()
+    return _contains_any(
+        text,
+        [
+            "долг",
+            "в долг",
+            "перевод",
+            "карт",
+            "налич",
+            "qarz",
+            "o'tkaz",
+            "naqd",
+        ],
+    )
 
 
 def _finance_account_balances(telegram_id: int) -> dict[str, float]:
@@ -393,8 +580,20 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
     balances = {"card": 0.0, "cash": 0.0, "lent": 0.0, "debt": 0.0}
 
     for row in rows:
-        bucket = _finance_bucket_from_note(row.get("note"))
         amount = float(row.get("amount") or 0)
+        if amount <= 0:
+            continue
+
+        transfer = _finance_transfer_from_note(row.get("note"))
+        if transfer:
+            from_bucket, to_bucket = transfer
+            if from_bucket in balances:
+                balances[from_bucket] -= amount
+            if to_bucket in balances:
+                balances[to_bucket] += amount
+            continue
+
+        bucket = _finance_bucket_from_note(row.get("note"))
         entry_type = str(row.get("entry_type") or "expense")
 
         if bucket in {"card", "cash"}:
@@ -425,44 +624,70 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     today_balance = float(totals["income"]) - float(totals["expense"])
     if lang == "uz":
         lines = [
-            "💰 <b>Moliya / Nazorat</b>",
+            "💰 <b>Moliya / Professional nazorat</b>",
             "",
-            f"Bugun: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
-            f"Karta: {_fmt_money(balances['card'])} {currency} | Naqd: {_fmt_money(balances['cash'])} {currency}",
-            f"Qarzga berilgan: {_fmt_money(balances['lent'])} {currency} | Mening qarzim: {_fmt_money(balances['debt'])} {currency}",
-            f"Oylik kredit to'lovi: {_fmt_money(monthly_credit)} {currency}",
+            "<b>Kunlik pul oqimi</b>",
+            f"• Kirim: <b>+{_fmt_money(totals['income'])} {currency}</b>",
+            f"• Chiqim: <b>-{_fmt_money(totals['expense'])} {currency}</b>",
+            f"• Balans: <b>{_fmt_money(today_balance)} {currency}</b>",
             "",
-            "Matn yoki ovoz yuboring.",
-            "Masalan: расход 25000 еда карта",
+            "<b>Joriy hisoblar</b>",
+            f"• Karta: <b>{_fmt_money(balances['card'])} {currency}</b>",
+            f"• Naqd: <b>{_fmt_money(balances['cash'])} {currency}</b>",
+            f"• Qarzga berilgan: <b>{_fmt_money(balances['lent'])} {currency}</b>",
+            f"• Mening qarzim: <b>{_fmt_money(balances['debt'])} {currency}</b>",
+            f"• Oylik kredit to'lovi: <b>{_fmt_money(monthly_credit)} {currency}</b>",
+            "",
+            "<i>Matn yoki ovoz yuboring. Bot oddiy kirim/chiqim va ichki o'tkazmalarni tushunadi.</i>",
+            "Misol: <code>dal v dolg 100000 s karty</code>",
             "",
         ]
     else:
         lines = [
-            "💰 <b>Финансы / Контроль</b>",
+            "💰 <b>Финансы / Профессиональный контроль</b>",
             "",
-            f"Сегодня: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
-            f"Карта: {_fmt_money(balances['card'])} {currency} | Наличные: {_fmt_money(balances['cash'])} {currency}",
-            f"Дал в долг: {_fmt_money(balances['lent'])} {currency} | Мои долги: {_fmt_money(balances['debt'])} {currency}",
-            f"Ежемесячный платеж по кредиту: {_fmt_money(monthly_credit)} {currency}",
+            "<b>Денежный поток за сегодня</b>",
+            f"• Доход: <b>+{_fmt_money(totals['income'])} {currency}</b>",
+            f"• Расход: <b>-{_fmt_money(totals['expense'])} {currency}</b>",
+            f"• Баланс дня: <b>{_fmt_money(today_balance)} {currency}</b>",
             "",
-            "Ввод: текст или голос.",
-            "Пример: расход 25000 еда карта",
+            "<b>Текущие счета</b>",
+            f"• Карта: <b>{_fmt_money(balances['card'])} {currency}</b>",
+            f"• Наличные: <b>{_fmt_money(balances['cash'])} {currency}</b>",
+            f"• Дал в долг: <b>{_fmt_money(balances['lent'])} {currency}</b>",
+            f"• Мои долги: <b>{_fmt_money(balances['debt'])} {currency}</b>",
+            f"• Ежемесячный платёж по кредиту: <b>{_fmt_money(monthly_credit)} {currency}</b>",
+            "",
+            "<i>Ввод: текст или голос. Поддерживаются обычные операции и внутренние переводы.</i>",
+            "Пример: <code>дал в долг 100000 с карты</code>",
             "",
         ]
 
     if not entries:
         lines.append("Buguncha operatsiya yo'q." if lang == "uz" else "Операций за сегодня пока нет.")
     else:
-        lines.append("So'nggi operatsiyalar:" if lang == "uz" else "Последние операции:")
+        lines.append("<b>So'nggi operatsiyalar</b>" if lang == "uz" else "<b>Последние операции</b>")
         for entry in entries[:8]:
             amount = float(entry.get("amount") or 0)
-            sign = "+" if str(entry.get("entry_type")) == "income" else "-"
             category = _h(str(entry.get("category") or ("boshqa" if lang == "uz" else "прочее")).strip())
-            bucket = _finance_bucket_from_note(entry.get("note"))
-            lines.append(f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}")
+            transfer = _finance_transfer_from_note(entry.get("note"))
+            if transfer:
+                from_bucket, to_bucket = transfer
+                route = _finance_transfer_label(from_bucket, to_bucket, lang)
+                lines.append(f"- ↔ <b>{_fmt_money(amount)} {currency}</b> | {category} | {route}")
+            else:
+                sign = "+" if str(entry.get("entry_type")) == "income" else "-"
+                bucket = _finance_bucket_from_note(entry.get("note"))
+                lines.append(
+                    f"- {sign}<b>{_fmt_money(amount)} {currency}</b> | {category} | {_finance_bucket_label(bucket, lang)}"
+                )
 
     lines.append("")
-    lines.append("Quyida operatsiyani ochib batafsil ko'ring." if lang == "uz" else "Открой операцию ниже для деталей.")
+    lines.append(
+        "Quyida operatsiyani ochib batafsil ko'ring."
+        if lang == "uz"
+        else "Открой операцию ниже, чтобы посмотреть детали и при необходимости удалить."
+    )
     return "\n".join(lines), entries
 
 
@@ -480,7 +705,8 @@ def build_finance_settings_text(telegram_id: int) -> str:
             f"Mening qarzim (boshlang'ich): {_fmt_money(s['debt_base'])} {currency}\n"
             f"Oylik kredit to'lovi: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
             "Format:\n<i>karta;naqd;qarzga_berilgan;mening_qarzim;oylik_kredit</i>\n"
-            "Misol: <code>500000;200000;150000;300000;250000</code>"
+            "Misol: <code>500000;200000;150000;300000;250000</code>\n\n"
+            "<i>Masalan: «qarzga 100000 kartadan berdim» yozsangiz, karta kamayadi va qarzga berilgan summa oshadi.</i>"
         )
 
     return (
@@ -491,7 +717,8 @@ def build_finance_settings_text(telegram_id: int) -> str:
         f"Мои долги (база): {_fmt_money(s['debt_base'])} {currency}\n"
         f"Ежемесячный кредит: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
         "Формат:\n<i>карта;наличные;дал_в_долг;мои_долги;кредит_в_месяц</i>\n"
-        "Пример: <code>500000;200000;150000;300000;250000</code>"
+        "Пример: <code>500000;200000;150000;300000;250000</code>\n\n"
+        "<i>Пример перевода: «дал в долг 100000 с карты» уменьшит карту и увеличит «дал в долг».</i>"
     )
 
 
@@ -538,17 +765,39 @@ def format_finance_detail(entry: dict[str, Any], currency: str, lang: str = "ru"
     amount = float(entry.get("amount") or 0)
     entry_type = str(entry.get("entry_type") or "expense")
     sign = "+" if entry_type == "income" else "-"
+    transfer = _finance_transfer_from_note(entry.get("note"))
     bucket = _finance_bucket_from_note(entry.get("note"))
     note_clean = _finance_note_without_bucket(entry.get("note"))
     category = _h(entry.get("category") or "-")
     note = _h(note_clean or "-")
+    if transfer:
+        from_bucket, to_bucket = transfer
+        route = _finance_transfer_label(from_bucket, to_bucket, lang)
+        if lang == "uz":
+            return (
+                "💰 <b>Moliya / O'tkazma tafsiloti</b>\n\n"
+                "Turi: Ichki o'tkazma\n"
+                f"Yo'nalish: <b>{route}</b>\n"
+                f"Summa: <b>{_fmt_money(amount)} {currency}</b>\n"
+                f"Kategoriya: {category}\n"
+                f"Izoh: {note}\n"
+            )
+        return (
+            "💰 <b>Финансы / Детали перевода</b>\n\n"
+            "Тип: Внутренний перевод\n"
+            f"Маршрут: <b>{route}</b>\n"
+            f"Сумма: <b>{_fmt_money(amount)} {currency}</b>\n"
+            f"Категория: {category}\n"
+            f"Заметка: {note}\n"
+        )
+
     if lang == "uz":
         return (
             "💰 <b>Moliya / Operatsiya tafsiloti</b>\n\n"
             f"Turi: {'Kirim' if entry_type == 'income' else 'Chiqim'}\n"
             f"Summa: <b>{sign}{_fmt_money(amount)} {currency}</b>\n"
             f"Kategoriya: {category}\n"
-            f"Hisob: {_finance_bucket_label(bucket)}\n"
+            f"Hisob: {_finance_bucket_label(bucket, lang)}\n"
             f"Izoh: {note}\n"
         )
     return (
@@ -556,7 +805,7 @@ def format_finance_detail(entry: dict[str, Any], currency: str, lang: str = "ru"
         f"Тип: {'Доход' if entry_type == 'income' else 'Расход'}\n"
         f"Сумма: <b>{sign}{_fmt_money(amount)} {currency}</b>\n"
         f"Категория: {category}\n"
-        f"Счет: {_finance_bucket_label(bucket)}\n"
+        f"Счет: {_finance_bucket_label(bucket, lang)}\n"
         f"Заметка: {note}\n"
     )
 
@@ -569,15 +818,21 @@ def format_finance_pending(items: list[dict[str, Any]], currency: str, lang: str
     )
     for item in items:
         amount = float(item.get("amount") or 0)
-        entry_type = str(item.get("type") or "expense")
-        sign = "+" if entry_type == "income" else "-"
         category = _h(str(item.get("category") or ("boshqa" if lang == "uz" else "прочее")))
-        bucket = _normalize_fin_bucket(item.get("bucket"))
         note = _h(str(item.get("note") or "").strip())
         note_part = f" | {note}" if note else ""
-        lines.append(
-            f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}{note_part}"
-        )
+        if str(item.get("kind") or "") == "transfer":
+            from_bucket = _normalize_fin_bucket(item.get("from_bucket"))
+            to_bucket = _normalize_fin_bucket(item.get("to_bucket"))
+            route = _finance_transfer_label(from_bucket, to_bucket, lang)
+            lines.append(f"- ↔ {_fmt_money(amount)} {currency} | {category} | {route}{note_part}")
+        else:
+            entry_type = str(item.get("type") or "expense")
+            sign = "+" if entry_type == "income" else "-"
+            bucket = _normalize_fin_bucket(item.get("bucket"))
+            lines.append(
+                f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket, lang)}{note_part}"
+            )
     lines.append("")
     lines.append("Ushbu operatsiyalarni saqlaymizmi?" if lang == "uz" else "Сохранить эти операции?")
     return "\n".join(lines)
@@ -683,9 +938,13 @@ def _day_names(days: list[int], lang: str = "ru") -> str:
 def _goals_text(goals: list[dict[str, Any]], lang: str = "ru") -> str:
     if not goals:
         return (
-            "🎯 <b>Maqsadlar hozircha yo'q.</b>\n«Qo'shish» tugmasini bosing."
+            "🎯 <b>Maqsadlar / Strategiya</b>\n\n"
+            "<i>Hozircha maqsadlar yo'q.</i>\n"
+            "Yangi maqsad qo'shish uchun pastdagi tugmadan foydalaning."
             if lang == "uz"
-            else "🎯 <b>Цели пока не добавлены.</b>\nНажми «Добавить цель»."
+            else "🎯 <b>Цели / Стратегия</b>\n\n"
+            "<i>Пока нет активных целей.</i>\n"
+            "Нажми «Добавить цель», чтобы запустить трекинг прогресса."
         )
 
     goal_labels = (
@@ -693,45 +952,65 @@ def _goals_text(goals: list[dict[str, Any]], lang: str = "ru") -> str:
         if lang == "uz"
         else {"weight": "Вес", "budget": "Бюджет", "habit": "Привычка"}
     )
-    rows = ["🎯 <b>Maqsadlar / Faol</b>" if lang == "uz" else "🎯 <b>Цели / Активные</b>"]
+    rows = ["🎯 <b>Maqsadlar / Faol yo'nalishlar</b>" if lang == "uz" else "🎯 <b>Цели / Активные направления</b>"]
     for goal in goals[:12]:
         goal_type = str(goal.get("goal_type") or "")
         title = _h(str(goal.get("title") or ""))
         target = goal.get("target_value")
-        target_text = f" -> {target}" if target is not None else ""
+        target_text = f" | <i>цель: {target}</i>" if target is not None and lang == "ru" else (
+            f" | <i>maqsad: {target}</i>" if target is not None else ""
+        )
         label = goal_labels.get(goal_type, goal_type or ("Maqsad" if lang == "uz" else "Цель"))
-        rows.append(f'- [{label}] {title}{target_text}')
+        rows.append(f"• <b>{label}</b>: {title}{target_text}")
     return '\n'.join(rows)
 
 
 def _habits_text(habits: list[dict[str, Any]], lang: str = "ru") -> str:
     if not habits:
         return (
-            "✅ <b>Odatlar yo'q.</b>\nBoshlash uchun birinchi odatni qo'shing."
+            "✅ <b>Odatlar / Intizom</b>\n\n"
+            "<i>Hozircha odatlar ro'yxati bo'sh.</i>\n"
+            "Birinchi odatni qo'shing va kunlik nazoratni boshlang."
             if lang == "uz"
-            else "✅ <b>Привычек пока нет.</b>\nДобавь первую, чтобы начать трекинг."
+            else "✅ <b>Привычки / Дисциплина</b>\n\n"
+            "<i>Список привычек пока пуст.</i>\n"
+            "Добавь первую привычку, чтобы включить ежедневный контроль."
         )
     done = len([h for h in habits if h.get('completed_today')])
     total = len(habits)
     if lang == "uz":
-        return f"✅ <b>Odatlar / Bugun</b>\nBajarildi: {done}/{total}\nBajarilganini belgilash uchun odatni bosing."
-    return f"✅ <b>Привычки / Сегодня</b>\nВыполнено: {done}/{total}\nНажми на привычку, чтобы отметить выполнение."
+        return (
+            "✅ <b>Odatlar / Bugungi holat</b>\n"
+            f"• Bajarildi: <b>{done}/{total}</b>\n"
+            f"• Qoldi: <b>{max(0, total - done)}</b>\n\n"
+            "<i>Bajarilganini belgilash uchun odat tugmasini bosing.</i>"
+        )
+    return (
+        "✅ <b>Привычки / Статус дня</b>\n"
+        f"• Выполнено: <b>{done}/{total}</b>\n"
+        f"• Осталось: <b>{max(0, total - done)}</b>\n\n"
+        "<i>Нажми на привычку ниже, чтобы отметить выполнение.</i>"
+    )
 
 
 def _reminders_text(reminders: list[dict[str, Any]], lang: str = "ru") -> str:
     if not reminders:
         return (
-            "⏰ Eslatmalar yo'q.\nBirinchi eslatmani qo'shing."
+            "⏰ <b>Eslatmalar / Avtomatika</b>\n\n"
+            "<i>Faol eslatmalar yo'q.</i>\n"
+            "Birinchi eslatmani qo'shing."
             if lang == "uz"
-            else "⏰ Напоминаний пока нет.\nДобавь первое напоминание."
+            else "⏰ <b>Напоминания / Автоматизация</b>\n\n"
+            "<i>Активных напоминаний пока нет.</i>\n"
+            "Добавь первое напоминание."
         )
 
-    lines = ["⏰ <b>Eslatmalar / Faol</b>" if lang == "uz" else "⏰ <b>Напоминания / Активные</b>"]
+    lines = ["⏰ <b>Eslatmalar / Faol</b>" if lang == "uz" else "⏰ <b>Напоминания / Активные</b>", ""]
     for rem in reminders[:10]:
         reminder_time = str(rem.get("reminder_time") or "")[:5]
         reminder_text = _h(str(rem.get("reminder_text") or "").strip())
         days = rem.get("days_of_week") or []
-        lines.append(f"- {reminder_time} [{_day_names(days, lang)}] {reminder_text}")
+        lines.append(f"• <b>{reminder_time}</b> [{_day_names(days, lang)}] {reminder_text}")
     return "\n".join(lines)
 
 
@@ -1327,29 +1606,29 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             if temp_path and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
+    parse_error: Exception | None = None
     try:
         items = await asyncio.to_thread(ai_service.parse_finance_items, raw_text)
     except Exception as exc:
         logger.exception('Finance parse failed')
-        await safe_delete_message(message)
-        text, entries = build_finance_panel(message.from_user.id)
-        text += f"\n\n{_tr(lang, 'Ошибка разбора', 'Tahlil xatosi')}: {_h(exc)}"
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
-        return
+        parse_error = exc
+        items = []
 
-    if not items:
-        await safe_delete_message(message)
-        text, entries = build_finance_panel(message.from_user.id)
-        text += "\n\n" + _tr(lang, "Не удалось распознать операции.", "Operatsiyalarni aniqlab bo'lmadi.")
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
-        return
+    transfers = _extract_finance_transfers(raw_text, lang)
 
     prepared: list[dict[str, Any]] = []
+    transfer_amounts = [float(item.get("amount") or 0) for item in transfers]
+
     for item in items:
         entry_type = str(item.get("type") or "expense")
         amount = float(item.get("amount") or 0)
         if amount <= 0:
             continue
+
+        if transfer_amounts and _is_transfer_like_item(item):
+            if any(abs(amount - transfer_amount) < 0.01 for transfer_amount in transfer_amounts):
+                continue
+
         category = str(item.get("category") or "прочее").strip() or "прочее"
         note = item.get("note")
         bucket = _normalize_fin_bucket(item.get("bucket"))
@@ -1366,10 +1645,19 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             }
         )
 
+    prepared.extend(transfers)
+
     if not prepared:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += "\n\n" + _tr(lang, "Не найдены корректные суммы.", "To'g'ri summalar topilmadi.")
+        if parse_error is not None:
+            text += f"\n\n{_tr(lang, 'Ошибка разбора', 'Tahlil xatosi')}: {_h(parse_error)}"
+        else:
+            text += "\n\n" + _tr(
+                lang,
+                "Не удалось распознать операции или переводы.",
+                "Operatsiya yoki o'tkazmalar aniqlanmadi.",
+            )
         await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
         return
 
@@ -1398,10 +1686,20 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
         return
 
     for item in items:
-        note = _finance_note_with_bucket(item.get("note"), _normalize_fin_bucket(item.get("bucket")))
+        if str(item.get("kind") or "") == "transfer":
+            from_bucket = _normalize_fin_bucket(item.get("from_bucket"))
+            to_bucket = _normalize_fin_bucket(item.get("to_bucket"))
+            if from_bucket == to_bucket:
+                continue
+            note = _finance_note_with_transfer(item.get("note"), from_bucket, to_bucket)
+            entry_type = "expense"
+        else:
+            note = _finance_note_with_bucket(item.get("note"), _normalize_fin_bucket(item.get("bucket")))
+            entry_type = str(item.get("type") or "expense")
+
         db.add_finance_entry(
             telegram_id=callback.from_user.id,
-            entry_type=item["type"],
+            entry_type=entry_type,
             amount=item["amount"],
             category=item["category"],
             note=note,
@@ -1689,7 +1987,7 @@ def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
     summary = _report_summary_for_user(telegram_id, days=days)
     status = _report_prefs_label(lang, enabled, frequency)
     text = (
-        f"📊 <b>{_tr(lang, 'Отчет', 'Hisobot')}</b>\n"
+        f"📊 <b>{_tr(lang, 'Отчет / Аналитика', 'Hisobot / Analitika')}</b>\n"
         f"<i>{_tr(lang, 'Авто-уведомления', 'Avto-xabarnomalar')}: {status}</i>\n\n"
         f"{summary}\n\n"
         f"{_tr(lang, 'Выбери режим уведомлений ниже.', 'Quyida xabarnoma rejimini tanlang.')}"
@@ -1907,8 +2205,12 @@ async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
         callback,
         _tr(
             lang,
-            "🏋️ <b>Тренер</b>\nВыбери цель. Затем бот запросит <b>вес;рост;возраст</b> и соберет план на неделю.",
-            "🏋️ <b>Trener</b>\nMaqsadni tanlang. So'ng bot <b>vazn;bo'y;yosh</b> so'rab, haftalik reja tuzadi.",
+            "🏋️ <b>Тренер / Персональный модуль</b>\n\n"
+            "Выбери цель. Далее бот запросит <b>вес;рост;возраст</b> и соберёт недельный план.\n"
+            "<i>План включает нагрузку, отдых и ссылки на технику упражнений.</i>",
+            "🏋️ <b>Trener / Shaxsiy modul</b>\n\n"
+            "Maqsadni tanlang. Keyin bot <b>vazn;bo'y;yosh</b> so'rab haftalik reja tuzadi.\n"
+            "<i>Rejada yuklama, dam olish va mashqlar texnikasi havolalari bo'ladi.</i>",
         ),
         reply_markup=trainer_keyboard(lang),
     )
@@ -1928,8 +2230,12 @@ async def cb_trainer_plan(callback: CallbackQuery, state: FSMContext) -> None:
         callback,
         _tr(
             lang,
-            "Введите профиль: <b>вес;рост;возраст</b>\nПример: <code>82;178;27</code>",
-            "Profilni kiriting: <b>vazn;bo'y;yosh</b>\nMisol: <code>82;178;27</code>",
+            "Введите профиль: <b>вес;рост;возраст</b>\n"
+            "Пример: <code>82;178;27</code>\n"
+            "<i>На основе профиля рассчитаю безопасный недельный план.</i>",
+            "Profilni kiriting: <b>vazn;bo'y;yosh</b>\n"
+            "Misol: <code>82;178;27</code>\n"
+            "<i>Profil asosida xavfsiz haftalik reja hisoblayman.</i>",
         ),
         reply_markup=back_to_menu_keyboard(lang),
     )

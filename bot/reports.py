@@ -28,8 +28,14 @@ def build_weekly_summary(payload: dict[str, Any], currency: str = "UZS") -> str:
     habits = payload.get("habits", [])
     calorie_logs = payload.get("calorie_logs", [])
 
-    income = sum(_to_float(item.get("amount")) for item in finance_entries if item.get("entry_type") == "income")
-    expense = sum(_to_float(item.get("amount")) for item in finance_entries if item.get("entry_type") == "expense")
+    clean_finance_entries = [
+        item
+        for item in finance_entries
+        if not str(item.get("note") or "").strip().lower().startswith("[x:")
+    ]
+
+    income = sum(_to_float(item.get("amount")) for item in clean_finance_entries if item.get("entry_type") == "income")
+    expense = sum(_to_float(item.get("amount")) for item in clean_finance_entries if item.get("entry_type") == "expense")
     net = income - expense
 
     mood_values = [int(item["mood"]) for item in checkins if item.get("mood") is not None]

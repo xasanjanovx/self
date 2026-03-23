@@ -414,7 +414,7 @@ class Database:
         local_today = datetime.now(tz).date().isoformat()
         rows = (
             self.client.table(self._table("finance_entries"))
-            .select("entry_type,amount")
+            .select("entry_type,amount,note")
             .eq("telegram_id", telegram_id)
             .eq("entry_date", local_today)
             .execute()
@@ -424,7 +424,12 @@ class Database:
 
         income = Decimal("0")
         expense = Decimal("0")
+        count = 0
         for row in rows:
+            note = str(row.get("note") or "").strip().lower()
+            if note.startswith("[x:"):
+                continue
+            count += 1
             amount = Decimal(str(row.get("amount") or "0"))
             if row.get("entry_type") == "income":
                 income += amount
@@ -434,7 +439,7 @@ class Database:
         return {
             "income": float(income),
             "expense": float(expense),
-            "count": float(len(rows)),
+            "count": float(count),
         }
 
     def add_daily_checkin(
@@ -812,6 +817,9 @@ class Database:
         category_totals: dict[str, Decimal] = {}
 
         for entry in finance_entries:
+            note = str(entry.get("note") or "").strip().lower()
+            if note.startswith("[x:"):
+                continue
             amount = Decimal(str(entry.get("amount") or "0"))
             if entry.get("entry_type") == "income":
                 income_total += amount

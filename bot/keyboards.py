@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 Lang = str
@@ -192,9 +194,14 @@ def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeybo
         if entry_id is None:
             continue
         amount = float(entry.get("amount") or 0)
-        sign = "+" if str(entry.get("entry_type")) == "income" else "-"
         category = str(entry.get("category") or _t(lang, "finance_other")).strip()
-        title = f"{sign}{amount:,.0f} {category}".replace(",", " ")
+        note_raw = str(entry.get("note") or "").strip().lower()
+        transfer_match = re.match(r"^\[x:(card|cash|lent|debt)>(card|cash|lent|debt)\]\s*", note_raw)
+        if transfer_match:
+            title = f"↔ {amount:,.0f} {category}".replace(",", " ")
+        else:
+            sign = "+" if str(entry.get("entry_type")) == "income" else "-"
+            title = f"{sign}{amount:,.0f} {category}".replace(",", " ")
         rows.append([InlineKeyboardButton(text=title[:64], callback_data=f"finance:view:{entry_id}")])
 
     rows.append([InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings")])
