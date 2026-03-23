@@ -18,6 +18,7 @@ class Database:
         self.table_prefix = settings.db_table_prefix
         self._nutri_prefix = "NUTRI_V1:"
         self._report_pref_prefix = "REPORT_PREF_V1:"
+        self._finance_pref_prefix = "FINANCE_PREF_V1:"
 
     def _table(self, name: str) -> str:
         return f"{self.table_prefix}{name}"
@@ -67,7 +68,11 @@ class Database:
         self.client.table(self._table("users")).update({"language": lang}).eq("telegram_id", telegram_id).execute()
 
     def _is_internal_goal_title(self, title: str) -> bool:
-        return title.startswith(self._nutri_prefix) or title.startswith(self._report_pref_prefix)
+        return (
+            title.startswith(self._nutri_prefix)
+            or title.startswith(self._report_pref_prefix)
+            or title.startswith(self._finance_pref_prefix)
+        )
 
     def _list_goal_rows(self, telegram_id: int, only_active: bool = True) -> list[dict[str, Any]]:
         query = self.client.table(self._table("goals")).select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
@@ -197,8 +202,79 @@ class Database:
                     "title": title,
                     "target_value": None,
                     "active": True,
+            }
+        ).execute()
+        return payload
+
+    def get_finance_settings(self, telegram_id: int) -> dict[str, float]:
+        rows = self._list_goal_rows(telegram_id, only_active=False)
+        for row in rows:
+            title = str(row.get("title") or "")
+            if not title.startswith(self._finance_pref_prefix):
+                continue
+            raw = title[len(self._finance_pref_prefix) :]
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            return {
+                "card_base": float(payload.get("card_base") or 0.0),
+                "cash_base": float(payload.get("cash_base") or 0.0),
+                "lent_base": float(payload.get("lent_base") or 0.0),
+                "debt_base": float(payload.get("debt_base") or 0.0),
+                "monthly_credit_payment": float(payload.get("monthly_credit_payment") or 0.0),
+                "goal_id": row.get("id"),
+            }
+        return {
+            "card_base": 0.0,
+            "cash_base": 0.0,
+            "lent_base": 0.0,
+            "debt_base": 0.0,
+            "monthly_credit_payment": 0.0,
+            "goal_id": None,
+        }
+
+    def save_finance_settings(
+        self,
+        telegram_id: int,
+        *,
+        card_base: float,
+        cash_base: float,
+        lent_base: float,
+        debt_base: float,
+        monthly_credit_payment: float,
+    ) -> dict[str, float]:
+        current = self.get_finance_settings(telegram_id)
+        payload = {
+            "card_base": float(card_base),
+            "cash_base": float(cash_base),
+            "lent_base": float(lent_base),
+            "debt_base": float(debt_base),
+            "monthly_credit_payment": float(monthly_credit_payment),
+        }
+        title = self._finance_pref_prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+        if current.get("goal_id"):
+            self.client.table(self._table("goals")).update(
+                {
+                    "goal_type": "budget",
+                    "title": title,
+                    "target_value": None,
+                    "active": True,
+                }
+            ).eq("telegram_id", telegram_id).eq("id", current["goal_id"]).execute()
+        else:
+            self.client.table(self._table("goals")).insert(
+                {
+                    "telegram_id": telegram_id,
+                    "goal_type": "budget",
+                    "title": title,
+                    "target_value": None,
+                    "active": True,
                 }
             ).execute()
+
+        payload["goal_id"] = current.get("goal_id")
         return payload
 
     def add_habit(self, telegram_id: int, name: str, target_per_week: int = 7) -> None:

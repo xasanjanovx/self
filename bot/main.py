@@ -240,8 +240,12 @@ def nutrition_preset(mode: str) -> dict[str, Any]:
 def build_nutrition_setup_text(lang: str = "ru") -> str:
     return _tr(
         lang,
-        "🍽️ <b>Питание / Профиль</b>\n\nВыбери цель, и бот рассчитает дневные нормы КБЖУ и остаток на сегодня.",
-        "🍽️ <b>Oziqlanish / Profil</b>\n\nMaqsadni tanlang, bot kunlik kkal/BJU me'yorini hisoblaydi.",
+        "🍽️ <b>Питание / Настройка цели</b>\n\n"
+        "Выбери цель, чтобы получить персональный дневной план КБЖУ.\n"
+        "<i>После выбора цель можно менять кнопкой «Цель питания».</i>",
+        "🍽️ <b>Oziqlanish / Maqsad sozlamasi</b>\n\n"
+        "Maqsadni tanlang, shunda kunlik BJU rejasi hisoblanadi.\n"
+        "<i>Maqsadni keyin ham «Oziqlanish maqsadi» orqali o'zgartirish mumkin.</i>",
     )
 
 
@@ -285,26 +289,28 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     if lang == "uz":
         lines = [
-            "🍽️ <b>Oziqlanish / Treker</b>",
+            "🍽️ <b>Oziqlanish / Professional treker</b>",
             f"Maqsad: <b>{title}</b>",
             "",
-            f"Reja: {int(target_kcal)} kkal | O {int(target_p)} Y {int(target_f)} U {int(target_c)}",
-            f"Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
-            f"Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
+            "<b>Kunlik metrikalar</b>",
+            f"• Reja: {int(target_kcal)} kkal | O {int(target_p)} Y {int(target_f)} U {int(target_c)}",
+            f"• Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
+            f"• Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
             "",
-            "Taom rasmi yoki matn yuboring.",
+            "Taom rasmi yoki tavsifini yuboring.",
             "",
         ]
     else:
         lines = [
-            "🍽️ <b>Питание / Трекер</b>",
+            "🍽️ <b>Питание / Профессиональный трекер</b>",
             f"Цель: <b>{title}</b>",
             "",
-            f"План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
-            f"Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
-            f"Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
+            "<b>Дневные метрики</b>",
+            f"• План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
+            f"• Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
+            f"• Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
             "",
-            "Отправь фото или текст блюда.",
+            "Отправь фото или описание блюда.",
             "",
         ]
 
@@ -321,7 +327,11 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             lines.append(f'- {meal[:40]} ({kcal_text})')
 
     lines.append("")
-    lines.append("Quyida yozuvni ochib, batafsil ko'ring." if lang == "uz" else "Открой запись ниже для деталей.")
+    lines.append(
+        "Yozuv tafsilotini quyidagi tugmalar orqali oching."
+        if lang == "uz"
+        else "Открой запись ниже для детального разбора."
+    )
     return "\n".join(lines), entries
 
 
@@ -402,7 +412,15 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     lang = _lang_from_user(user)
     totals = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
-    balances = _finance_account_balances(telegram_id)
+    settings_fin = db.get_finance_settings(telegram_id)
+    balances_live = _finance_account_balances(telegram_id)
+    balances = {
+        "card": float(settings_fin.get("card_base") or 0.0) + float(balances_live["card"]),
+        "cash": float(settings_fin.get("cash_base") or 0.0) + float(balances_live["cash"]),
+        "lent": float(settings_fin.get("lent_base") or 0.0) + float(balances_live["lent"]),
+        "debt": float(settings_fin.get("debt_base") or 0.0) + float(balances_live["debt"]),
+    }
+    monthly_credit = float(settings_fin.get("monthly_credit_payment") or 0.0)
 
     today_balance = float(totals["income"]) - float(totals["expense"])
     if lang == "uz":
@@ -412,6 +430,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"Bugun: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
             f"Karta: {_fmt_money(balances['card'])} {currency} | Naqd: {_fmt_money(balances['cash'])} {currency}",
             f"Qarzga berilgan: {_fmt_money(balances['lent'])} {currency} | Mening qarzim: {_fmt_money(balances['debt'])} {currency}",
+            f"Oylik kredit to'lovi: {_fmt_money(monthly_credit)} {currency}",
             "",
             "Matn yoki ovoz yuboring.",
             "Masalan: расход 25000 еда карта",
@@ -424,6 +443,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"Сегодня: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
             f"Карта: {_fmt_money(balances['card'])} {currency} | Наличные: {_fmt_money(balances['cash'])} {currency}",
             f"Дал в долг: {_fmt_money(balances['lent'])} {currency} | Мои долги: {_fmt_money(balances['debt'])} {currency}",
+            f"Ежемесячный платеж по кредиту: {_fmt_money(monthly_credit)} {currency}",
             "",
             "Ввод: текст или голос.",
             "Пример: расход 25000 еда карта",
@@ -444,6 +464,51 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     lines.append("")
     lines.append("Quyida operatsiyani ochib batafsil ko'ring." if lang == "uz" else "Открой операцию ниже для деталей.")
     return "\n".join(lines), entries
+
+
+def build_finance_settings_text(telegram_id: int) -> str:
+    user, _, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    s = db.get_finance_settings(telegram_id)
+
+    if lang == "uz":
+        return (
+            "⚙️ <b>Moliya / Sozlamalar</b>\n\n"
+            f"Karta (boshlang'ich): {_fmt_money(s['card_base'])} {currency}\n"
+            f"Naqd (boshlang'ich): {_fmt_money(s['cash_base'])} {currency}\n"
+            f"Qarzga berilgan (boshlang'ich): {_fmt_money(s['lent_base'])} {currency}\n"
+            f"Mening qarzim (boshlang'ich): {_fmt_money(s['debt_base'])} {currency}\n"
+            f"Oylik kredit to'lovi: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
+            "Format:\n<i>karta;naqd;qarzga_berilgan;mening_qarzim;oylik_kredit</i>\n"
+            "Misol: <code>500000;200000;150000;300000;250000</code>"
+        )
+
+    return (
+        "⚙️ <b>Финансы / Настройки</b>\n\n"
+        f"Карта (база): {_fmt_money(s['card_base'])} {currency}\n"
+        f"Наличные (база): {_fmt_money(s['cash_base'])} {currency}\n"
+        f"Дал в долг (база): {_fmt_money(s['lent_base'])} {currency}\n"
+        f"Мои долги (база): {_fmt_money(s['debt_base'])} {currency}\n"
+        f"Ежемесячный кредит: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
+        "Формат:\n<i>карта;наличные;дал_в_долг;мои_долги;кредит_в_месяц</i>\n"
+        "Пример: <code>500000;200000;150000;300000;250000</code>"
+    )
+
+
+def _parse_finance_settings_input(text: str) -> tuple[float, float, float, float, float] | None:
+    parts = [p.strip() for p in text.split(";")]
+    if len(parts) != 5:
+        return None
+    values: list[float] = []
+    for part in parts:
+        try:
+            values.append(float(part.replace(" ", "").replace(",", ".")))
+        except Exception:
+            return None
+    card, cash, lent, debt, monthly_credit = values
+    if any(v < 0 for v in values):
+        return None
+    return card, cash, lent, debt, monthly_credit
 
 
 def format_calorie_detail(log: dict[str, Any], lang: str = "ru") -> str:
@@ -886,6 +951,16 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "calorie:goals")
+async def cb_calorie_goals(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_calorie_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith('nutri:set:'))
 async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
@@ -1168,6 +1243,56 @@ async def cb_menu_finance(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
     await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
     await callback.answer()
+
+
+@router.callback_query(F.data == "finance:settings")
+async def cb_finance_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, build_finance_settings_text(callback.from_user.id), reply_markup=back_to_menu_keyboard(lang))
+    await callback.answer()
+
+
+@router.message(BotStates.waiting_finance_settings, F.text)
+async def msg_finance_settings(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    parsed = _parse_finance_settings_input(message.text or "")
+    if parsed is None:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "Неверный формат.\nПример: <code>500000;200000;150000;300000;250000</code>",
+                "Noto'g'ri format.\nMisol: <code>500000;200000;150000;300000;250000</code>",
+            ),
+            back_to_menu_keyboard(lang),
+        )
+        return
+
+    card, cash, lent, debt, monthly_credit = parsed
+    db.save_finance_settings(
+        message.from_user.id,
+        card_base=card,
+        cash_base=cash,
+        lent_base=lent,
+        debt_base=debt,
+        monthly_credit_payment=monthly_credit,
+    )
+
+    await safe_delete_message(message)
+    await state.set_state(BotStates.waiting_finance_input)
+    text, entries = build_finance_panel(message.from_user.id)
+    await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
+
+
+@router.message(BotStates.waiting_finance_settings)
+async def msg_finance_settings_invalid(message: Message) -> None:
+    await safe_delete_message(message)
 
 
 @router.message(BotStates.waiting_finance_input)
@@ -1669,37 +1794,107 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
 
 
-TRAINER_GIFS = {
-    "fat": "https://upload.wikimedia.org/wikipedia/commons/a/ac/Jumpingjacks.gif",
-    "muscle": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Pushups.gif",
-    "cardio": "https://upload.wikimedia.org/wikipedia/commons/a/ac/Jumpingjacks.gif",
-    "mobility": "https://upload.wikimedia.org/wikipedia/commons/8/89/Five_tibetan_rite_5.gif",
+EXERCISE_GIF_LINKS = {
+    "pushups": "https://commons.wikimedia.org/wiki/File:Pushups.gif",
+    "squats": "https://commons.wikimedia.org/wiki/File:Squats_01.gif",
+    "jumping": "https://commons.wikimedia.org/wiki/File:Jumpingjacks.gif",
+    "mobility": "https://commons.wikimedia.org/wiki/File:Five_tibetan_rite_5.gif",
 }
 
 
-def _trainer_plan(mode: str, lang: str) -> str:
-    if mode == "muscle":
-        return _tr(
+def _parse_trainer_profile(text: str) -> tuple[float, float, int] | None:
+    raw = [p.strip() for p in text.split(";")]
+    if len(raw) != 3:
+        return None
+    try:
+        weight = float(raw[0].replace(",", "."))
+        height = float(raw[1].replace(",", "."))
+        age = int(float(raw[2].replace(",", ".")))
+    except Exception:
+        return None
+    if weight <= 0 or height <= 0 or age <= 0:
+        return None
+    return weight, height, age
+
+
+def _trainer_weekly_plan(goal: str, weight: float, height: float, age: int, lang: str) -> str:
+    bmi = weight / ((height / 100.0) ** 2) if height > 0 else 0.0
+    if age >= 45 or bmi >= 33:
+        level = _tr(lang, "базовый", "boshlang'ich")
+        rest = "90"
+    elif age <= 30 and bmi < 27:
+        level = _tr(lang, "средний+", "o'rta+")
+        rest = "60"
+    else:
+        level = _tr(lang, "средний", "o'rta")
+        rest = "75"
+
+    if goal == "muscle":
+        title = _tr(lang, "💪 <b>Тренер / Недельный план на набор мышц</b>", "💪 <b>Trener / Mushak yig'ish uchun haftalik reja</b>")
+        week = _tr(
             lang,
-            "💪 <b>План: Набор мышц</b>\n• Разминка 7 мин\n• Отжимания 4x12\n• Приседания 4x15\n• Планка 4x45 сек\n• Отдых 60-90 сек\n<i>Контроль техники важнее скорости.</i>",
-            "💪 <b>Reja: Mushak yig'ish</b>\n• 7 daqiqa isinma\n• Otjimaniya 4x12\n• O'tirib-turish 4x15\n• Planka 4x45 soniya\n• Dam 60-90 soniya\n<i>Texnika tezlikdan muhim.</i>",
+            "Пн: Верх тела (отжимания, тяга резинкой, планка)\n"
+            "Вт: Низ тела (приседания, выпады, ягодичный мост)\n"
+            "Ср: Легкое кардио + мобилити\n"
+            "Чт: Верх тела (вариации отжиманий + корпус)\n"
+            "Пт: Низ тела (присед, болгарские выпады, икры)\n"
+            "Сб: Функционал + корпус\n"
+            "Вс: Отдых",
+            "Du: Yuqori tana (otjimaniya, rezina bilan tortish, planka)\n"
+            "Se: Pastki tana (o'tirib-turish, vypad, glute bridge)\n"
+            "Cho: Yengil kardio + mobiliti\n"
+            "Pa: Yuqori tana (otjimaniya variantlari + core)\n"
+            "Ju: Pastki tana (squat, bolgar vypadlari, boldir)\n"
+            "Sha: Funksional + core\n"
+            "Ya: Dam olish",
         )
-    if mode == "cardio":
-        return _tr(
+    else:
+        title = _tr(lang, "🔥 <b>Тренер / Недельный план для снижения жира</b>", "🔥 <b>Trener / Yog' kamaytirish uchun haftalik reja</b>")
+        week = _tr(
             lang,
-            "🏃 <b>План: Кардио</b>\n• Разминка 5 мин\n• Jumping Jacks 6x40 сек\n• Бег на месте 6x40 сек\n• Отдых 30 сек\n• Заминка 5 мин\n<i>Пульс держи в комфортной зоне.</i>",
-            "🏃 <b>Reja: Kardio</b>\n• 5 daqiqa isinma\n• Jumping Jacks 6x40 soniya\n• Joyda yugurish 6x40 soniya\n• Dam 30 soniya\n• 5 daqiqa sovush\n<i>Pulsni qulay zonada ushlang.</i>",
+            "Пн: Интервальное кардио + корпус\n"
+            "Вт: Силовой круг (ноги/грудь/спина)\n"
+            "Ср: Активное восстановление (ходьба 8-10к шагов)\n"
+            "Чт: Интервалы + мобилити\n"
+            "Пт: Силовой круг + пресс\n"
+            "Сб: Длинная кардио-сессия 35-45 мин\n"
+            "Вс: Отдых",
+            "Du: Interval kardio + core\n"
+            "Se: Kuch aylana mashqlari (oyoq/ko'krak/orqa)\n"
+            "Cho: Faol tiklanish (8-10k qadam)\n"
+            "Pa: Intervallar + mobiliti\n"
+            "Ju: Kuch aylana mashqlari + press\n"
+            "Sha: Uzoq kardio 35-45 daqiqa\n"
+            "Ya: Dam olish",
         )
-    if mode == "mobility":
-        return _tr(
-            lang,
-            "🧘 <b>План: Мобилити</b>\n• Суставная разминка 6 мин\n• Динамическая растяжка 10 мин\n• Тибетский ритуал #5 3x8\n• Дыхание 3 мин\n<i>Без боли и рывков.</i>",
-            "🧘 <b>Reja: Mobiliti</b>\n• Bo'g'imlar isinishi 6 daqiqa\n• Dinamik stretching 10 daqiqa\n• Tibet mashqi #5 3x8\n• Nafas 3 daqiqa\n<i>Og'riqsiz, keskin harakatsiz.</i>",
-        )
-    return _tr(
+
+    gif_block = _tr(
         lang,
-        "🔥 <b>План: Сжечь жир</b>\n• Разминка 6 мин\n• Приседания 4x20\n• Jumping Jacks 4x45 сек\n• Планка 4x40 сек\n• Отдых 45 сек\n<i>Держи стабильный темп.</i>",
-        "🔥 <b>Reja: Yog' yoqish</b>\n• 6 daqiqa isinma\n• O'tirib-turish 4x20\n• Jumping Jacks 4x45 soniya\n• Planka 4x40 soniya\n• Dam 45 soniya\n<i>Barqaror tempda bajaring.</i>",
+        f"<b>GIF техника:</b>\n"
+        f"• Отжимания: {EXERCISE_GIF_LINKS['pushups']}\n"
+        f"• Приседания: {EXERCISE_GIF_LINKS['squats']}\n"
+        f"• Jumping Jacks: {EXERCISE_GIF_LINKS['jumping']}\n"
+        f"• Мобилити: {EXERCISE_GIF_LINKS['mobility']}",
+        f"<b>GIF texnika:</b>\n"
+        f"• Otjimaniya: {EXERCISE_GIF_LINKS['pushups']}\n"
+        f"• O'tirib-turish: {EXERCISE_GIF_LINKS['squats']}\n"
+        f"• Jumping Jacks: {EXERCISE_GIF_LINKS['jumping']}\n"
+        f"• Mobiliti: {EXERCISE_GIF_LINKS['mobility']}",
+    )
+    rest_label = _tr(lang, "Отдых между подходами", "Setlar oralig'ida dam")
+    years_label = _tr(lang, "лет", "yosh")
+    profile_label = _tr(lang, "Профиль", "Profil")
+    level_label = _tr(lang, "Уровень", "Daraja")
+    sec_label = _tr(lang, "сек", "soniya")
+
+    return (
+        f"{title}\n\n"
+        f"{profile_label}: {weight:.1f} кг, {height:.0f} см, {age} {years_label}\n"
+        f"BMI: {bmi:.1f} | {level_label}: <b>{level}</b>\n"
+        f"{rest_label}: {rest} {sec_label}\n\n"
+        f"{week}\n\n"
+        f"{gif_block}\n\n"
+        f"<i>{_tr(lang, 'Важно: следи за техникой и самочувствием.', 'Muhim: texnika va holatni nazorat qiling.')}</i>"
     )
 
 
@@ -1712,8 +1907,8 @@ async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
         callback,
         _tr(
             lang,
-            "🏋️ <b>Тренер</b>\nВыбери цель или задай вопрос персональному тренеру.",
-            "🏋️ <b>Trener</b>\nMaqsadni tanlang yoki shaxsiy trenerga savol bering.",
+            "🏋️ <b>Тренер</b>\nВыбери цель. Затем бот запросит <b>вес;рост;возраст</b> и соберет план на неделю.",
+            "🏋️ <b>Trener</b>\nMaqsadni tanlang. So'ng bot <b>vazn;bo'y;yosh</b> so'rab, haftalik reja tuzadi.",
         ),
         reply_markup=trainer_keyboard(lang),
     )
@@ -1723,22 +1918,56 @@ async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("trainer:plan:"))
 async def cb_trainer_plan(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
     mode = callback.data.split("trainer:plan:", 1)[1].strip().lower()
-    plan = _trainer_plan(mode, lang)
-    await safe_edit_message(callback, plan, reply_markup=trainer_keyboard(lang))
-
-    gif_url = TRAINER_GIFS.get(mode) or TRAINER_GIFS["fat"]
-    if callback.message:
-        try:
-            await callback.message.answer_animation(gif_url)
-        except Exception:
-            await callback.message.answer(
-                _tr(lang, f"GIF: {gif_url}", f"GIF: {gif_url}"),
-                reply_markup=trainer_keyboard(lang),
-            )
+    goal = "muscle" if mode == "muscle" else "fat"
+    await state.set_state(BotStates.waiting_trainer_profile)
+    await _remember_panel(callback, state)
+    await state.update_data(trainer_goal=goal)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "Введите профиль: <b>вес;рост;возраст</b>\nПример: <code>82;178;27</code>",
+            "Profilni kiriting: <b>vazn;bo'y;yosh</b>\nMisol: <code>82;178;27</code>",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
     await callback.answer()
+
+
+@router.message(BotStates.waiting_trainer_profile, F.text)
+async def msg_trainer_profile(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    parsed = _parse_trainer_profile(message.text or "")
+    if parsed is None:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "Формат неверный.\nНужно: <b>вес;рост;возраст</b>\nПример: <code>82;178;27</code>",
+                "Format noto'g'ri.\nKerak: <b>vazn;bo'y;yosh</b>\nMisol: <code>82;178;27</code>",
+            ),
+            back_to_menu_keyboard(lang),
+        )
+        return
+
+    data = await state.get_data()
+    goal = str(data.get("trainer_goal") or "fat")
+    weight, height, age = parsed
+    plan = _trainer_weekly_plan(goal, weight, height, age, lang)
+
+    await safe_delete_message(message)
+    await state.clear()
+    await message.answer(plan, reply_markup=trainer_keyboard(lang))
+
+
+@router.message(BotStates.waiting_trainer_profile)
+async def msg_trainer_profile_invalid(message: Message) -> None:
+    await safe_delete_message(message)
 
 
 @router.callback_query(F.data == "trainer:ask")

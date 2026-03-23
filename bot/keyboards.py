@@ -31,6 +31,8 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "goal_gain": "Набор",
         "goal_muscle": "Масса",
         "goal_custom": "Ручной план",
+        "calorie_goal": "🎯 Цель питания",
+        "finance_settings": "⚙️ Настройки",
         "report_weekly": "🔔 Раз в неделю",
         "report_monthly": "🗓️ Раз в месяц",
         "report_off": "⛔ Выключить",
@@ -71,6 +73,8 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "goal_gain": "Vazn yig'ish",
         "goal_muscle": "Mushak",
         "goal_custom": "Qo'lda reja",
+        "calorie_goal": "🎯 Oziqlanish maqsadi",
+        "finance_settings": "⚙️ Sozlamalar",
         "report_weekly": "🔔 Haftada bir marta",
         "report_monthly": "🗓️ Oyda bir marta",
         "report_off": "⛔ O'chirish",
@@ -145,6 +149,7 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 
 def calorie_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton(text=_t(lang, "calorie_goal"), callback_data="calorie:goals")])
     for entry in entries[:6]:
         entry_id = entry.get("id")
         if entry_id is None:
@@ -192,6 +197,7 @@ def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeybo
         title = f"{sign}{amount:,.0f} {category}".replace(",", " ")
         rows.append([InlineKeyboardButton(text=title[:64], callback_data=f"finance:view:{entry_id}")])
 
+    rows.append([InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings")])
     rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -317,10 +323,6 @@ def trainer_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text=_t(lang, "trainer_fat"), callback_data="trainer:plan:fat"),
                 InlineKeyboardButton(text=_t(lang, "trainer_muscle"), callback_data="trainer:plan:muscle"),
-            ],
-            [
-                InlineKeyboardButton(text=_t(lang, "trainer_cardio"), callback_data="trainer:plan:cardio"),
-                InlineKeyboardButton(text=_t(lang, "trainer_mobility"), callback_data="trainer:plan:mobility"),
             ],
             [InlineKeyboardButton(text=_t(lang, "trainer_ask"), callback_data="trainer:ask")],
             [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
