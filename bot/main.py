@@ -32,10 +32,12 @@ from .keyboards import (
     calorie_confirm_keyboard,
     calorie_delete_confirm_keyboard,
     calorie_detail_keyboard,
+    calorie_meals_keyboard,
     calorie_panel_keyboard,
     finance_add_confirm_keyboard,
     finance_delete_confirm_keyboard,
     finance_detail_keyboard,
+    finance_operations_keyboard,
     finance_panel_keyboard,
     habits_keyboard,
     language_keyboard,
@@ -126,7 +128,6 @@ def build_dashboard_text(telegram_id: int) -> str:
     nutrition = db.get_today_nutrition_totals(telegram_id, tz_name=tz_name)
     nutrition_profile = db.get_nutrition_profile(telegram_id)
     habits = db.list_today_habits(telegram_id, tz_name=tz_name)
-    finance = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
     finance_settings = db.get_finance_settings(telegram_id)
     live_balances = _finance_account_balances(telegram_id)
 
@@ -137,43 +138,37 @@ def build_dashboard_text(telegram_id: int) -> str:
     total_habits = len(habits)
     done_habits = len([h for h in habits if h.get("completed_today")])
     left_habits = max(0, total_habits - done_habits)
-    today = _today_local(tz_name).isoformat()
-    balance_today = float(finance["income"]) - float(finance["expense"])
+    today_text = _today_local(tz_name).strftime("%d.%m.%Y")
 
     target_kcal = float((nutrition_profile or {}).get("daily_calories") or 0.0)
     left_kcal = max(0.0, target_kcal - float(nutrition["calories"]))
     kcal_ratio = f"{int(left_kcal)}/{int(target_kcal)}" if target_kcal > 0 else "0/0"
 
-    name = _h(_display_name(user))
+    first_name = str(user.get("first_name") or "").strip()
+    name = _h(first_name or "Друг")
     if lang == "uz":
         return (
-            f"👋 <b>{name}</b>\n"
-            f"<i>{today}</i>\n\n"
+            f"Assalomu Alaykum, <b>{name}</b>\n"
+            f"<i>Bugun - {today_text}</i>\n\n"
             f"🍽️ <b>Oziqlanish</b>\n"
             f"• Qoldiq: <b>{kcal_ratio}</b> kkal\n"
             f"• Fakt: {int(nutrition['calories'])} kkal, {int(nutrition['meals'])} ta qabul.\n\n"
             f"✅ <b>Odatlar</b>\n"
             f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
             f"💰 <b>Moliya</b>\n"
-            f"• Umumiy balans (karta+naqd): <b>{_fmt_money(wallet_total)} {currency}</b>\n"
-            f"• Kirim: +{_fmt_money(finance['income'])} {currency}\n"
-            f"• Chiqim: -{_fmt_money(finance['expense'])} {currency}\n"
-            f"• Bugungi balans: {_fmt_money(balance_today)} {currency}"
+            f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>"
         )
 
     return (
-        f"👋 <b>{name}</b>\n"
-        f"<i>{today}</i>\n\n"
+        f"Assalomu Alaykum, <b>{name}</b>\n"
+        f"<i>Сегодня - {today_text}</i>\n\n"
         f"🍽️ <b>Питание</b>\n"
         f"• Осталось: <b>{kcal_ratio}</b> ккал\n"
         f"• Факт: {int(nutrition['calories'])} ккал, {int(nutrition['meals'])} прием.\n\n"
         f"✅ <b>Привычки</b>\n"
         f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
         f"💰 <b>Финансы</b>\n"
-        f"• Общий баланс (карта+наличные): <b>{_fmt_money(wallet_total)} {currency}</b>\n"
-        f"• Доход: +{_fmt_money(finance['income'])} {currency}\n"
-        f"• Расход: -{_fmt_money(finance['expense'])} {currency}\n"
-        f"• Баланс дня: {_fmt_money(balance_today)} {currency}"
+        f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>"
     )
 
 
@@ -407,23 +402,11 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         lines.insert(2, profile_line)
         lines.insert(3, "")
 
-    if not entries:
-        lines.append("Buguncha yozuv yo'q." if lang == "uz" else "Пока нет записей за сегодня.")
-    else:
-        lines.append("So'nggi qabullar:" if lang == "uz" else "Последние приемы:")
-        for entry in entries[:6]:
-            meal = _h(str(entry.get("meal_desc") or ("Taom" if lang == "uz" else "Блюдо")).strip())
-            calories = entry.get("calories")
-            kcal_text = f"{int(float(calories))} kkal" if (lang == "uz" and calories is not None) else (
-                f"{int(float(calories))} ккал" if calories is not None else ("kkalsiz" if lang == "uz" else "без ккал")
-            )
-            lines.append(f'- {meal[:40]} ({kcal_text})')
-
     lines.append("")
     lines.append(
-        "Yozuv tafsilotini quyidagi tugmalar orqali oching."
+        "Qabullar ro'yxatini \"Qabullar\" tugmasi orqali oching."
         if lang == "uz"
-        else "Открой запись ниже для детального разбора."
+        else "Открой список через кнопку «Приемы» и выбери период: день, неделя или месяц."
     )
     return "\n".join(lines), entries
 
@@ -702,7 +685,6 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
 def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
-    totals = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
     settings_fin = db.get_finance_settings(telegram_id)
     balances_live = _finance_account_balances(telegram_id)
@@ -713,16 +695,12 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         "debt": float(settings_fin.get("debt_base") or 0.0) + float(balances_live["debt"]),
     }
     monthly_credit = float(settings_fin.get("monthly_credit_payment") or 0.0)
-
-    today_balance = float(totals["income"]) - float(totals["expense"])
+    wallet_total = float(balances["card"]) + float(balances["cash"])
     if lang == "uz":
         lines = [
             "💰 <b>Moliya / Professional nazorat</b>",
             "",
-            "<b>Kunlik pul oqimi</b>",
-            f"• Kirim: <b>+{_fmt_money(totals['income'])} {currency}</b>",
-            f"• Chiqim: <b>-{_fmt_money(totals['expense'])} {currency}</b>",
-            f"• Balans: <b>{_fmt_money(today_balance)} {currency}</b>",
+            f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Joriy hisoblar</b>",
             f"• Karta: <b>{_fmt_money(balances['card'])} {currency}</b>",
@@ -739,10 +717,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         lines = [
             "💰 <b>Финансы / Профессиональный контроль</b>",
             "",
-            "<b>Денежный поток за сегодня</b>",
-            f"• Доход: <b>+{_fmt_money(totals['income'])} {currency}</b>",
-            f"• Расход: <b>-{_fmt_money(totals['expense'])} {currency}</b>",
-            f"• Баланс дня: <b>{_fmt_money(today_balance)} {currency}</b>",
+            f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Текущие счета</b>",
             f"• Карта: <b>{_fmt_money(balances['card'])} {currency}</b>",
@@ -756,30 +731,150 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             "",
         ]
 
-    if not entries:
-        lines.append("Buguncha operatsiya yo'q." if lang == "uz" else "Операций за сегодня пока нет.")
+    lines.append("")
+    lines.append(
+        "Operatsiyalarni \"Operatsiyalar\" tugmasi orqali oching va davrni tanlang: kun/hafta/oy."
+        if lang == "uz"
+        else "Открой операции через кнопку «Операции» и выбери период: день, неделя или месяц."
+    )
+    return "\n".join(lines), entries
+
+
+def _normalize_period(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"day", "week", "month"}:
+        return value
+    return "day"
+
+
+def _period_days(period: str) -> int:
+    if period == "month":
+        return 30
+    if period == "week":
+        return 7
+    return 1
+
+
+def _period_label(period: str, lang: str = "ru") -> str:
+    labels_ru = {"day": "День", "week": "Неделя", "month": "Месяц"}
+    labels_uz = {"day": "Kun", "week": "Hafta", "month": "Oy"}
+    labels = labels_uz if lang == "uz" else labels_ru
+    return labels.get(period, labels["day"])
+
+
+def _iso_to_ddmmyyyy(value: str | None) -> str:
+    raw = str(value or "")[:10]
+    try:
+        return date.fromisoformat(raw).strftime("%d.%m.%Y")
+    except Exception:
+        return raw or "-"
+
+
+def build_finance_operations_panel(telegram_id: int, period: str = "day") -> tuple[str, list[dict[str, Any]]]:
+    user, tz_name, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    period = _normalize_period(period)
+
+    if period == "day":
+        entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
     else:
-        lines.append("<b>So'nggi operatsiyalar</b>" if lang == "uz" else "<b>Последние операции</b>")
-        for entry in entries[:8]:
+        entries = db.list_finance_entries(telegram_id, days=_period_days(period))
+
+    if lang == "uz":
+        lines = [
+            "📂 <b>Moliya / Operatsiyalar</b>",
+            f"<i>Davr: {_period_label(period, lang)}</i>",
+            "",
+        ]
+    else:
+        lines = [
+            "📂 <b>Финансы / Операции</b>",
+            f"<i>Период: {_period_label(period, lang)}</i>",
+            "",
+        ]
+
+    if not entries:
+        lines.append("Operatsiyalar topilmadi." if lang == "uz" else "Операции не найдены.")
+    else:
+        last_day = None
+        for entry in entries[:40]:
+            day_raw = str(entry.get("entry_date") or str(entry.get("created_at") or "")[:10])
+            day = _iso_to_ddmmyyyy(day_raw)
+            if day != last_day:
+                if last_day is not None:
+                    lines.append("")
+                lines.append(f"<b>{day}</b>")
+                last_day = day
+
             amount = float(entry.get("amount") or 0)
             category = _h(str(entry.get("category") or ("boshqa" if lang == "uz" else "прочее")).strip())
             transfer = _finance_transfer_from_note(entry.get("note"))
             if transfer:
                 from_bucket, to_bucket = transfer
                 route = _finance_transfer_label(from_bucket, to_bucket, lang)
-                lines.append(f"- ↔ <b>{_fmt_money(amount)} {currency}</b> | {category} | {route}")
+                lines.append(f"• ↔ {_fmt_money(amount)} {currency} | {category} | {route}")
             else:
                 sign = "+" if str(entry.get("entry_type")) == "income" else "-"
                 bucket = _finance_bucket_from_note(entry.get("note"))
-                lines.append(
-                    f"- {sign}<b>{_fmt_money(amount)} {currency}</b> | {category} | {_finance_bucket_label(bucket, lang)}"
-                )
+                lines.append(f"• {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket, lang)}")
 
     lines.append("")
     lines.append(
-        "Quyida operatsiyani ochib batafsil ko'ring."
+        "Operatsiya tafsilotini pastdagi ro'yxatdan oching."
         if lang == "uz"
-        else "Открой операцию ниже, чтобы посмотреть детали и при необходимости удалить."
+        else "Открой операцию из списка ниже для деталей."
+    )
+    return "\n".join(lines), entries
+
+
+def build_calorie_meals_panel(telegram_id: int, period: str = "day") -> tuple[str, list[dict[str, Any]]]:
+    user, tz_name, _ = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    period = _normalize_period(period)
+
+    if period == "day":
+        entries = db.list_today_calorie_entries(telegram_id, tz_name=tz_name)
+    else:
+        entries = db.list_calorie_logs(telegram_id, days=_period_days(period))
+
+    if lang == "uz":
+        lines = [
+            "🍽️ <b>Oziqlanish / Qabullar</b>",
+            f"<i>Davr: {_period_label(period, lang)}</i>",
+            "",
+        ]
+    else:
+        lines = [
+            "🍽️ <b>Питание / Приемы</b>",
+            f"<i>Период: {_period_label(period, lang)}</i>",
+            "",
+        ]
+
+    if not entries:
+        lines.append("Qabullar topilmadi." if lang == "uz" else "Приемы не найдены.")
+    else:
+        last_day = None
+        for entry in entries[:40]:
+            created = str(entry.get("created_at") or "")
+            day = _iso_to_ddmmyyyy(created[:10])
+            if day != last_day:
+                if last_day is not None:
+                    lines.append("")
+                lines.append(f"<b>{day}</b>")
+                last_day = day
+
+            meal = _h(str(entry.get("meal_desc") or ("Taom" if lang == "uz" else "Блюдо")).strip())
+            kcal = entry.get("calories")
+            kcal_text = f"{int(float(kcal))} kkal" if (lang == "uz" and kcal is not None) else (
+                f"{int(float(kcal))} ккал" if kcal is not None else ("kkalsiz" if lang == "uz" else "без ккал")
+            )
+            lines.append(f"• {meal[:48]} ({kcal_text})")
+
+    lines.append("")
+    lines.append(
+        "Yozuv tafsiloti uchun pastdagi ro'yxatdan tanlang."
+        if lang == "uz"
+        else "Выбери запись из списка ниже для детального разбора."
     )
     return "\n".join(lines), entries
 
@@ -1336,6 +1431,18 @@ async def cb_calorie_goals(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("calorie:meals:"))
+async def cb_calorie_meals_period(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    period = _normalize_period(callback.data.split("calorie:meals:", 1)[1])
+    text, entries = build_calorie_meals_panel(callback.from_user.id, period)
+    await state.set_state(BotStates.waiting_calorie_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, text, reply_markup=calorie_meals_keyboard(entries, period, lang))
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith('nutri:set:'))
 async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
@@ -1684,6 +1791,18 @@ async def cb_menu_finance(callback: CallbackQuery, state: FSMContext) -> None:
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
     await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("finance:ops:"))
+async def cb_finance_ops_period(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    period = _normalize_period(callback.data.split("finance:ops:", 1)[1])
+    text, entries = build_finance_operations_panel(callback.from_user.id, period)
+    await state.set_state(BotStates.waiting_finance_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, text, reply_markup=finance_operations_keyboard(entries, period, lang))
     await callback.answer()
 
 

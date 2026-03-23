@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 
@@ -34,7 +34,12 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "goal_muscle": "Масса",
         "goal_custom": "Ручной план",
         "calorie_goal": "🎯 Цель и профиль",
+        "calorie_meals": "🍽️ Приемы",
         "finance_settings": "⚙️ Настройки",
+        "finance_ops": "📂 Операции",
+        "period_day": "📅 День",
+        "period_week": "🗓️ Неделя",
+        "period_month": "📆 Месяц",
         "report_weekly": "🔔 Раз в неделю",
         "report_monthly": "🗓️ Раз в месяц",
         "report_off": "⛔ Выключить",
@@ -76,7 +81,12 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "goal_muscle": "Mushak",
         "goal_custom": "Qo'lda reja",
         "calorie_goal": "🎯 Maqsad va profil",
+        "calorie_meals": "🍽️ Qabullar",
         "finance_settings": "⚙️ Sozlamalar",
+        "finance_ops": "📂 Operatsiyalar",
+        "period_day": "📅 Kun",
+        "period_week": "🗓️ Hafta",
+        "period_month": "📆 Oy",
         "report_weekly": "🔔 Haftada bir marta",
         "report_monthly": "🗓️ Oyda bir marta",
         "report_off": "⛔ O'chirish",
@@ -152,17 +162,31 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 def calorie_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton(text=_t(lang, "calorie_goal"), callback_data="calorie:goals")])
-    for entry in entries[:6]:
+    rows.append([InlineKeyboardButton(text=_t(lang, "calorie_meals"), callback_data="calorie:meals:day")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def calorie_meals_keyboard(entries: list[dict], period: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text=_t(lang, "period_day"), callback_data="calorie:meals:day"),
+            InlineKeyboardButton(text=_t(lang, "period_week"), callback_data="calorie:meals:week"),
+            InlineKeyboardButton(text=_t(lang, "period_month"), callback_data="calorie:meals:month"),
+        ]
+    ]
+
+    for entry in entries[:12]:
         entry_id = entry.get("id")
         if entry_id is None:
             continue
         desc = str(entry.get("meal_desc") or _t(lang, "meal_default")).strip()
         kcal = entry.get("calories")
         kcal_text = f"{int(float(kcal))} ккал" if kcal is not None else _t(lang, "kcal_none")
-        title = f"{desc[:24]} • {kcal_text}"[:64]
+        title = f"{desc[:28]} • {kcal_text}"[:64]
         rows.append([InlineKeyboardButton(text=title, callback_data=f"calorie:view:{entry_id}")])
 
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="calorie:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -189,7 +213,22 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
 
 def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for entry in entries[:8]:
+    rows.append([InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text=_t(lang, "period_day"), callback_data="finance:ops:day"),
+            InlineKeyboardButton(text=_t(lang, "period_week"), callback_data="finance:ops:week"),
+            InlineKeyboardButton(text=_t(lang, "period_month"), callback_data="finance:ops:month"),
+        ]
+    ]
+
+    for entry in entries[:12]:
         entry_id = entry.get("id")
         if entry_id is None:
             continue
@@ -204,8 +243,7 @@ def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeybo
             title = f"{sign}{amount:,.0f} {category}".replace(",", " ")
         rows.append([InlineKeyboardButton(text=title[:64], callback_data=f"finance:view:{entry_id}")])
 
-    rows.append([InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
