@@ -123,9 +123,16 @@ def build_dashboard_text(telegram_id: int) -> str:
     user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
 
-    calorie = db.get_today_calorie_totals(telegram_id, tz_name=tz_name)
+    nutrition = db.get_today_nutrition_totals(telegram_id, tz_name=tz_name)
+    nutrition_profile = db.get_nutrition_profile(telegram_id)
     habits = db.list_today_habits(telegram_id, tz_name=tz_name)
     finance = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
+    finance_settings = db.get_finance_settings(telegram_id)
+    live_balances = _finance_account_balances(telegram_id)
+
+    card_balance = float(finance_settings.get("card_base") or 0.0) + float(live_balances["card"])
+    cash_balance = float(finance_settings.get("cash_base") or 0.0) + float(live_balances["cash"])
+    wallet_total = card_balance + cash_balance
 
     total_habits = len(habits)
     done_habits = len([h for h in habits if h.get("completed_today")])
@@ -133,32 +140,40 @@ def build_dashboard_text(telegram_id: int) -> str:
     today = _today_local(tz_name).isoformat()
     balance_today = float(finance["income"]) - float(finance["expense"])
 
+    target_kcal = float((nutrition_profile or {}).get("daily_calories") or 0.0)
+    left_kcal = max(0.0, target_kcal - float(nutrition["calories"]))
+    kcal_ratio = f"{int(left_kcal)}/{int(target_kcal)}" if target_kcal > 0 else "0/0"
+
     name = _h(_display_name(user))
     if lang == "uz":
         return (
             f"👋 <b>{name}</b>\n"
             f"<i>{today}</i>\n\n"
             f"🍽️ <b>Oziqlanish</b>\n"
-            f"• {int(calorie['calories'])} kkal, {int(calorie['meals'])} ta qabul.\n\n"
+            f"• Qoldiq: <b>{kcal_ratio}</b> kkal\n"
+            f"• Fakt: {int(nutrition['calories'])} kkal, {int(nutrition['meals'])} ta qabul.\n\n"
             f"✅ <b>Odatlar</b>\n"
             f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
-            f"💰 <b>Moliya (bugun)</b>\n"
+            f"💰 <b>Moliya</b>\n"
+            f"• Umumiy balans (karta+naqd): <b>{_fmt_money(wallet_total)} {currency}</b>\n"
             f"• Kirim: +{_fmt_money(finance['income'])} {currency}\n"
             f"• Chiqim: -{_fmt_money(finance['expense'])} {currency}\n"
-            f"• Balans: {_fmt_money(balance_today)} {currency}"
+            f"• Bugungi balans: {_fmt_money(balance_today)} {currency}"
         )
 
     return (
         f"👋 <b>{name}</b>\n"
         f"<i>{today}</i>\n\n"
         f"🍽️ <b>Питание</b>\n"
-        f"• {int(calorie['calories'])} ккал, {int(calorie['meals'])} прием.\n\n"
+        f"• Осталось: <b>{kcal_ratio}</b> ккал\n"
+        f"• Факт: {int(nutrition['calories'])} ккал, {int(nutrition['meals'])} прием.\n\n"
         f"✅ <b>Привычки</b>\n"
         f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
-        f"💰 <b>Финансы (сегодня)</b>\n"
+        f"💰 <b>Финансы</b>\n"
+        f"• Общий баланс (карта+наличные): <b>{_fmt_money(wallet_total)} {currency}</b>\n"
         f"• Доход: +{_fmt_money(finance['income'])} {currency}\n"
         f"• Расход: -{_fmt_money(finance['expense'])} {currency}\n"
-        f"• Баланс: {_fmt_money(balance_today)} {currency}"
+        f"• Баланс дня: {_fmt_money(balance_today)} {currency}"
     )
 
 
@@ -199,53 +214,116 @@ def goals_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
-def nutrition_preset(mode: str) -> dict[str, Any]:
-    presets = {
-        "loss": {
-            "mode": "loss",
-            "title": "Снижение веса",
-            "daily_calories": 1800,
-            "protein": 140,
-            "fat": 60,
-            "carbs": 170,
-        },
-        "maintain": {
-            "mode": "maintain",
-            "title": "Поддержание",
-            "daily_calories": 2200,
-            "protein": 130,
-            "fat": 70,
-            "carbs": 250,
-        },
-        "gain": {
-            "mode": "gain",
-            "title": "Набор веса",
-            "daily_calories": 2800,
-            "protein": 160,
-            "fat": 80,
-            "carbs": 350,
-        },
-        "muscle": {
-            "mode": "muscle",
-            "title": "Мышечная масса",
-            "daily_calories": 2500,
-            "protein": 170,
-            "fat": 70,
-            "carbs": 280,
-        },
+def _nutrition_goal_title(mode: str, lang: str = "ru") -> str:
+    labels_ru = {
+        "loss": "Снижение веса",
+        "maintain": "Поддержание",
+        "gain": "Набор веса",
+        "muscle": "Набор мышц",
+        "custom": "Свой план",
     }
-    return dict(presets.get(mode, presets["maintain"]))
+    labels_uz = {
+        "loss": "Vazn kamaytirish",
+        "maintain": "Vaznni ushlab turish",
+        "gain": "Vazn yig'ish",
+        "muscle": "Mushak yig'ish",
+        "custom": "Shaxsiy reja",
+    }
+    labels = labels_uz if lang == "uz" else labels_ru
+    return labels.get(mode, labels["maintain"])
+
+
+def _parse_nutrition_profile(text: str) -> tuple[float, float, int] | None:
+    raw = [part.strip() for part in text.split(";")]
+    if len(raw) != 3:
+        return None
+    try:
+        weight = float(raw[0].replace(",", "."))
+        height = float(raw[1].replace(",", "."))
+        age = int(float(raw[2].replace(",", ".")))
+    except Exception:
+        return None
+
+    if not (25 <= weight <= 350):
+        return None
+    if not (120 <= height <= 230):
+        return None
+    if not (12 <= age <= 90):
+        return None
+    return weight, height, age
+
+
+def _nutrition_plan_from_profile(goal: str, weight: float, height: float, age: int, lang: str) -> dict[str, Any]:
+    safe_goal = goal if goal in {"loss", "maintain", "gain", "muscle"} else "maintain"
+    bmi = weight / ((height / 100.0) ** 2) if height > 0 else 0.0
+
+    bmr_male = 10 * weight + 6.25 * height - 5 * age + 5
+    bmr_female = 10 * weight + 6.25 * height - 5 * age - 161
+    bmr = (bmr_male + bmr_female) / 2.0
+
+    if age >= 45 or bmi >= 32:
+        activity = 1.35
+    elif age <= 30 and bmi <= 24:
+        activity = 1.55
+    else:
+        activity = 1.45
+    tdee = bmr * activity
+
+    calorie_delta = {
+        "loss": -450,
+        "maintain": 0,
+        "gain": 350,
+        "muscle": 250,
+    }[safe_goal]
+    target_kcal = max(1200, int(round(tdee + calorie_delta)))
+
+    protein_mult = {
+        "loss": 2.0,
+        "maintain": 1.7,
+        "gain": 1.8,
+        "muscle": 1.9,
+    }[safe_goal]
+    fat_mult = {
+        "loss": 0.8,
+        "maintain": 0.9,
+        "gain": 1.0,
+        "muscle": 0.95,
+    }[safe_goal]
+
+    protein = int(round(weight * protein_mult))
+    fat = int(round(weight * fat_mult))
+    carbs = int(round((target_kcal - protein * 4 - fat * 9) / 4))
+    if carbs < 60:
+        carbs = 60
+
+    return {
+        "mode": safe_goal,
+        "title": _nutrition_goal_title(safe_goal, lang),
+        "daily_calories": target_kcal,
+        "protein": protein,
+        "fat": fat,
+        "carbs": carbs,
+        "weight": round(weight, 1),
+        "height": round(height, 1),
+        "age": int(age),
+        "bmi": round(bmi, 1),
+        "tdee": int(round(tdee)),
+    }
 
 
 def build_nutrition_setup_text(lang: str = "ru") -> str:
     return _tr(
         lang,
-        "🍽️ <b>Питание / Настройка цели</b>\n\n"
-        "Выбери цель, чтобы получить персональный дневной план КБЖУ.\n"
-        "<i>После выбора цель можно менять кнопкой «Цель питания».</i>",
-        "🍽️ <b>Oziqlanish / Maqsad sozlamasi</b>\n\n"
-        "Maqsadni tanlang, shunda kunlik BJU rejasi hisoblanadi.\n"
-        "<i>Maqsadni keyin ham «Oziqlanish maqsadi» orqali o'zgartirish mumkin.</i>",
+        "🍽️ <b>Питание / Настройка профиля</b>\n\n"
+        "1) Выбери цель.\n"
+        "2) Введи профиль: <b>вес;рост;возраст</b>.\n"
+        "3) Бот рассчитает персональный дневной план КБЖУ.\n\n"
+        "<i>Пример профиля: <code>82;178;27</code></i>",
+        "🍽️ <b>Oziqlanish / Profil sozlamasi</b>\n\n"
+        "1) Maqsadni tanlang.\n"
+        "2) Profilni kiriting: <b>vazn;bo'y;yosh</b>.\n"
+        "3) Bot siz uchun kunlik BJU rejani hisoblaydi.\n\n"
+        "<i>Profil misoli: <code>82;178;27</code></i>",
     )
 
 
@@ -259,19 +337,19 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     if not profile:
         lines = (
             [
-                "🍽️ <b>Oziqlanish / Treker</b>",
+                "🍽️ <b>Oziqlanish / Professional treker</b>",
                 "",
-                "Avval oziqlanish maqsadini tanlang.",
+                "Avval maqsad va profilni sozlang.",
                 "",
-                "Shundan keyin kunlik reja va qoldiq ko'rinadi.",
+                "<i>Shundan keyin kunlik kaloriya rejasi va qoldiq ko'rinadi.</i>",
             ]
             if lang == "uz"
             else [
-                "🍽️ <b>Питание / Трекер</b>",
+                "🍽️ <b>Питание / Профессиональный трекер</b>",
                 "",
-                "Сначала выбери цель питания.",
+                "Сначала настрой цель и профиль.",
                 "",
-                "После выбора цели появятся план и остаток на день.",
+                "<i>После настройки появятся персональный план и остаток на день.</i>",
             ]
         )
         return "\n".join(lines), entries
@@ -281,11 +359,21 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     target_f = float(profile.get("fat") or 0)
     target_c = float(profile.get("carbs") or 0)
 
-    left_kcal = target_kcal - totals["calories"]
-    left_p = target_p - totals["protein"]
-    left_f = target_f - totals["fat"]
-    left_c = target_c - totals["carbs"]
+    left_kcal = max(0.0, target_kcal - totals["calories"])
+    left_p = max(0.0, target_p - totals["protein"])
+    left_f = max(0.0, target_f - totals["fat"])
+    left_c = max(0.0, target_c - totals["carbs"])
     title = _h(profile.get("title") or "-")
+    profile_line = ""
+    if profile.get("weight") and profile.get("height") and profile.get("age"):
+        if lang == "uz":
+            profile_line = (
+                f"Profil: <b>{float(profile['weight']):.1f} kg / {int(float(profile['height']))} sm / {int(profile['age'])} yosh</b>"
+            )
+        else:
+            profile_line = (
+                f"Профиль: <b>{float(profile['weight']):.1f} кг / {int(float(profile['height']))} см / {int(profile['age'])} лет</b>"
+            )
 
     if lang == "uz":
         lines = [
@@ -293,11 +381,12 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"Maqsad: <b>{title}</b>",
             "",
             "<b>Kunlik metrikalar</b>",
+            f"• Qoldiq: <b>{int(left_kcal)}/{int(target_kcal)}</b> kkal",
             f"• Reja: {int(target_kcal)} kkal | O {int(target_p)} Y {int(target_f)} U {int(target_c)}",
             f"• Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
             f"• Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
             "",
-            "Taom rasmi yoki tavsifini yuboring.",
+            "<i>Taom rasmi yoki tavsifini yuboring.</i>",
             "",
         ]
     else:
@@ -306,13 +395,17 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"Цель: <b>{title}</b>",
             "",
             "<b>Дневные метрики</b>",
+            f"• Осталось: <b>{int(left_kcal)}/{int(target_kcal)}</b> ккал",
             f"• План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
             f"• Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
             f"• Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
             "",
-            "Отправь фото или описание блюда.",
+            "<i>Отправь фото или описание блюда.</i>",
             "",
         ]
+    if profile_line:
+        lines.insert(2, profile_line)
+        lines.insert(3, "")
 
     if not entries:
         lines.append("Buguncha yozuv yo'q." if lang == "uz" else "Пока нет записей за сегодня.")
@@ -1079,7 +1172,9 @@ async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
     try:
         await callback.message.edit_text(text, reply_markup=main_menu_keyboard(lang))
-    except Exception:
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return
         await callback.message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
@@ -1092,7 +1187,9 @@ async def safe_edit_message(
         return
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup)
-    except Exception:
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return
         await callback.message.answer(text, reply_markup=reply_markup)
 
 
@@ -1118,7 +1215,9 @@ async def _edit_panel_from_state(
                 reply_markup=reply_markup,
             )
             return
-        except Exception:
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
             pass
 
     sent = await message.answer(text, reply_markup=reply_markup)
@@ -1183,17 +1282,12 @@ async def cmd_menu(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command('help'))
-async def cmd_help(message: Message) -> None:
+async def cmd_help(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    lang = _lang_for_user_id(message.from_user.id)
-    text = _tr(
-        lang,
-        "Управление ботом через кнопки ниже.\nДля возврата в главное меню: /menu",
-        "Bot boshqaruvi pastdagi tugmalar orqali.\nAsosiy menyu uchun: /menu",
-    )
-    await message.answer(text, reply_markup=main_menu_keyboard(lang))
+    await send_main_menu(message, message.from_user.id)
 
 
 @router.callback_query(F.data == 'noop')
@@ -1216,8 +1310,9 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     lang = _lang_for_user_id(callback.from_user.id)
     profile = db.get_nutrition_profile(callback.from_user.id)
     if not profile:
-        await state.set_state(BotStates.waiting_calorie_input)
+        await state.set_state(BotStates.waiting_nutrition_goal)
         await _remember_panel(callback, state)
+        await state.update_data(pending_nutri_goal=None)
         await safe_edit_message(callback, build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
         await callback.answer()
         return
@@ -1225,7 +1320,7 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await state.update_data(pending_calorie=None)
+    await state.update_data(pending_calorie=None, pending_nutri_goal=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
     await callback.answer()
 
@@ -1234,8 +1329,9 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_calorie_goals(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_calorie_input)
+    await state.set_state(BotStates.waiting_nutrition_goal)
     await _remember_panel(callback, state)
+    await state.update_data(pending_nutri_goal=None)
     await safe_edit_message(callback, build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
     await callback.answer()
 
@@ -1244,7 +1340,7 @@ async def cb_calorie_goals(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
-    mode = callback.data.split("nutri:set:", 1)[1]
+    mode = callback.data.split("nutri:set:", 1)[1].strip().lower()
     if mode == "custom":
         await state.set_state(BotStates.waiting_nutrition_custom)
         await _remember_panel(callback, state)
@@ -1260,13 +1356,79 @@ async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
 
-    profile = nutrition_preset(mode)
-    db.save_nutrition_profile(callback.from_user.id, profile)
-    text, entries = build_calorie_panel(callback.from_user.id)
-    await state.set_state(BotStates.waiting_calorie_input)
+    if mode not in {"loss", "maintain", "gain", "muscle"}:
+        mode = "maintain"
+
+    goal_title = _nutrition_goal_title(mode, lang)
+    await state.set_state(BotStates.waiting_nutrition_profile)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
-    await callback.answer(_tr(lang, "Профиль сохранен", "Profil saqlandi"))
+    await state.update_data(pending_nutri_goal=mode)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            f"🎯 <b>Цель: {goal_title}</b>\n\n"
+            "Теперь введи профиль: <b>вес;рост;возраст</b>\n"
+            "Пример: <code>82;178;27</code>\n\n"
+            "<i>На основе этих данных бот рассчитает персональный план калорий и КБЖУ.</i>",
+            f"🎯 <b>Maqsad: {goal_title}</b>\n\n"
+            "Endi profilni kiriting: <b>vazn;bo'y;yosh</b>\n"
+            "Misol: <code>82;178;27</code>\n\n"
+            "<i>Shu ma'lumotlarga asosan bot sizga shaxsiy kaloriya va BJU reja hisoblaydi.</i>",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.message(BotStates.waiting_nutrition_goal, F.text)
+async def msg_nutri_goal_invalid(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    await safe_delete_message(message)
+    await _edit_panel_from_state(message, state, build_nutrition_setup_text(lang), nutrition_goal_keyboard(lang))
+
+
+@router.message(BotStates.waiting_nutrition_goal)
+async def msg_nutri_goal_invalid_non_text(message: Message) -> None:
+    await safe_delete_message(message)
+
+
+@router.message(BotStates.waiting_nutrition_profile, F.text)
+async def msg_nutri_profile(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    parsed = _parse_nutrition_profile(message.text or "")
+    if parsed is None:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "Неверный формат.\nНужно: <b>вес;рост;возраст</b>\nПример: <code>82;178;27</code>",
+                "Format noto'g'ri.\nKerak: <b>vazn;bo'y;yosh</b>\nMisol: <code>82;178;27</code>",
+            ),
+            back_to_menu_keyboard(lang),
+        )
+        return
+
+    data = await state.get_data()
+    mode = str(data.get("pending_nutri_goal") or "maintain")
+    weight, height, age = parsed
+    profile = _nutrition_plan_from_profile(mode, weight, height, age, lang)
+    db.save_nutrition_profile(message.from_user.id, profile)
+
+    await safe_delete_message(message)
+    await state.set_state(BotStates.waiting_calorie_input)
+    await state.update_data(pending_nutri_goal=None)
+    text, entries = build_calorie_panel(message.from_user.id)
+    await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
+
+
+@router.message(BotStates.waiting_nutrition_profile)
+async def msg_nutri_profile_invalid_non_text(message: Message) -> None:
+    await safe_delete_message(message)
 
 
 @router.message(BotStates.waiting_nutrition_custom, F.text)
@@ -1312,7 +1474,7 @@ async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
 
     profile = {
         "mode": "custom",
-        "title": "Свой план",
+        "title": _nutrition_goal_title("custom", lang),
         "daily_calories": calories,
         "protein": protein,
         "fat": fat,
@@ -1321,6 +1483,7 @@ async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
     db.save_nutrition_profile(message.from_user.id, profile)
     await safe_delete_message(message)
     await state.set_state(BotStates.waiting_calorie_input)
+    await state.update_data(pending_nutri_goal=None)
 
     text, entries = build_calorie_panel(message.from_user.id)
     await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
