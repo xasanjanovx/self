@@ -521,26 +521,32 @@ async def ensure_user_message(message: Message) -> None:
     user = message.from_user
     if not user:
         return
-    db.ensure_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        language=settings.default_language,
-        timezone_name=settings.app_timezone,
-        currency=settings.default_currency,
-    )
+    try:
+        db.ensure_user(
+            telegram_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            language=settings.default_language,
+            timezone_name=settings.app_timezone,
+            currency=settings.default_currency,
+        )
+    except Exception:
+        logger.exception('ensure_user_message failed')
 
 
 async def ensure_user_callback(callback: CallbackQuery) -> None:
     user = callback.from_user
-    db.ensure_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        language=settings.default_language,
-        timezone_name=settings.app_timezone,
-        currency=settings.default_currency,
-    )
+    try:
+        db.ensure_user(
+            telegram_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            language=settings.default_language,
+            timezone_name=settings.app_timezone,
+            currency=settings.default_currency,
+        )
+    except Exception:
+        logger.exception('ensure_user_callback failed')
 
 
 async def safe_delete_message(message: Message | None) -> None:
@@ -553,14 +559,23 @@ async def safe_delete_message(message: Message | None) -> None:
 
 
 async def send_main_menu(message: Message, telegram_id: int) -> None:
-    await message.answer(build_dashboard_text(telegram_id), reply_markup=main_menu_keyboard())
+    try:
+        text = build_dashboard_text(telegram_id)
+    except Exception:
+        logger.exception('build_dashboard_text failed in send_main_menu')
+        text = 'Бот запущен. Нажми /menu для главного меню.'
+    await message.answer(text, reply_markup=main_menu_keyboard())
 
 
 async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
     if callback.message is None:
         return
 
-    text = build_dashboard_text(telegram_id)
+    try:
+        text = build_dashboard_text(telegram_id)
+    except Exception:
+        logger.exception('build_dashboard_text failed in edit_main_menu')
+        text = 'Бот запущен. Нажми /menu для главного меню.'
     try:
         await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
     except Exception:
@@ -1447,6 +1462,11 @@ async def msg_ai_question(message: Message, state: FSMContext) -> None:
 @router.message()
 async def fallback_message(message: Message) -> None:
     await ensure_user_message(message)
+    text = (message.text or '').strip().lower()
+    if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
+        await safe_delete_message(message)
+        await send_main_menu(message, message.from_user.id)
+        return
     await safe_delete_message(message)
 
 
