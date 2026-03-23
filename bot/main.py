@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import html
 import io
 import logging
 import re
@@ -11,11 +12,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -36,11 +38,13 @@ from .keyboards import (
     finance_detail_keyboard,
     finance_panel_keyboard,
     habits_keyboard,
+    language_keyboard,
     main_menu_keyboard,
     nutrition_goal_keyboard,
-    reminders_keyboard,
+    report_settings_keyboard,
+    trainer_keyboard,
 )
-from .reports import build_weekly_summary, export_weekly_csv, export_weekly_pdf
+from .reports import build_weekly_summary
 from .states import BotStates
 
 settings = load_settings()
@@ -48,8 +52,6 @@ db = Database(settings)
 ai_service = AIService(settings)
 router = Router()
 logger = logging.getLogger(__name__)
-TMP_DIR = Path('.tmp')
-TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 background_tasks: list[asyncio.Task[Any]] = []
 
@@ -90,56 +92,109 @@ def _today_local(timezone_name: str) -> date:
     return datetime.now(_zone(timezone_name)).date()
 
 
+def _lang_from_user(user: dict[str, Any] | None) -> str:
+    lang = str((user or {}).get("language") or settings.default_language).strip().lower()
+    return "uz" if lang == "uz" else "ru"
+
+
+def _tr(lang: str, ru: str, uz: str) -> str:
+    return uz if lang == "uz" else ru
+
+
+def _h(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
+
+
+def _display_name(user: dict[str, Any]) -> str:
+    first = str(user.get("first_name") or "").strip()
+    username = str(user.get("username") or "").strip()
+    if username:
+        return f"@{username}"
+    if first:
+        return first
+    return "User"
+
+
+def _lang_for_user_id(telegram_id: int) -> str:
+    return _lang_from_user(db.get_user(telegram_id) or {})
+
+
 def build_dashboard_text(telegram_id: int) -> str:
-    _, tz_name, currency = _user_profile(telegram_id)
+    user, tz_name, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
 
     calorie = db.get_today_calorie_totals(telegram_id, tz_name=tz_name)
     habits = db.list_today_habits(telegram_id, tz_name=tz_name)
     finance = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
-    checkin_done = db.has_checkin_today(telegram_id, tz_name=tz_name)
-    streak = db.get_checkin_streak(telegram_id, tz_name=tz_name)
 
     total_habits = len(habits)
-    done_habits = len([h for h in habits if h.get('completed_today')])
+    done_habits = len([h for h in habits if h.get("completed_today")])
     left_habits = max(0, total_habits - done_habits)
     today = _today_local(tz_name).isoformat()
-
     balance_today = float(finance["income"]) - float(finance["expense"])
+
+    name = _h(_display_name(user))
+    if lang == "uz":
+        return (
+            f"👋 <b>{name}</b>\n"
+            f"<i>{today}</i>\n\n"
+            f"🍽️ <b>Oziqlanish</b>\n"
+            f"• {int(calorie['calories'])} kkal, {int(calorie['meals'])} ta qabul.\n\n"
+            f"✅ <b>Odatlar</b>\n"
+            f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
+            f"💰 <b>Moliya (bugun)</b>\n"
+            f"• Kirim: +{_fmt_money(finance['income'])} {currency}\n"
+            f"• Chiqim: -{_fmt_money(finance['expense'])} {currency}\n"
+            f"• Balans: {_fmt_money(balance_today)} {currency}"
+        )
+
     return (
-        "FLOWUZ / Dashboard\n"
-        f"{today}\n\n"
-        "Питание\n"
+        f"👋 <b>{name}</b>\n"
+        f"<i>{today}</i>\n\n"
+        f"🍽️ <b>Питание</b>\n"
         f"• {int(calorie['calories'])} ккал, {int(calorie['meals'])} прием.\n\n"
-        "Привычки\n"
-        f"• {done_habits}/{total_habits} выполнено, в работе {left_habits}\n\n"
-        "Финансы (сегодня)\n"
+        f"✅ <b>Привычки</b>\n"
+        f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
+        f"💰 <b>Финансы (сегодня)</b>\n"
         f"• Доход: +{_fmt_money(finance['income'])} {currency}\n"
         f"• Расход: -{_fmt_money(finance['expense'])} {currency}\n"
-        f"• Баланс: {_fmt_money(balance_today)} {currency}\n\n"
-        "Чекин\n"
-        f"• {'выполнен' if checkin_done else 'ожидается'} · серия {streak} дн."
+        f"• Баланс: {_fmt_money(balance_today)} {currency}"
     )
 
 
-def format_calorie_estimate(estimate: CalorieEstimate) -> str:
+def format_calorie_estimate(estimate: CalorieEstimate, lang: str = "ru") -> str:
     confidence = f"{round((estimate.confidence or 0.0) * 100)}%"
+    meal = _h(estimate.meal_desc or "-")
+    if lang == "uz":
+        return (
+            "🍽️ <b>Oziqlanish / Tekshiruv</b>\n\n"
+            f"Taom: <b>{meal}</b>\n"
+            f"Kkal: <b>{estimate.calories if estimate.calories is not None else '-'}</b>\n"
+            f"Oqsil: {estimate.protein if estimate.protein is not None else '-'}\n"
+            f"Yog': {estimate.fat if estimate.fat is not None else '-'}\n"
+            f"Uglevod: {estimate.carbs if estimate.carbs is not None else '-'}\n"
+            f"AI ishonchliligi: <i>{confidence}</i>\n\n"
+            "Kunlik jurnalga saqlaymizmi?"
+        )
     return (
-        'Питание / Проверка записи\n\n'
-        f'Блюдо: {estimate.meal_desc}\n'
-        f'Ккал: {estimate.calories if estimate.calories is not None else "-"}\n'
-        f'Белки: {estimate.protein if estimate.protein is not None else "-"}\n'
-        f'Жиры: {estimate.fat if estimate.fat is not None else "-"}\n'
-        f'Углеводы: {estimate.carbs if estimate.carbs is not None else "-"}\n'
-        f'Уверенность AI: {confidence}\n\n'
-        'Сохранить запись в дневник?'
+        "🍽️ <b>Питание / Проверка записи</b>\n\n"
+        f"Блюдо: <b>{meal}</b>\n"
+        f"Ккал: <b>{estimate.calories if estimate.calories is not None else '-'}</b>\n"
+        f"Белки: {estimate.protein if estimate.protein is not None else '-'}\n"
+        f"Жиры: {estimate.fat if estimate.fat is not None else '-'}\n"
+        f"Углеводы: {estimate.carbs if estimate.carbs is not None else '-'}\n"
+        f"Уверенность AI: <i>{confidence}</i>\n\n"
+        "Сохранить запись в дневник?"
     )
 
 
-def goals_keyboard() -> InlineKeyboardMarkup:
+def goals_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    add_text = "➕ Qo'shish" if lang == "uz" else "➕ Добавить цель"
+    back_text = "⬅️ Ortga" if lang == "uz" else "⬅️ Назад"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text='➕ Добавить цель', callback_data='goal:add')],
-            [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu:open')],
+            [InlineKeyboardButton(text=add_text, callback_data="goal:add")],
+            [InlineKeyboardButton(text=back_text, callback_data="menu:open")],
         ]
     )
 
@@ -182,27 +237,39 @@ def nutrition_preset(mode: str) -> dict[str, Any]:
     return dict(presets.get(mode, presets["maintain"]))
 
 
-def build_nutrition_setup_text() -> str:
-    return (
-        "Питание / Профиль\n\n"
-        "Выбери цель, и бот рассчитает дневные нормы КБЖУ и остаток на сегодня."
+def build_nutrition_setup_text(lang: str = "ru") -> str:
+    return _tr(
+        lang,
+        "🍽️ <b>Питание / Профиль</b>\n\nВыбери цель, и бот рассчитает дневные нормы КБЖУ и остаток на сегодня.",
+        "🍽️ <b>Oziqlanish / Profil</b>\n\nMaqsadni tanlang, bot kunlik kkal/BJU me'yorini hisoblaydi.",
     )
 
 
 def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
-    _, tz_name, _ = _user_profile(telegram_id)
+    user, tz_name, _ = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
     profile = db.get_nutrition_profile(telegram_id)
     totals = db.get_today_nutrition_totals(telegram_id, tz_name=tz_name)
     entries = db.list_today_calorie_entries(telegram_id, tz_name=tz_name)
 
     if not profile:
-        lines = [
-            "Питание / Трекер",
-            "",
-            "Сначала выбери цель питания.",
-            "",
-            "После выбора цели появятся план и остаток на день.",
-        ]
+        lines = (
+            [
+                "🍽️ <b>Oziqlanish / Treker</b>",
+                "",
+                "Avval oziqlanish maqsadini tanlang.",
+                "",
+                "Shundan keyin kunlik reja va qoldiq ko'rinadi.",
+            ]
+            if lang == "uz"
+            else [
+                "🍽️ <b>Питание / Трекер</b>",
+                "",
+                "Сначала выбери цель питания.",
+                "",
+                "После выбора цели появятся план и остаток на день.",
+            ]
+        )
         return "\n".join(lines), entries
 
     target_kcal = float(profile.get("daily_calories") or 0)
@@ -214,32 +281,48 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     left_p = target_p - totals["protein"]
     left_f = target_f - totals["fat"]
     left_c = target_c - totals["carbs"]
+    title = _h(profile.get("title") or "-")
 
-    lines = [
-        "Питание / Трекер",
-        f"Цель: {profile.get('title') or '-'}",
-        "",
-        f"План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
-        f"Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
-        f"Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
-        "",
-        "Ввод: отправь фото или текст блюда.",
-        "",
-    ]
+    if lang == "uz":
+        lines = [
+            "🍽️ <b>Oziqlanish / Treker</b>",
+            f"Maqsad: <b>{title}</b>",
+            "",
+            f"Reja: {int(target_kcal)} kkal | O {int(target_p)} Y {int(target_f)} U {int(target_c)}",
+            f"Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
+            f"Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
+            "",
+            "Taom rasmi yoki matn yuboring.",
+            "",
+        ]
+    else:
+        lines = [
+            "🍽️ <b>Питание / Трекер</b>",
+            f"Цель: <b>{title}</b>",
+            "",
+            f"План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
+            f"Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
+            f"Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
+            "",
+            "Отправь фото или текст блюда.",
+            "",
+        ]
 
     if not entries:
-        lines.append('Пока нет записей за сегодня.')
+        lines.append("Buguncha yozuv yo'q." if lang == "uz" else "Пока нет записей за сегодня.")
     else:
-        lines.append('Последние приемы:')
+        lines.append("So'nggi qabullar:" if lang == "uz" else "Последние приемы:")
         for entry in entries[:6]:
-            meal = str(entry.get('meal_desc') or 'Блюдо').strip()
-            calories = entry.get('calories')
-            kcal_text = f"{int(float(calories))} ккал" if calories is not None else 'без ккал'
+            meal = _h(str(entry.get("meal_desc") or ("Taom" if lang == "uz" else "Блюдо")).strip())
+            calories = entry.get("calories")
+            kcal_text = f"{int(float(calories))} kkal" if (lang == "uz" and calories is not None) else (
+                f"{int(float(calories))} ккал" if calories is not None else ("kkalsiz" if lang == "uz" else "без ккал")
+            )
             lines.append(f'- {meal[:40]} ({kcal_text})')
 
-    lines.append('')
-    lines.append('Открой запись ниже для деталей.')
-    return '\n'.join(lines), entries
+    lines.append("")
+    lines.append("Quyida yozuvni ochib, batafsil ko'ring." if lang == "uz" else "Открой запись ниже для деталей.")
+    return "\n".join(lines), entries
 
 
 def _finance_bucket_from_note(note: str | None) -> str:
@@ -315,83 +398,123 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
 
 
 def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
-    _, tz_name, currency = _user_profile(telegram_id)
+    user, tz_name, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
     totals = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
     balances = _finance_account_balances(telegram_id)
 
     today_balance = float(totals["income"]) - float(totals["expense"])
-    lines = [
-        "Финансы / Контроль",
-        "",
-        f"Сегодня: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / { _fmt_money(today_balance) } {currency}",
-        f"Карта: {_fmt_money(balances['card'])} {currency} | Наличные: {_fmt_money(balances['cash'])} {currency}",
-        f"Дал в долг: {_fmt_money(balances['lent'])} {currency} | Мои долги: {_fmt_money(balances['debt'])} {currency}",
-        "",
-        "Ввод: текст или голос.",
-        "Пример: расход 25000 еда карта",
-        "",
-    ]
+    if lang == "uz":
+        lines = [
+            "💰 <b>Moliya / Nazorat</b>",
+            "",
+            f"Bugun: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
+            f"Karta: {_fmt_money(balances['card'])} {currency} | Naqd: {_fmt_money(balances['cash'])} {currency}",
+            f"Qarzga berilgan: {_fmt_money(balances['lent'])} {currency} | Mening qarzim: {_fmt_money(balances['debt'])} {currency}",
+            "",
+            "Matn yoki ovoz yuboring.",
+            "Masalan: расход 25000 еда карта",
+            "",
+        ]
+    else:
+        lines = [
+            "💰 <b>Финансы / Контроль</b>",
+            "",
+            f"Сегодня: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / {_fmt_money(today_balance)} {currency}",
+            f"Карта: {_fmt_money(balances['card'])} {currency} | Наличные: {_fmt_money(balances['cash'])} {currency}",
+            f"Дал в долг: {_fmt_money(balances['lent'])} {currency} | Мои долги: {_fmt_money(balances['debt'])} {currency}",
+            "",
+            "Ввод: текст или голос.",
+            "Пример: расход 25000 еда карта",
+            "",
+        ]
 
     if not entries:
-        lines.append('Операций за сегодня пока нет.')
+        lines.append("Buguncha operatsiya yo'q." if lang == "uz" else "Операций за сегодня пока нет.")
     else:
-        lines.append('Последние операции:')
+        lines.append("So'nggi operatsiyalar:" if lang == "uz" else "Последние операции:")
         for entry in entries[:8]:
-            amount = float(entry.get('amount') or 0)
-            sign = '+' if str(entry.get('entry_type')) == 'income' else '-'
-            category = str(entry.get('category') or 'прочее').strip()
+            amount = float(entry.get("amount") or 0)
+            sign = "+" if str(entry.get("entry_type")) == "income" else "-"
+            category = _h(str(entry.get("category") or ("boshqa" if lang == "uz" else "прочее")).strip())
             bucket = _finance_bucket_from_note(entry.get("note"))
-            lines.append(f'- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}')
+            lines.append(f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}")
 
-    lines.append('')
-    lines.append('Открой операцию ниже для деталей.')
-    return '\n'.join(lines), entries
+    lines.append("")
+    lines.append("Quyida operatsiyani ochib batafsil ko'ring." if lang == "uz" else "Открой операцию ниже для деталей.")
+    return "\n".join(lines), entries
 
 
-def format_calorie_detail(log: dict[str, Any]) -> str:
+def format_calorie_detail(log: dict[str, Any], lang: str = "ru") -> str:
+    meal = _h(log.get("meal_desc") or "-")
+    if lang == "uz":
+        return (
+            "🍽️ <b>Taom / Tafsilot</b>\n\n"
+            f"Nomi: <b>{meal}</b>\n"
+            f"Kkal: {log.get('calories') if log.get('calories') is not None else '-'}\n"
+            f"Oqsil: {log.get('protein') if log.get('protein') is not None else '-'}\n"
+            f"Yog': {log.get('fat') if log.get('fat') is not None else '-'}\n"
+            f"Uglevod: {log.get('carbs') if log.get('carbs') is not None else '-'}\n"
+            f"AI ishonchliligi: <i>{log.get('confidence') if log.get('confidence') is not None else '-'}</i>\n"
+        )
     return (
-        "Питание / Детали блюда\n\n"
-        f"Название: {log.get('meal_desc') or '-'}\n"
+        "🍽️ <b>Питание / Детали блюда</b>\n\n"
+        f"Название: <b>{meal}</b>\n"
         f"Калории: {log.get('calories') if log.get('calories') is not None else '-'}\n"
         f"Белки: {log.get('protein') if log.get('protein') is not None else '-'}\n"
         f"Жиры: {log.get('fat') if log.get('fat') is not None else '-'}\n"
         f"Углеводы: {log.get('carbs') if log.get('carbs') is not None else '-'}\n"
-        f"Уверенность AI: {log.get('confidence') if log.get('confidence') is not None else '-'}\n"
+        f"Уверенность AI: <i>{log.get('confidence') if log.get('confidence') is not None else '-'}</i>\n"
     )
 
 
-def format_finance_detail(entry: dict[str, Any], currency: str) -> str:
+def format_finance_detail(entry: dict[str, Any], currency: str, lang: str = "ru") -> str:
     amount = float(entry.get("amount") or 0)
     entry_type = str(entry.get("entry_type") or "expense")
     sign = "+" if entry_type == "income" else "-"
     bucket = _finance_bucket_from_note(entry.get("note"))
     note_clean = _finance_note_without_bucket(entry.get("note"))
+    category = _h(entry.get("category") or "-")
+    note = _h(note_clean or "-")
+    if lang == "uz":
+        return (
+            "💰 <b>Moliya / Operatsiya tafsiloti</b>\n\n"
+            f"Turi: {'Kirim' if entry_type == 'income' else 'Chiqim'}\n"
+            f"Summa: <b>{sign}{_fmt_money(amount)} {currency}</b>\n"
+            f"Kategoriya: {category}\n"
+            f"Hisob: {_finance_bucket_label(bucket)}\n"
+            f"Izoh: {note}\n"
+        )
     return (
-        "Финансы / Детали операции\n\n"
+        "💰 <b>Финансы / Детали операции</b>\n\n"
         f"Тип: {'Доход' if entry_type == 'income' else 'Расход'}\n"
-        f"Сумма: {sign}{_fmt_money(amount)} {currency}\n"
-        f"Категория: {entry.get('category') or '-'}\n"
+        f"Сумма: <b>{sign}{_fmt_money(amount)} {currency}</b>\n"
+        f"Категория: {category}\n"
         f"Счет: {_finance_bucket_label(bucket)}\n"
-        f"Заметка: {note_clean or '-'}\n"
+        f"Заметка: {note}\n"
     )
 
 
-def format_finance_pending(items: list[dict[str, Any]], currency: str) -> str:
-    lines = ["Финансы / Проверка перед сохранением", ""]
+def format_finance_pending(items: list[dict[str, Any]], currency: str, lang: str = "ru") -> str:
+    lines = (
+        ["💰 <b>Moliya / Saqlashdan oldin tekshiruv</b>", ""]
+        if lang == "uz"
+        else ["💰 <b>Финансы / Проверка перед сохранением</b>", ""]
+    )
     for item in items:
         amount = float(item.get("amount") or 0)
         entry_type = str(item.get("type") or "expense")
         sign = "+" if entry_type == "income" else "-"
-        category = str(item.get("category") or "прочее")
+        category = _h(str(item.get("category") or ("boshqa" if lang == "uz" else "прочее")))
         bucket = _normalize_fin_bucket(item.get("bucket"))
-        note = str(item.get("note") or "").strip()
+        note = _h(str(item.get("note") or "").strip())
         note_part = f" | {note}" if note else ""
         lines.append(
             f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}{note_part}"
         )
     lines.append("")
-    lines.append("Сохранить эти операции?")
+    lines.append("Ushbu operatsiyalarni saqlaymizmi?" if lang == "uz" else "Сохранить эти операции?")
     return "\n".join(lines)
 
 
@@ -483,50 +606,68 @@ def _parse_reminder_input(text: str) -> tuple[str, str, list[int]] | None:
     return reminder_time, reminder_text, days
 
 
-def _day_names(days: list[int]) -> str:
-    names = {1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб', 7: 'Вс'}
+def _day_names(days: list[int], lang: str = "ru") -> str:
+    names = (
+        {1: "Du", 2: "Se", 3: "Cho", 4: "Pa", 5: "Ju", 6: "Sha", 7: "Ya"}
+        if lang == "uz"
+        else {1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс"}
+    )
     return ', '.join(names.get(day, str(day)) for day in days)
 
 
-def _goals_text(goals: list[dict[str, Any]]) -> str:
+def _goals_text(goals: list[dict[str, Any]], lang: str = "ru") -> str:
     if not goals:
-        return 'Цели пока не добавлены.\nНажми «Добавить цель».'
+        return (
+            "🎯 <b>Maqsadlar hozircha yo'q.</b>\n«Qo'shish» tugmasini bosing."
+            if lang == "uz"
+            else "🎯 <b>Цели пока не добавлены.</b>\nНажми «Добавить цель»."
+        )
 
-    goal_labels = {'weight': 'Вес', 'budget': 'Бюджет', 'habit': 'Привычка'}
-    rows = ['Цели / Активные']
+    goal_labels = (
+        {"weight": "Vazn", "budget": "Byudjet", "habit": "Odat"}
+        if lang == "uz"
+        else {"weight": "Вес", "budget": "Бюджет", "habit": "Привычка"}
+    )
+    rows = ["🎯 <b>Maqsadlar / Faol</b>" if lang == "uz" else "🎯 <b>Цели / Активные</b>"]
     for goal in goals[:12]:
-        goal_type = str(goal.get('goal_type') or '')
-        title = str(goal.get('title') or '')
-        target = goal.get('target_value')
-        target_text = f' -> {target}' if target is not None else ''
-        label = goal_labels.get(goal_type, goal_type or 'Цель')
+        goal_type = str(goal.get("goal_type") or "")
+        title = _h(str(goal.get("title") or ""))
+        target = goal.get("target_value")
+        target_text = f" -> {target}" if target is not None else ""
+        label = goal_labels.get(goal_type, goal_type or ("Maqsad" if lang == "uz" else "Цель"))
         rows.append(f'- [{label}] {title}{target_text}')
     return '\n'.join(rows)
 
 
-def _habits_text(habits: list[dict[str, Any]]) -> str:
+def _habits_text(habits: list[dict[str, Any]], lang: str = "ru") -> str:
     if not habits:
-        return 'Привычек пока нет.\nДобавь первую, чтобы начать трекинг.'
+        return (
+            "✅ <b>Odatlar yo'q.</b>\nBoshlash uchun birinchi odatni qo'shing."
+            if lang == "uz"
+            else "✅ <b>Привычек пока нет.</b>\nДобавь первую, чтобы начать трекинг."
+        )
     done = len([h for h in habits if h.get('completed_today')])
     total = len(habits)
-    return (
-        'Привычки / Сегодня\n'
-        f'Выполнено: {done}/{total}\n'
-        'Нажми на привычку, чтобы отметить выполнение.'
-    )
+    if lang == "uz":
+        return f"✅ <b>Odatlar / Bugun</b>\nBajarildi: {done}/{total}\nBajarilganini belgilash uchun odatni bosing."
+    return f"✅ <b>Привычки / Сегодня</b>\nВыполнено: {done}/{total}\nНажми на привычку, чтобы отметить выполнение."
 
 
-def _reminders_text(reminders: list[dict[str, Any]]) -> str:
+def _reminders_text(reminders: list[dict[str, Any]], lang: str = "ru") -> str:
     if not reminders:
-        return 'Напоминаний пока нет.\nДобавь первое напоминание.'
+        return (
+            "⏰ Eslatmalar yo'q.\nBirinchi eslatmani qo'shing."
+            if lang == "uz"
+            else "⏰ Напоминаний пока нет.\nДобавь первое напоминание."
+        )
 
-    lines = ['Напоминания / Активные']
+    lines = ["⏰ <b>Eslatmalar / Faol</b>" if lang == "uz" else "⏰ <b>Напоминания / Активные</b>"]
     for rem in reminders[:10]:
-        reminder_time = str(rem.get('reminder_time') or '')[:5]
-        reminder_text = str(rem.get('reminder_text') or '').strip()
-        days = rem.get('days_of_week') or []
-        lines.append(f'- {reminder_time} [{_day_names(days)}] {reminder_text}')
-    return '\n'.join(lines)
+        reminder_time = str(rem.get("reminder_time") or "")[:5]
+        reminder_text = _h(str(rem.get("reminder_text") or "").strip())
+        days = rem.get("days_of_week") or []
+        lines.append(f"- {reminder_time} [{_day_names(days, lang)}] {reminder_text}")
+    return "\n".join(lines)
 
 
 async def ensure_user_message(message: Message) -> None:
@@ -571,27 +712,31 @@ async def safe_delete_message(message: Message | None) -> None:
 
 
 async def send_main_menu(message: Message, telegram_id: int) -> None:
+    user = db.get_user(telegram_id) or {}
+    lang = _lang_from_user(user)
     try:
         text = build_dashboard_text(telegram_id)
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
-        text = 'Бот запущен. Нажми /menu для главного меню.'
-    await message.answer(text, reply_markup=main_menu_keyboard())
+        text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
+    await message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
 async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
     if callback.message is None:
         return
+    user = db.get_user(telegram_id) or {}
+    lang = _lang_from_user(user)
 
     try:
         text = build_dashboard_text(telegram_id)
     except Exception:
         logger.exception('build_dashboard_text failed in edit_main_menu')
-        text = 'Бот запущен. Нажми /menu для главного меню.'
+        text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
     try:
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+        await callback.message.edit_text(text, reply_markup=main_menu_keyboard(lang))
     except Exception:
-        await callback.message.answer(text, reply_markup=main_menu_keyboard())
+        await callback.message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
 async def safe_edit_message(
@@ -698,7 +843,13 @@ async def cmd_help(message: Message) -> None:
     await ensure_user_message(message)
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await message.answer('Управление ботом через кнопки ниже.\nДля возврата в главное меню: /menu', reply_markup=main_menu_keyboard())
+    lang = _lang_for_user_id(message.from_user.id)
+    text = _tr(
+        lang,
+        "Управление ботом через кнопки ниже.\nДля возврата в главное меню: /menu",
+        "Bot boshqaruvi pastdagi tugmalar orqali.\nAsosiy menyu uchun: /menu",
+    )
+    await message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == 'noop')
@@ -718,11 +869,12 @@ async def cb_menu_open(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == 'calorie:panel')
 async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     profile = db.get_nutrition_profile(callback.from_user.id)
     if not profile:
         await state.set_state(BotStates.waiting_calorie_input)
         await _remember_panel(callback, state)
-        await safe_edit_message(callback, build_nutrition_setup_text(), reply_markup=nutrition_goal_keyboard())
+        await safe_edit_message(callback, build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
         await callback.answer()
         return
 
@@ -730,21 +882,26 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_calorie=None)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith('nutri:set:'))
 async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     mode = callback.data.split("nutri:set:", 1)[1]
     if mode == "custom":
         await state.set_state(BotStates.waiting_nutrition_custom)
         await _remember_panel(callback, state)
         await safe_edit_message(
             callback,
-            "Ручной план: калории;белки;жиры;углеводы\nПример: 2400;160;70;260",
-            reply_markup=back_to_menu_keyboard(),
+            _tr(
+                lang,
+                "Ручной план: калории;белки;жиры;углеводы\nПример: 2400;160;70;260",
+                "Qo'lda reja: kaloriya;oqsil;yog';uglevod\nMisol: 2400;160;70;260",
+            ),
+            reply_markup=back_to_menu_keyboard(lang),
         )
         await callback.answer()
         return
@@ -754,18 +911,24 @@ async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer("Профиль сохранен")
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, "Профиль сохранен", "Profil saqlandi"))
 
 
 @router.message(BotStates.waiting_nutrition_custom, F.text)
 async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     raw = (message.text or "").strip()
     parts = [part.strip() for part in raw.split(";")]
     if len(parts) < 4:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, "Формат: калории;белки;жиры;углеводы", back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, "Формат: калории;белки;жиры;углеводы", "Format: kaloriya;oqsil;yog';uglevod"),
+            back_to_menu_keyboard(lang),
+        )
         return
 
     try:
@@ -775,12 +938,22 @@ async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
         carbs = int(float(parts[3].replace(",", ".")))
     except Exception:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, "Не удалось распознать числа. Пример: 2400;160;70;260", back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, "Не удалось распознать числа. Пример: 2400;160;70;260", "Raqamlarni aniqlab bo'lmadi. Misol: 2400;160;70;260"),
+            back_to_menu_keyboard(lang),
+        )
         return
 
     if calories <= 0 or protein < 0 or fat < 0 or carbs < 0:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, "Проверь значения: они должны быть положительными.", back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, "Проверь значения: они должны быть положительными.", "Qiymatlar musbat bo'lishi kerak."),
+            back_to_menu_keyboard(lang),
+        )
         return
 
     profile = {
@@ -796,7 +969,7 @@ async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
     await state.set_state(BotStates.waiting_calorie_input)
 
     text, entries = build_calorie_panel(message.from_user.id)
-    await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries))
+    await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
 
 
 @router.message(BotStates.waiting_nutrition_custom)
@@ -807,6 +980,7 @@ async def msg_nutri_custom_invalid(message: Message) -> None:
 @router.message(BotStates.waiting_calorie_input, F.photo)
 async def msg_calorie_input_photo(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     try:
         image_bytes, mime_type, file_id = await _get_photo_bytes(message)
         estimate = await asyncio.to_thread(ai_service.estimate_calories_by_photo, image_bytes, mime_type)
@@ -814,8 +988,8 @@ async def msg_calorie_input_photo(message: Message, state: FSMContext) -> None:
         logger.exception('Calorie photo analyze failed')
         await safe_delete_message(message)
         text, entries = build_calorie_panel(message.from_user.id)
-        text += f'\n\nОшибка анализа фото: {exc}'
-        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries))
+        text += f"\n\n{_tr(lang, 'Ошибка анализа фото', 'Rasm tahlili xatosi')}: {_h(exc)}"
+        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
 
     await safe_delete_message(message)
@@ -832,18 +1006,19 @@ async def msg_calorie_input_photo(message: Message, state: FSMContext) -> None:
         }
     )
     await state.set_state(BotStates.waiting_calorie_confirm)
-    await _edit_panel_from_state(message, state, format_calorie_estimate(estimate), calorie_confirm_keyboard())
+    await _edit_panel_from_state(message, state, format_calorie_estimate(estimate, lang), calorie_confirm_keyboard(lang))
 
 
 @router.message(BotStates.waiting_calorie_input, F.text)
 async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     raw_text = (message.text or '').strip()
     if not raw_text:
         await safe_delete_message(message)
         text, entries = build_calorie_panel(message.from_user.id)
-        text += '\n\nНужен текст блюда или фото.'
-        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries))
+        text += "\n\n" + _tr(lang, "Нужен текст блюда или фото.", "Taom matni yoki rasmi kerak.")
+        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
 
     try:
@@ -852,8 +1027,8 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         logger.exception('Calorie text analyze failed')
         await safe_delete_message(message)
         text, entries = build_calorie_panel(message.from_user.id)
-        text += f'\n\nОшибка анализа: {exc}'
-        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries))
+        text += f"\n\n{_tr(lang, 'Ошибка анализа', 'Tahlil xatosi')}: {_h(exc)}"
+        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
 
     await safe_delete_message(message)
@@ -870,16 +1045,17 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         }
     )
     await state.set_state(BotStates.waiting_calorie_confirm)
-    await _edit_panel_from_state(message, state, format_calorie_estimate(estimate), calorie_confirm_keyboard())
+    await _edit_panel_from_state(message, state, format_calorie_estimate(estimate, lang), calorie_confirm_keyboard(lang))
 
 
 @router.message(BotStates.waiting_calorie_input)
 async def msg_calorie_input_invalid(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     await safe_delete_message(message)
     text, entries = build_calorie_panel(message.from_user.id)
-    text += '\n\nОтправь фото или текст.'
-    await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries))
+    text += "\n\n" + _tr(lang, "Отправь фото или текст.", "Rasm yoki matn yuboring.")
+    await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
 
 
 @router.message(BotStates.waiting_calorie_confirm)
@@ -890,10 +1066,11 @@ async def msg_calorie_confirm_ignore(message: Message) -> None:
 @router.callback_query(F.data == 'calorie:confirm')
 async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     data = await state.get_data()
     pending = data.get('pending_calorie')
     if not pending:
-        await callback.answer('Нет данных для сохранения', show_alert=True)
+        await callback.answer(_tr(lang, 'Нет данных для сохранения', "Saqlash uchun ma'lumot yo'q"), show_alert=True)
         return
 
     try:
@@ -910,51 +1087,54 @@ async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None
         )
     except Exception as exc:
         logger.exception('Calorie save failed')
-        await callback.answer(f'Ошибка: {exc}', show_alert=True)
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
         return
 
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_calorie=None)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Запись сохранена')
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, 'Запись сохранена', 'Yozuv saqlandi'))
 
 
 @router.callback_query(F.data == 'calorie:cancel')
 async def cb_calorie_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_calorie=None)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Действие отменено')
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, 'Действие отменено', 'Amal bekor qilindi'))
 
 
 @router.callback_query(F.data.startswith('calorie:view:'))
 async def cb_calorie_view(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     log_id = callback.data.split('calorie:view:', 1)[1]
     log = db.get_calorie_log(callback.from_user.id, log_id)
     if not log:
-        await callback.answer('Запись не найдена', show_alert=True)
+        await callback.answer(_tr(lang, 'Запись не найдена', 'Yozuv topilmadi'), show_alert=True)
         return
 
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, format_calorie_detail(log), reply_markup=calorie_detail_keyboard(log_id))
+    await safe_edit_message(callback, format_calorie_detail(log, lang), reply_markup=calorie_detail_keyboard(log_id, lang))
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith('calorie:ask_del:'))
 async def cb_calorie_ask_delete(callback: CallbackQuery) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     log_id = callback.data.split('calorie:ask_del:', 1)[1]
     await safe_edit_message(
         callback,
-        'Удалить запись о блюде?\nДействие необратимо.',
-        reply_markup=calorie_delete_confirm_keyboard(log_id),
+        _tr(lang, 'Удалить запись о блюде?\nДействие необратимо.', "Taom yozuvini o'chiraymi?\nBu amal qaytarilmaydi."),
+        reply_markup=calorie_delete_confirm_keyboard(log_id, lang),
     )
     await callback.answer()
 
@@ -962,41 +1142,44 @@ async def cb_calorie_ask_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith('calorie:del:'))
 async def cb_calorie_delete(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     log_id = callback.data.split('calorie:del:', 1)[1]
     try:
         db.delete_calorie_log(callback.from_user.id, log_id)
     except Exception as exc:
         logger.exception('Calorie delete failed')
-        await callback.answer(f'Ошибка: {exc}', show_alert=True)
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
         return
 
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Запись удалена')
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, 'Запись удалена', "Yozuv o'chirildi"))
 
 
 @router.callback_query(F.data == 'menu:finance')
 async def cb_menu_finance(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     text, entries = build_finance_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_finance_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
-    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
+    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
     await callback.answer()
 
 
 @router.message(BotStates.waiting_finance_input)
 async def msg_finance_input(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
 
     if not message.text and not message.voice and not message.audio:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += '\n\nНужен текст или голос.'
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
+        text += "\n\n" + _tr(lang, "Нужен текст или голос.", "Matn yoki ovoz kerak.")
+        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
         return
 
     source = 'text_ai'
@@ -1012,8 +1195,8 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             logger.exception('Voice transcribe failed')
             await safe_delete_message(message)
             text, entries = build_finance_panel(message.from_user.id)
-            text += f'\n\nОшибка распознавания: {exc}'
-            await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
+            text += f"\n\n{_tr(lang, 'Ошибка распознавания', 'Ovozni aniqlash xatosi')}: {_h(exc)}"
+            await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
             return
         finally:
             if temp_path and temp_path.exists():
@@ -1025,15 +1208,15 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         logger.exception('Finance parse failed')
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += f'\n\nОшибка разбора: {exc}'
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
+        text += f"\n\n{_tr(lang, 'Ошибка разбора', 'Tahlil xatosi')}: {_h(exc)}"
+        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
         return
 
     if not items:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += '\n\nНе удалось распознать операции.'
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
+        text += "\n\n" + _tr(lang, "Не удалось распознать операции.", "Operatsiyalarni aniqlab bo'lmadi.")
+        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
         return
 
     prepared: list[dict[str, Any]] = []
@@ -1061,16 +1244,16 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
     if not prepared:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += '\n\nНе найдены корректные суммы.'
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
+        text += "\n\n" + _tr(lang, "Не найдены корректные суммы.", "To'g'ri summalar topilmadi.")
+        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
         return
 
     await safe_delete_message(message)
     await state.set_state(BotStates.waiting_finance_confirm)
     await state.update_data(pending_finance_items=prepared, pending_finance_source=source)
     _, _, currency = _user_profile(message.from_user.id)
-    confirm_text = format_finance_pending(prepared, currency)
-    await _edit_panel_from_state(message, state, confirm_text, finance_add_confirm_keyboard())
+    confirm_text = format_finance_pending(prepared, currency, lang)
+    await _edit_panel_from_state(message, state, confirm_text, finance_add_confirm_keyboard(lang))
 
 
 @router.message(BotStates.waiting_finance_confirm)
@@ -1081,11 +1264,12 @@ async def msg_finance_confirm_ignore(message: Message) -> None:
 @router.callback_query(F.data == "finance:add_confirm")
 async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     data = await state.get_data()
     items = data.get("pending_finance_items") or []
     source = str(data.get("pending_finance_source") or "text_ai")
     if not items:
-        await callback.answer("Нет данных для сохранения", show_alert=True)
+        await callback.answer(_tr(lang, "Нет данных для сохранения", "Saqlash uchun ma'lumot yo'q"), show_alert=True)
         return
 
     for item in items:
@@ -1103,45 +1287,52 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
     await state.set_state(BotStates.waiting_finance_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
-    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer("Операции сохранены")
+    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, "Операции сохранены", "Operatsiyalar saqlandi"))
 
 
 @router.callback_query(F.data == "finance:add_cancel")
 async def cb_finance_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     text, entries = build_finance_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_finance_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
-    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer("Действие отменено")
+    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, "Действие отменено", "Amal bekor qilindi"))
 
 
 @router.callback_query(F.data.startswith('finance:view:'))
 async def cb_finance_view(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     entry_id = callback.data.split('finance:view:', 1)[1]
     entry = db.get_finance_entry(callback.from_user.id, entry_id)
     if not entry:
-        await callback.answer("Операция не найдена", show_alert=True)
+        await callback.answer(_tr(lang, "Операция не найдена", "Operatsiya topilmadi"), show_alert=True)
         return
 
     _, _, currency = _user_profile(callback.from_user.id)
     await state.set_state(BotStates.waiting_finance_input)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, format_finance_detail(entry, currency), reply_markup=finance_detail_keyboard(entry_id))
+    await safe_edit_message(
+        callback,
+        format_finance_detail(entry, currency, lang),
+        reply_markup=finance_detail_keyboard(entry_id, lang),
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith('finance:ask_del:'))
 async def cb_finance_ask_delete(callback: CallbackQuery) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     entry_id = callback.data.split('finance:ask_del:', 1)[1]
     await safe_edit_message(
         callback,
-        "Удалить эту операцию?\nДействие необратимо.",
-        reply_markup=finance_delete_confirm_keyboard(entry_id),
+        _tr(lang, "Удалить эту операцию?\nДействие необратимо.", "Bu operatsiyani o'chiraymi?\nBu amal qaytarilmaydi."),
+        reply_markup=finance_delete_confirm_keyboard(entry_id, lang),
     )
     await callback.answer()
 
@@ -1149,48 +1340,61 @@ async def cb_finance_ask_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith('finance:del:'))
 async def cb_finance_delete(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     entry_id = callback.data.split('finance:del:', 1)[1]
     try:
         db.delete_finance_entry(callback.from_user.id, entry_id)
     except Exception as exc:
         logger.exception('Finance delete failed')
-        await callback.answer(f'Ошибка: {exc}', show_alert=True)
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
         return
 
     text, entries = build_finance_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_finance_input)
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
-    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer('Операция удалена')
+    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, 'Операция удалена', "Operatsiya o'chirildi"))
 
 
 @router.callback_query(F.data == 'menu:habits')
 async def cb_menu_habits(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     await state.clear()
     _, tz_name, _ = _user_profile(callback.from_user.id)
     habits = db.list_today_habits(callback.from_user.id, tz_name=tz_name)
-    await safe_edit_message(callback, _habits_text(habits), reply_markup=habits_keyboard(habits))
+    await safe_edit_message(callback, _habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
     await callback.answer()
 
 
 @router.callback_query(F.data == 'habit:add')
 async def cb_habit_add(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     await state.set_state(BotStates.waiting_habit_name)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Введи название привычки.', reply_markup=back_to_menu_keyboard())
+    await safe_edit_message(
+        callback,
+        _tr(lang, 'Введи название привычки.', "Odat nomini kiriting."),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
     await callback.answer()
 
 
 @router.message(BotStates.waiting_habit_name, F.text)
 async def msg_habit_add(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     name = (message.text or '').strip()
     if not name:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Название не может быть пустым.', back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, 'Название не может быть пустым.', "Nom bo'sh bo'lmasligi kerak."),
+            back_to_menu_keyboard(lang),
+        )
         return
 
     db.add_habit(message.from_user.id, name=name, target_per_week=7)
@@ -1199,91 +1403,91 @@ async def msg_habit_add(message: Message, state: FSMContext) -> None:
 
     _, tz_name, _ = _user_profile(message.from_user.id)
     habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
-    await message.answer(_habits_text(habits), reply_markup=habits_keyboard(habits))
+    await message.answer(_habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
 
 
 @router.callback_query(F.data.startswith('habit:done:'))
 async def cb_habit_done(callback: CallbackQuery) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     habit_id = callback.data.split('habit:done:', 1)[1]
     try:
         db.mark_habit_done(callback.from_user.id, habit_id=habit_id)
     except Exception as exc:
         logger.exception('Habit done failed')
-        await callback.answer(f'Ошибка: {exc}', show_alert=True)
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
         return
 
     _, tz_name, _ = _user_profile(callback.from_user.id)
     habits = db.list_today_habits(callback.from_user.id, tz_name=tz_name)
-    await safe_edit_message(callback, _habits_text(habits), reply_markup=habits_keyboard(habits))
-    await callback.answer('Отмечено')
+    await safe_edit_message(callback, _habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+    await callback.answer(_tr(lang, 'Отмечено', 'Belgilandi'))
 
 
 @router.callback_query(F.data == 'menu:checkin')
 async def cb_menu_checkin(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.set_state(BotStates.waiting_checkin)
-    await _remember_panel(callback, state)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.clear()
     await safe_edit_message(
         callback,
-        'Ежедневный чекин. Формат: 8 7 78.5 тренировка',
-        reply_markup=back_to_menu_keyboard(),
+        _tr(
+            lang,
+            "Раздел <b>Чекин</b> отключен в этой версии бота.",
+            "<b>Chekin</b> bo'limi bu versiyada o'chirilgan.",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
     )
-    await callback.answer()
+    await callback.answer(_tr(lang, "Отключено", "O'chirilgan"))
 
 
 @router.message(BotStates.waiting_checkin, F.text)
 async def msg_checkin(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    mood, energy, weight, note = _parse_checkin(message.text or '')
-
-    if mood is None and energy is None and weight is None and not note:
-        await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Формат не распознан. Пример: 8 7 78.5 тренировка', back_to_menu_keyboard())
-        return
-
-    _, tz_name, _ = _user_profile(message.from_user.id)
-    checkin_day = _today_local(tz_name)
-    db.add_daily_checkin(
-        telegram_id=message.from_user.id,
-        checkin_date=checkin_day,
-        mood=mood,
-        energy=energy,
-        weight=weight,
-        note=note,
-    )
-
     await safe_delete_message(message)
     await state.clear()
-    streak = db.get_checkin_streak(message.from_user.id, tz_name=tz_name)
-    await message.answer(f'Чекин сохранен. Серия: {streak} дн.', reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == 'menu:goals')
 async def cb_menu_goals(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     await state.clear()
     goals = db.list_goals(callback.from_user.id, only_active=True)
-    await safe_edit_message(callback, _goals_text(goals), reply_markup=goals_keyboard())
+    await safe_edit_message(callback, _goals_text(goals, lang), reply_markup=goals_keyboard(lang))
     await callback.answer()
 
 
 @router.callback_query(F.data == 'goal:add')
 async def cb_goal_add(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     await state.set_state(BotStates.waiting_goal)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Новая цель: тип;название;значение\nПример: вес;Снизить до 78;78', reply_markup=back_to_menu_keyboard())
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            'Новая цель: тип;название;значение\nПример: вес;Снизить до 78;78',
+            "Yangi maqsad: turi;nomi;qiymat\nMisol: вес;78 gacha tushish;78",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
     await callback.answer()
 
 
 @router.message(BotStates.waiting_goal, F.text)
 async def msg_goal_add(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
     parsed = _parse_goal_input(message.text or '')
     if parsed is None:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Неверный формат цели.', back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, 'Неверный формат цели.', "Maqsad formati noto'g'ri."),
+            back_to_menu_keyboard(lang),
+        )
         return
 
     goal_type, title, target_value = parsed
@@ -1292,119 +1496,309 @@ async def msg_goal_add(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     goals = db.list_goals(message.from_user.id, only_active=True)
-    await message.answer('Цель добавлена.\n' + _goals_text(goals), reply_markup=goals_keyboard())
+    await message.answer(
+        _tr(lang, "Цель добавлена.\n", "Maqsad qo'shildi.\n") + _goals_text(goals, lang),
+        reply_markup=goals_keyboard(lang),
+    )
 
 
 @router.callback_query(F.data == 'menu:reminders')
 async def cb_menu_reminders(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
     await state.clear()
-    reminders = db.list_reminders(callback.from_user.id)
-    await safe_edit_message(callback, _reminders_text(reminders), reply_markup=reminders_keyboard(reminders))
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "Раздел <b>Напоминания</b> отключен в этой версии бота.",
+            "<b>Eslatmalar</b> bo'limi bu versiyada o'chirilgan.",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
+    await callback.answer(_tr(lang, "Отключено", "O'chirilgan"))
+
+
+@router.callback_query(F.data.startswith("rem:"))
+async def cb_reminder_disabled(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
+
+
+@router.message(BotStates.waiting_reminder)
+async def msg_reminder_disabled(message: Message, state: FSMContext) -> None:
+    await safe_delete_message(message)
+    await state.clear()
+
+
+def _report_prefs_label(lang: str, enabled: bool, frequency: str) -> str:
+    if not enabled:
+        return _tr(lang, "Отключены", "O'chirilgan")
+    return _tr(lang, "Раз в неделю", "Haftada bir marta") if frequency == "weekly" else _tr(lang, "Раз в месяц", "Oyda bir marta")
+
+
+def _report_days(enabled: bool, frequency: str) -> int:
+    if not enabled:
+        return 7
+    return 30 if frequency == "monthly" else 7
+
+
+def _report_summary_for_user(telegram_id: int, *, days: int) -> str:
+    user, _, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    payload = db.get_period_payload(telegram_id, days=days)
+    summary = build_weekly_summary(payload, currency=currency)
+    title = _tr(lang, "Недельный срез" if days == 7 else "Месячный срез", "Haftalik kesim" if days == 7 else "Oylik kesim")
+    return f"<b>{title}</b>\n{_h(summary)}"
+
+
+def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
+    user = db.get_user(telegram_id) or {}
+    lang = _lang_from_user(user)
+    prefs = db.get_report_preferences(telegram_id)
+    enabled = bool(prefs.get("enabled", True))
+    frequency = str(prefs.get("frequency") or "weekly")
+    days = _report_days(enabled, frequency)
+    summary = _report_summary_for_user(telegram_id, days=days)
+    status = _report_prefs_label(lang, enabled, frequency)
+    text = (
+        f"📊 <b>{_tr(lang, 'Отчет', 'Hisobot')}</b>\n"
+        f"<i>{_tr(lang, 'Авто-уведомления', 'Avto-xabarnomalar')}: {status}</i>\n\n"
+        f"{summary}\n\n"
+        f"{_tr(lang, 'Выбери режим уведомлений ниже.', 'Quyida xabarnoma rejimini tanlang.')}"
+    )
+    return text, prefs, lang
+
+
+@router.callback_query(F.data == "menu:report")
+@router.callback_query(F.data == "menu:weekly")
+async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    text, prefs, lang = _report_panel_text(callback.from_user.id)
+    await safe_edit_message(
+        callback,
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+        ),
+    )
     await callback.answer()
 
 
-@router.callback_query(F.data == 'rem:add')
-async def cb_reminder_add(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("report:set:"))
+async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.set_state(BotStates.waiting_reminder)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    mode = callback.data.split("report:set:", 1)[1].strip().lower()
+    current = db.get_report_preferences(callback.from_user.id)
+    last_key = current.get("last_sent_key")
+
+    if mode == "off":
+        db.save_report_preferences(
+            callback.from_user.id,
+            enabled=False,
+            frequency=str(current.get("frequency") or "weekly"),
+            last_sent_key=last_key,
+        )
+    else:
+        frequency = "monthly" if mode == "monthly" else "weekly"
+        db.save_report_preferences(
+            callback.from_user.id,
+            enabled=True,
+            frequency=frequency,
+            last_sent_key=last_key,
+        )
+
+    text, prefs, _ = _report_panel_text(callback.from_user.id)
+    await safe_edit_message(
+        callback,
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+        ),
+    )
+    await callback.answer(_tr(lang, "Настройки обновлены", "Sozlamalar yangilandi"))
+
+
+@router.message(Command("weekly"))
+@router.message(Command("report"))
+async def cmd_report(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    await safe_delete_message(message)
+    await state.clear()
+    text, prefs, lang = _report_panel_text(message.from_user.id)
+    await message.answer(
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+        ),
+    )
+
+
+@router.callback_query(F.data == "menu:language")
+async def cb_menu_language(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    await safe_edit_message(
+        callback,
+        _tr(lang, "🌐 <b>Выбери язык интерфейса</b>", "🌐 <b>Interfeys tilini tanlang</b>"),
+        reply_markup=language_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("lang:set:"))
+async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    selected = callback.data.split("lang:set:", 1)[1].strip().lower()
+    selected = "uz" if selected == "uz" else "ru"
+    db.update_user_language(callback.from_user.id, selected)
+    await edit_main_menu(callback, callback.from_user.id)
+    await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
+
+
+TRAINER_GIFS = {
+    "fat": "https://upload.wikimedia.org/wikipedia/commons/a/ac/Jumpingjacks.gif",
+    "muscle": "https://upload.wikimedia.org/wikipedia/commons/8/8f/Pushups.gif",
+    "cardio": "https://upload.wikimedia.org/wikipedia/commons/a/ac/Jumpingjacks.gif",
+    "mobility": "https://upload.wikimedia.org/wikipedia/commons/8/89/Five_tibetan_rite_5.gif",
+}
+
+
+def _trainer_plan(mode: str, lang: str) -> str:
+    if mode == "muscle":
+        return _tr(
+            lang,
+            "💪 <b>План: Набор мышц</b>\n• Разминка 7 мин\n• Отжимания 4x12\n• Приседания 4x15\n• Планка 4x45 сек\n• Отдых 60-90 сек\n<i>Контроль техники важнее скорости.</i>",
+            "💪 <b>Reja: Mushak yig'ish</b>\n• 7 daqiqa isinma\n• Otjimaniya 4x12\n• O'tirib-turish 4x15\n• Planka 4x45 soniya\n• Dam 60-90 soniya\n<i>Texnika tezlikdan muhim.</i>",
+        )
+    if mode == "cardio":
+        return _tr(
+            lang,
+            "🏃 <b>План: Кардио</b>\n• Разминка 5 мин\n• Jumping Jacks 6x40 сек\n• Бег на месте 6x40 сек\n• Отдых 30 сек\n• Заминка 5 мин\n<i>Пульс держи в комфортной зоне.</i>",
+            "🏃 <b>Reja: Kardio</b>\n• 5 daqiqa isinma\n• Jumping Jacks 6x40 soniya\n• Joyda yugurish 6x40 soniya\n• Dam 30 soniya\n• 5 daqiqa sovush\n<i>Pulsni qulay zonada ushlang.</i>",
+        )
+    if mode == "mobility":
+        return _tr(
+            lang,
+            "🧘 <b>План: Мобилити</b>\n• Суставная разминка 6 мин\n• Динамическая растяжка 10 мин\n• Тибетский ритуал #5 3x8\n• Дыхание 3 мин\n<i>Без боли и рывков.</i>",
+            "🧘 <b>Reja: Mobiliti</b>\n• Bo'g'imlar isinishi 6 daqiqa\n• Dinamik stretching 10 daqiqa\n• Tibet mashqi #5 3x8\n• Nafas 3 daqiqa\n<i>Og'riqsiz, keskin harakatsiz.</i>",
+        )
+    return _tr(
+        lang,
+        "🔥 <b>План: Сжечь жир</b>\n• Разминка 6 мин\n• Приседания 4x20\n• Jumping Jacks 4x45 сек\n• Планка 4x40 сек\n• Отдых 45 сек\n<i>Держи стабильный темп.</i>",
+        "🔥 <b>Reja: Yog' yoqish</b>\n• 6 daqiqa isinma\n• O'tirib-turish 4x20\n• Jumping Jacks 4x45 soniya\n• Planka 4x40 soniya\n• Dam 45 soniya\n<i>Barqaror tempda bajaring.</i>",
+    )
+
+
+@router.callback_query(F.data == "menu:trainer")
+async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "🏋️ <b>Тренер</b>\nВыбери цель или задай вопрос персональному тренеру.",
+            "🏋️ <b>Trener</b>\nMaqsadni tanlang yoki shaxsiy trenerga savol bering.",
+        ),
+        reply_markup=trainer_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trainer:plan:"))
+async def cb_trainer_plan(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    mode = callback.data.split("trainer:plan:", 1)[1].strip().lower()
+    plan = _trainer_plan(mode, lang)
+    await safe_edit_message(callback, plan, reply_markup=trainer_keyboard(lang))
+
+    gif_url = TRAINER_GIFS.get(mode) or TRAINER_GIFS["fat"]
+    if callback.message:
+        try:
+            await callback.message.answer_animation(gif_url)
+        except Exception:
+            await callback.message.answer(
+                _tr(lang, f"GIF: {gif_url}", f"GIF: {gif_url}"),
+                reply_markup=trainer_keyboard(lang),
+            )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trainer:ask")
+async def cb_trainer_ask(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_trainer_question)
     await _remember_panel(callback, state)
     await safe_edit_message(
         callback,
-        'Новое напоминание: HH:MM;текст;дни\nПример: 09:00;Вода;1,2,3,4,5,6,7',
-        reply_markup=back_to_menu_keyboard(),
+        _tr(
+            lang,
+            "✍️ Напиши запрос тренеру.\nПример: «Составь план на 3 дня для дома без инвентаря».",
+            "✍️ Trenerga so'rov yozing.\nMisol: «Uy sharoitida 3 kunlik mashg'ulot rejasini tuzib bering».",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
     )
     await callback.answer()
 
 
-@router.message(BotStates.waiting_reminder, F.text)
-async def msg_reminder_add(message: Message, state: FSMContext) -> None:
+@router.message(BotStates.waiting_trainer_question, F.text)
+async def msg_trainer_question(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    parsed = _parse_reminder_input(message.text or '')
-    if parsed is None:
+    lang = _lang_for_user_id(message.from_user.id)
+    question = (message.text or "").strip()
+    if not question:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Неверный формат напоминания.', back_to_menu_keyboard())
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, "Вопрос пустой.", "Savol bo'sh."),
+            back_to_menu_keyboard(lang),
+        )
         return
 
-    reminder_time, reminder_text, days = parsed
-    _, tz_name, _ = _user_profile(message.from_user.id)
-    db.add_reminder(
-        telegram_id=message.from_user.id,
-        text=reminder_text,
-        reminder_time=reminder_time,
-        days_of_week=days,
-        tz_name=tz_name,
-    )
-
-    await safe_delete_message(message)
-    await state.clear()
-    reminders = db.list_reminders(message.from_user.id)
-    await message.answer('Напоминание добавлено.', reply_markup=reminders_keyboard(reminders))
-
-
-@router.callback_query(F.data.startswith('rem:del:'))
-async def cb_reminder_delete(callback: CallbackQuery) -> None:
-    await ensure_user_callback(callback)
-    reminder_id = callback.data.split('rem:del:', 1)[1]
     try:
-        db.delete_reminder(reminder_id, telegram_id=callback.from_user.id)
+        context = db.get_ai_context(message.from_user.id)
+        answer = await asyncio.to_thread(ai_service.trainer_reply, question, context, lang)
     except Exception as exc:
-        logger.exception('Reminder delete failed')
-        await callback.answer(f'Ошибка удаления: {exc}', show_alert=True)
+        logger.exception("Trainer AI failed")
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            f"{_tr(lang, 'Ошибка тренера', 'Trener xatosi')}: {_h(exc)}",
+            back_to_menu_keyboard(lang),
+        )
         return
 
-    reminders = db.list_reminders(callback.from_user.id)
-    await safe_edit_message(callback, _reminders_text(reminders), reply_markup=reminders_keyboard(reminders))
-    await callback.answer('Напоминание удалено')
-
-
-def _weekly_summary_for_user(telegram_id: int) -> str:
-    _, _, currency = _user_profile(telegram_id)
-    payload = db.get_weekly_payload(telegram_id)
-    return build_weekly_summary(payload, currency=currency)
-
-
-@router.callback_query(F.data == 'menu:weekly')
-async def cb_menu_weekly(callback: CallbackQuery, state: FSMContext) -> None:
-    await ensure_user_callback(callback)
-    await state.clear()
-    summary = _weekly_summary_for_user(callback.from_user.id)
-    await safe_edit_message(callback, summary, reply_markup=back_to_menu_keyboard())
-    await callback.answer()
-
-
-@router.message(Command('weekly'))
-async def cmd_weekly(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
     await safe_delete_message(message)
     await state.clear()
-    summary = _weekly_summary_for_user(message.from_user.id)
-    await message.answer(summary, reply_markup=back_to_menu_keyboard())
-
-
-async def _send_export_files(message: Message, telegram_id: int) -> None:
-    _, _, currency = _user_profile(telegram_id)
-    payload = db.get_weekly_payload(telegram_id)
-    summary = build_weekly_summary(payload, currency=currency)
-
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_path = TMP_DIR / f'weekly_{telegram_id}_{stamp}.csv'
-    pdf_path = TMP_DIR / f'weekly_{telegram_id}_{stamp}.pdf'
-
-    await asyncio.to_thread(export_weekly_csv, payload, csv_path)
-    await asyncio.to_thread(export_weekly_pdf, payload, summary, pdf_path, currency)
-
-    await message.answer_document(FSInputFile(str(csv_path)))
-    await message.answer_document(FSInputFile(str(pdf_path)))
+    await message.answer(answer, reply_markup=trainer_keyboard(lang))
 
 
 @router.callback_query(F.data == 'menu:export')
 async def cb_export(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    if callback.message:
-        await _send_export_files(callback.message, callback.from_user.id)
-    await callback.answer()
+    lang = _lang_for_user_id(callback.from_user.id)
+    await callback.answer(_tr(lang, "Экспорт отключен", "Eksport o'chirilgan"), show_alert=True)
 
 
 @router.message(Command('export'))
@@ -1412,63 +1806,31 @@ async def cmd_export(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     await safe_delete_message(message)
     await state.clear()
-    await _send_export_files(message, message.from_user.id)
+    lang = _lang_for_user_id(message.from_user.id)
+    await message.answer(_tr(lang, "Экспорт отключен в этой версии.", "Eksport bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == 'menu:ai')
 async def cb_menu_ai(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.set_state(BotStates.waiting_ai_question)
-    await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Задай вопрос AI-помощнику.', reply_markup=back_to_menu_keyboard())
-    await callback.answer()
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    await callback.answer(_tr(lang, "AI-помощник отключен", "AI yordamchi o'chirilgan"), show_alert=True)
 
 
 @router.message(Command('ai'))
 async def cmd_ai(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    text = message.text or ''
-    parts = text.split(maxsplit=1)
-    if len(parts) == 1:
-        await state.set_state(BotStates.waiting_ai_question)
-        await safe_delete_message(message)
-        await message.answer('Отправь вопрос отдельным сообщением.', reply_markup=back_to_menu_keyboard())
-        return
-
-    question = parts[1].strip()
-    if not question:
-        await state.set_state(BotStates.waiting_ai_question)
-        await safe_delete_message(message)
-        await message.answer('Нужен текстовый вопрос.', reply_markup=back_to_menu_keyboard())
-        return
-
     await safe_delete_message(message)
-    context = db.get_ai_context(message.from_user.id)
-    answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
-    await message.answer(answer, reply_markup=main_menu_keyboard())
+    await state.clear()
+    lang = _lang_for_user_id(message.from_user.id)
+    await message.answer(_tr(lang, "AI-помощник отключен в этой версии.", "AI yordamchi bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
 
 
 @router.message(BotStates.waiting_ai_question, F.text)
 async def msg_ai_question(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    question = (message.text or '').strip()
-    if not question:
-        await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Вопрос пустой.', back_to_menu_keyboard())
-        return
-
-    try:
-        context = db.get_ai_context(message.from_user.id)
-        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
-    except Exception as exc:
-        logger.exception('AI reply failed')
-        await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, f'Ошибка AI: {exc}', back_to_menu_keyboard())
-        return
-
     await safe_delete_message(message)
     await state.clear()
-    await message.answer(answer, reply_markup=main_menu_keyboard())
 
 
 @router.message()
@@ -1482,24 +1844,15 @@ async def fallback_message(message: Message) -> None:
     await safe_delete_message(message)
 
 
-async def reminder_worker(bot: Bot) -> None:
-    while True:
-        try:
-            now_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-            due = db.get_due_reminders(now_utc)
-            for reminder in due:
-                telegram_id = int(reminder['telegram_id'])
-                reminder_text = str(reminder.get('reminder_text') or '').strip()
-                await bot.send_message(
-                    telegram_id,
-                    f'⏰ Напоминание\n{reminder_text}',
-                    reply_markup=back_to_menu_keyboard(),
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception('Reminder worker error')
-        await asyncio.sleep(max(10, settings.reminder_check_seconds))
+def _report_due_key(local_now: datetime, frequency: str) -> str | None:
+    if frequency == "monthly":
+        if local_now.day != 1:
+            return None
+        return f"{local_now.year:04d}-{local_now.month:02d}"
+    if local_now.weekday() != 6:
+        return None
+    iso = local_now.isocalendar()
+    return f"{int(iso[0]):04d}-W{int(iso[1]):02d}"
 
 
 async def weekly_report_worker(bot: Bot) -> None:
@@ -1508,12 +1861,16 @@ async def weekly_report_worker(bot: Bot) -> None:
             now_utc = datetime.now(timezone.utc)
             users = db.list_users()
             for user in users:
-                telegram_id = int(user['telegram_id'])
-                timezone_name = str(user.get('timezone') or settings.app_timezone)
-                currency = str(user.get('currency') or settings.default_currency)
+                telegram_id = int(user["telegram_id"])
+                timezone_name = str(user.get("timezone") or settings.app_timezone)
+                currency = str(user.get("currency") or settings.default_currency)
+                lang = _lang_from_user(user)
                 local_now = now_utc.astimezone(_zone(timezone_name))
 
-                if local_now.weekday() != 6:
+                prefs = db.get_report_preferences(telegram_id)
+                enabled = bool(prefs.get("enabled", True))
+                frequency = str(prefs.get("frequency") or "weekly")
+                if not enabled:
                     continue
 
                 scheduled = (settings.weekly_report_hour, settings.weekly_report_minute)
@@ -1521,18 +1878,31 @@ async def weekly_report_worker(bot: Bot) -> None:
                 if current < scheduled:
                     continue
 
-                iso = local_now.isocalendar()
-                iso_year = int(iso[0])
-                iso_week = int(iso[1])
-                if not db.claim_weekly_report(telegram_id, iso_year, iso_week):
+                due_key = _report_due_key(local_now, frequency)
+                if due_key is None:
+                    continue
+                if str(prefs.get("last_sent_key") or "") == due_key:
                     continue
 
-                payload = db.get_weekly_payload(telegram_id, end_date=local_now.date())
+                days = 30 if frequency == "monthly" else 7
+                payload = db.get_period_payload(telegram_id, days=days, end_date=local_now.date())
                 summary = build_weekly_summary(payload, currency=currency)
+                title = _tr(
+                    lang,
+                    "📊 Месячный отчет" if frequency == "monthly" else "📊 Недельный отчет",
+                    "📊 Oylik hisobot" if frequency == "monthly" else "📊 Haftalik hisobot",
+                )
                 await bot.send_message(
                     telegram_id,
-                    f'Недельный отчет\n\n{summary}',
-                    reply_markup=back_to_menu_keyboard(),
+                    f"{title}\n\n{_h(summary)}",
+                    reply_markup=back_to_menu_keyboard(lang),
+                )
+
+                db.save_report_preferences(
+                    telegram_id,
+                    enabled=True,
+                    frequency=frequency,
+                    last_sent_key=due_key,
                 )
         except asyncio.CancelledError:
             raise
@@ -1543,7 +1913,6 @@ async def weekly_report_worker(bot: Bot) -> None:
 
 async def on_startup(bot: Bot) -> None:
     logger.info('Starting background workers...')
-    background_tasks.append(asyncio.create_task(reminder_worker(bot), name='reminder-worker'))
     background_tasks.append(asyncio.create_task(weekly_report_worker(bot), name='weekly-report-worker'))
 
 
@@ -1567,7 +1936,10 @@ async def main() -> None:
         format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
     )
 
-    bot = Bot(token=settings.telegram_bot_token)
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher()
     dp.include_router(router)
     dp.startup.register(on_startup)

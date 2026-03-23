@@ -46,13 +46,13 @@ def build_weekly_summary(payload: dict[str, Any], currency: str = "UZS") -> str:
     period = f"{payload['start_date']} - {payload['end_date']}"
 
     lines = [
-        f"Неделя: {period}",
+        f"Период: {period}",
         f"Доход: {income:,.0f} {currency}",
         f"Расход: {expense:,.0f} {currency}",
         f"Баланс: {net:,.0f} {currency}",
-        f"Отметок дня: {len(checkins)}",
+        f"Дневных отметок: {len(checkins)}",
         f"Привычек: {total_habits}, выполнений: {completed_logs}",
-        f"Фото-приемов пищи: {len(calorie_logs)}",
+        f"Приемов пищи в дневнике: {len(calorie_logs)}",
     ]
 
     if avg_mood is not None:

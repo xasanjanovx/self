@@ -16,6 +16,8 @@ class Database:
         self.client: Client = create_client(settings.supabase_url, settings.supabase_service_role_key)
         self.default_timezone = settings.app_timezone
         self.table_prefix = settings.db_table_prefix
+        self._nutri_prefix = "NUTRI_V1:"
+        self._report_pref_prefix = "REPORT_PREF_V1:"
 
     def _table(self, name: str) -> str:
         return f"{self.table_prefix}{name}"
@@ -58,14 +60,28 @@ class Database:
         )
         return data[0] if data else None
 
+    def update_user_language(self, telegram_id: int, language: str) -> None:
+        lang = (language or "ru").strip().lower()
+        if lang not in {"ru", "uz"}:
+            lang = "ru"
+        self.client.table(self._table("users")).update({"language": lang}).eq("telegram_id", telegram_id).execute()
+
+    def _is_internal_goal_title(self, title: str) -> bool:
+        return title.startswith(self._nutri_prefix) or title.startswith(self._report_pref_prefix)
+
+    def _list_goal_rows(self, telegram_id: int, only_active: bool = True) -> list[dict[str, Any]]:
+        query = self.client.table(self._table("goals")).select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
+        if only_active:
+            query = query.eq("active", True)
+        return query.execute().data or []
+
     def get_nutrition_profile(self, telegram_id: int) -> dict[str, Any] | None:
-        goals = self.list_goals(telegram_id, only_active=False)
-        prefix = "NUTRI_V1:"
+        goals = self._list_goal_rows(telegram_id, only_active=False)
         for goal in goals:
             title = str(goal.get("title") or "")
-            if goal.get("goal_type") != "weight" or not title.startswith(prefix):
+            if goal.get("goal_type") != "weight" or not title.startswith(self._nutri_prefix):
                 continue
-            raw = title[len(prefix) :]
+            raw = title[len(self._nutri_prefix) :]
             try:
                 payload = json.loads(raw)
             except Exception:
@@ -79,7 +95,7 @@ class Database:
         existing = self.get_nutrition_profile(telegram_id)
         payload = dict(profile)
         payload["daily_calories"] = int(payload.get("daily_calories") or 0)
-        title = "NUTRI_V1:" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        title = self._nutri_prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
         if existing and existing.get("goal_id"):
             self.client.table(self._table("goals")).update(
@@ -113,10 +129,77 @@ class Database:
         ).execute()
 
     def list_goals(self, telegram_id: int, only_active: bool = True) -> list[dict[str, Any]]:
-        query = self.client.table(self._table("goals")).select("*").eq("telegram_id", telegram_id).order("created_at", desc=False)
-        if only_active:
-            query = query.eq("active", True)
-        return query.execute().data or []
+        rows = self._list_goal_rows(telegram_id, only_active=only_active)
+        return [row for row in rows if not self._is_internal_goal_title(str(row.get("title") or ""))]
+
+    def get_report_preferences(self, telegram_id: int) -> dict[str, Any]:
+        rows = self._list_goal_rows(telegram_id, only_active=False)
+        for row in rows:
+            title = str(row.get("title") or "")
+            if not title.startswith(self._report_pref_prefix):
+                continue
+            raw = title[len(self._report_pref_prefix) :]
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            frequency = str(payload.get("frequency") or "weekly").strip().lower()
+            if frequency not in {"weekly", "monthly"}:
+                frequency = "weekly"
+            enabled = bool(payload.get("enabled", True))
+            last_sent_key = str(payload.get("last_sent_key") or "").strip() or None
+            return {
+                "goal_id": row.get("id"),
+                "enabled": enabled,
+                "frequency": frequency,
+                "last_sent_key": last_sent_key,
+            }
+        return {
+            "goal_id": None,
+            "enabled": True,
+            "frequency": "weekly",
+            "last_sent_key": None,
+        }
+
+    def save_report_preferences(
+        self,
+        telegram_id: int,
+        *,
+        enabled: bool,
+        frequency: str,
+        last_sent_key: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_report_preferences(telegram_id)
+        freq = str(frequency or "weekly").strip().lower()
+        if freq not in {"weekly", "monthly"}:
+            freq = "weekly"
+        payload = {
+            "enabled": bool(enabled),
+            "frequency": freq,
+            "last_sent_key": (last_sent_key or None),
+        }
+        title = self._report_pref_prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+        if current.get("goal_id"):
+            self.client.table(self._table("goals")).update(
+                {
+                    "goal_type": "budget",
+                    "title": title,
+                    "target_value": None,
+                    "active": True,
+                }
+            ).eq("telegram_id", telegram_id).eq("id", current["goal_id"]).execute()
+        else:
+            self.client.table(self._table("goals")).insert(
+                {
+                    "telegram_id": telegram_id,
+                    "goal_type": "budget",
+                    "title": title,
+                    "target_value": None,
+                    "active": True,
+                }
+            ).execute()
+        return payload
 
     def add_habit(self, telegram_id: int, name: str, target_per_week: int = 7) -> None:
         self.client.table(self._table("habits")).insert(
@@ -560,12 +643,19 @@ class Database:
         return True
 
     def list_users(self) -> list[dict[str, Any]]:
-        return self.client.table(self._table("users")).select("telegram_id,timezone,currency").execute().data or []
+        return self.client.table(self._table("users")).select("telegram_id,timezone,currency,language").execute().data or []
 
-    def get_weekly_payload(self, telegram_id: int, end_date: date | None = None) -> dict[str, Any]:
+    def get_period_payload(
+        self,
+        telegram_id: int,
+        *,
+        days: int,
+        end_date: date | None = None,
+    ) -> dict[str, Any]:
+        safe_days = max(1, int(days))
         if end_date is None:
             end_date = date.today()
-        start_date = end_date - timedelta(days=6)
+        start_date = end_date - timedelta(days=safe_days - 1)
 
         finance_entries = (
             self.client.table(self._table("finance_entries"))
@@ -631,6 +721,9 @@ class Database:
             "calorie_logs": calorie_logs,
             "goals": goals,
         }
+
+    def get_weekly_payload(self, telegram_id: int, end_date: date | None = None) -> dict[str, Any]:
+        return self.get_period_payload(telegram_id, days=7, end_date=end_date)
 
     def get_ai_context(self, telegram_id: int) -> dict[str, Any]:
         finance_entries = self.list_finance_entries(telegram_id, days=30)

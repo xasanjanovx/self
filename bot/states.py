@@ -12,3 +12,4 @@ class BotStates(StatesGroup):
     waiting_goal = State()
     waiting_reminder = State()
     waiting_ai_question = State()
+    waiting_trainer_question = State()

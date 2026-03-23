@@ -325,3 +325,26 @@ class AIService:
             ],
             temperature=0.3,
         ).strip()
+
+    def trainer_reply(self, question: str, context: dict[str, Any], language: str = "ru") -> str:
+        lang = "uzbek" if (language or "").strip().lower() == "uz" else "russian"
+        prompt = (
+            "Ты персональный фитнес-тренер в Telegram. "
+            "Дай безопасный и практичный ответ: структура тренировки, повторения/подходы, отдых, "
+            "вариант для новичка и короткое предупреждение по технике. "
+            f"Пиши на {lang}. Формат: до 8 строк, четко и без воды."
+        )
+
+        return self._generate_content(
+            model=self.text_model,
+            parts=[
+                {
+                    "text": (
+                        f"{prompt}\n\n"
+                        f"Контекст пользователя: {json.dumps(context, ensure_ascii=False)}\n"
+                        f"Запрос: {question}"
+                    )
+                }
+            ],
+            temperature=0.3,
+        ).strip()
