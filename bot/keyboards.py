@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -7,16 +7,16 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Калории", callback_data="menu:calorie"),
+                InlineKeyboardButton(text="Питание", callback_data="menu:calorie"),
                 InlineKeyboardButton(text="Финансы", callback_data="menu:finance"),
             ],
             [
                 InlineKeyboardButton(text="Привычки", callback_data="menu:habits"),
-                InlineKeyboardButton(text="Отметка", callback_data="menu:checkin"),
+                InlineKeyboardButton(text="Чекин", callback_data="menu:checkin"),
             ],
             [
-                InlineKeyboardButton(text="Отчет", callback_data="menu:weekly"),
-                InlineKeyboardButton(text="AI", callback_data="menu:ai"),
+                InlineKeyboardButton(text="Отчет 7д", callback_data="menu:weekly"),
+                InlineKeyboardButton(text="AI-помощник", callback_data="menu:ai"),
             ],
             [
                 InlineKeyboardButton(text="Цели", callback_data="menu:goals"),
@@ -34,14 +34,14 @@ def nutrition_goal_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Снижение веса", callback_data="nutri:set:loss"),
+                InlineKeyboardButton(text="Снижение", callback_data="nutri:set:loss"),
                 InlineKeyboardButton(text="Поддержание", callback_data="nutri:set:maintain"),
             ],
             [
-                InlineKeyboardButton(text="Набор веса", callback_data="nutri:set:gain"),
-                InlineKeyboardButton(text="Мышечная масса", callback_data="nutri:set:muscle"),
+                InlineKeyboardButton(text="Набор", callback_data="nutri:set:gain"),
+                InlineKeyboardButton(text="Масса", callback_data="nutri:set:muscle"),
             ],
-            [InlineKeyboardButton(text="Свой план", callback_data="nutri:set:custom")],
+            [InlineKeyboardButton(text="Ручной план", callback_data="nutri:set:custom")],
             [InlineKeyboardButton(text="Назад", callback_data="menu:open")],
         ]
     )
@@ -51,8 +51,8 @@ def calorie_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Подтвердить", callback_data="calorie:confirm"),
-                InlineKeyboardButton(text="Отмена", callback_data="calorie:cancel"),
+                InlineKeyboardButton(text="Сохранить", callback_data="calorie:confirm"),
+                InlineKeyboardButton(text="Отменить", callback_data="calorie:cancel"),
             ],
             [InlineKeyboardButton(text="Назад", callback_data="calorie:panel")],
         ]
@@ -138,7 +138,7 @@ def finance_add_confirm_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Сохранить", callback_data="finance:add_confirm"),
-                InlineKeyboardButton(text="Отмена", callback_data="finance:add_cancel"),
+                InlineKeyboardButton(text="Отменить", callback_data="finance:add_cancel"),
             ],
             [InlineKeyboardButton(text="Назад", callback_data="menu:finance")],
         ]
@@ -162,7 +162,7 @@ def habits_keyboard(habits: list[dict]) -> InlineKeyboardMarkup:
         )
 
     if done:
-        rows.append([InlineKeyboardButton(text=f"Готово сегодня: {len(done)}", callback_data="noop")])
+        rows.append([InlineKeyboardButton(text=f"Выполнено сегодня: {len(done)}", callback_data="noop")])
 
     rows.append(
         [
@@ -182,7 +182,7 @@ def reminders_keyboard(reminders: list[dict]) -> InlineKeyboardMarkup:
         rid = reminder.get("id")
         rtime = str(reminder.get("reminder_time") or "")[:5]
         text = str(reminder.get("reminder_text") or "").strip()
-        title = f"Удалить: {rtime} {text}"[:60]
+        title = f"Удалить • {rtime} {text}"[:60]
         rows.append([InlineKeyboardButton(text=title, callback_data=f"rem:del:{rid}")])
 
     rows.append(

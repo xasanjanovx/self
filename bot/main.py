@@ -10,12 +10,11 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
-    ErrorEvent,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -53,30 +52,6 @@ TMP_DIR = Path('.tmp')
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 background_tasks: list[asyncio.Task[Any]] = []
-
-
-class UpdateTraceMiddleware(BaseMiddleware):
-    async def __call__(self, handler: Any, event: Any, data: dict[str, Any]) -> Any:
-        try:
-            if isinstance(event, Message):
-                text = (event.text or event.caption or "").strip()
-                logger.info(
-                    "Incoming message chat=%s user=%s text=%r",
-                    event.chat.id if event.chat else None,
-                    event.from_user.id if event.from_user else None,
-                    text[:200],
-                )
-            elif isinstance(event, CallbackQuery):
-                logger.info(
-                    "Incoming callback chat=%s user=%s data=%r",
-                    event.message.chat.id if event.message and event.message.chat else None,
-                    event.from_user.id if event.from_user else None,
-                    (event.data or "")[:200],
-                )
-        except Exception:
-            logger.exception("Update trace middleware failed")
-
-        return await handler(event, data)
 
 GOAL_TYPE_ALIASES = {
     'weight': 'weight',
@@ -131,27 +106,32 @@ def build_dashboard_text(telegram_id: int) -> str:
 
     balance_today = float(finance["income"]) - float(finance["expense"])
     return (
-        "FLOWUZ • Личный кабинет\n"
+        "FLOWUZ / Dashboard\n"
         f"{today}\n\n"
-        f"Питание: {int(calorie['calories'])} ккал • {int(calorie['meals'])} прием.\n"
-        f"Привычки: {done_habits}/{total_habits} • осталось {left_habits}\n"
-        f"Финансы: +{_fmt_money(finance['income'])} / -{_fmt_money(finance['expense'])} / {_fmt_money(balance_today)} {currency}\n"
-        f"Чекин: {'выполнен' if checkin_done else 'нет'}\n"
-        f"Серия: {streak} дн."
+        "Питание\n"
+        f"• {int(calorie['calories'])} ккал, {int(calorie['meals'])} прием.\n\n"
+        "Привычки\n"
+        f"• {done_habits}/{total_habits} выполнено, в работе {left_habits}\n\n"
+        "Финансы (сегодня)\n"
+        f"• Доход: +{_fmt_money(finance['income'])} {currency}\n"
+        f"• Расход: -{_fmt_money(finance['expense'])} {currency}\n"
+        f"• Баланс: {_fmt_money(balance_today)} {currency}\n\n"
+        "Чекин\n"
+        f"• {'выполнен' if checkin_done else 'ожидается'} · серия {streak} дн."
     )
 
 
 def format_calorie_estimate(estimate: CalorieEstimate) -> str:
     confidence = f"{round((estimate.confidence or 0.0) * 100)}%"
     return (
-        'Проверка перед сохранением\n\n'
+        'Питание / Проверка записи\n\n'
         f'Блюдо: {estimate.meal_desc}\n'
-        f'Калории: {estimate.calories if estimate.calories is not None else "-"}\n'
+        f'Ккал: {estimate.calories if estimate.calories is not None else "-"}\n'
         f'Белки: {estimate.protein if estimate.protein is not None else "-"}\n'
         f'Жиры: {estimate.fat if estimate.fat is not None else "-"}\n'
         f'Углеводы: {estimate.carbs if estimate.carbs is not None else "-"}\n'
-        f'Точность: {confidence}\n\n'
-        'Сохранить запись?'
+        f'Уверенность AI: {confidence}\n\n'
+        'Сохранить запись в дневник?'
     )
 
 
@@ -204,8 +184,8 @@ def nutrition_preset(mode: str) -> dict[str, Any]:
 
 def build_nutrition_setup_text() -> str:
     return (
-        "Питание • настройка\n\n"
-        "Выбери цель. Бот рассчитает дневные нормы КБЖУ и покажет остаток на сегодня."
+        "Питание / Профиль\n\n"
+        "Выбери цель, и бот рассчитает дневные нормы КБЖУ и остаток на сегодня."
     )
 
 
@@ -217,11 +197,11 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     if not profile:
         lines = [
-            "Питание",
+            "Питание / Трекер",
             "",
             "Сначала выбери цель питания.",
             "",
-            "После выбора цели появятся план на день и остаток.",
+            "После выбора цели появятся план и остаток на день.",
         ]
         return "\n".join(lines), entries
 
@@ -236,21 +216,21 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     left_c = target_c - totals["carbs"]
 
     lines = [
-        "Питание",
+        "Питание / Трекер",
         f"Цель: {profile.get('title') or '-'}",
         "",
         f"План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
         f"Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
         f"Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
         "",
-        "Ввод: фото или текст блюда.",
+        "Ввод: отправь фото или текст блюда.",
         "",
     ]
 
     if not entries:
-        lines.append('Записей пока нет.')
+        lines.append('Пока нет записей за сегодня.')
     else:
-        lines.append('Последние записи:')
+        lines.append('Последние приемы:')
         for entry in entries[:6]:
             meal = str(entry.get('meal_desc') or 'Блюдо').strip()
             calories = entry.get('calories')
@@ -258,7 +238,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             lines.append(f'- {meal[:40]} ({kcal_text})')
 
     lines.append('')
-    lines.append('Нажми запись ниже для деталей.')
+    lines.append('Открой запись ниже для деталей.')
     return '\n'.join(lines), entries
 
 
@@ -342,7 +322,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     today_balance = float(totals["income"]) - float(totals["expense"])
     lines = [
-        "Финансы",
+        "Финансы / Контроль",
         "",
         f"Сегодня: +{_fmt_money(totals['income'])} / -{_fmt_money(totals['expense'])} / { _fmt_money(today_balance) } {currency}",
         f"Карта: {_fmt_money(balances['card'])} {currency} | Наличные: {_fmt_money(balances['cash'])} {currency}",
@@ -354,9 +334,9 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     ]
 
     if not entries:
-        lines.append('Записей сегодня нет.')
+        lines.append('Операций за сегодня пока нет.')
     else:
-        lines.append('Последние записи:')
+        lines.append('Последние операции:')
         for entry in entries[:8]:
             amount = float(entry.get('amount') or 0)
             sign = '+' if str(entry.get('entry_type')) == 'income' else '-'
@@ -365,19 +345,19 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             lines.append(f'- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}')
 
     lines.append('')
-    lines.append('Нажми запись ниже для деталей.')
+    lines.append('Открой операцию ниже для деталей.')
     return '\n'.join(lines), entries
 
 
 def format_calorie_detail(log: dict[str, Any]) -> str:
     return (
-        "Детали блюда\n\n"
+        "Питание / Детали блюда\n\n"
         f"Название: {log.get('meal_desc') or '-'}\n"
         f"Калории: {log.get('calories') if log.get('calories') is not None else '-'}\n"
         f"Белки: {log.get('protein') if log.get('protein') is not None else '-'}\n"
         f"Жиры: {log.get('fat') if log.get('fat') is not None else '-'}\n"
         f"Углеводы: {log.get('carbs') if log.get('carbs') is not None else '-'}\n"
-        f"Точность: {log.get('confidence') if log.get('confidence') is not None else '-'}\n"
+        f"Уверенность AI: {log.get('confidence') if log.get('confidence') is not None else '-'}\n"
     )
 
 
@@ -388,7 +368,7 @@ def format_finance_detail(entry: dict[str, Any], currency: str) -> str:
     bucket = _finance_bucket_from_note(entry.get("note"))
     note_clean = _finance_note_without_bucket(entry.get("note"))
     return (
-        "Детали операции\n\n"
+        "Финансы / Детали операции\n\n"
         f"Тип: {'Доход' if entry_type == 'income' else 'Расход'}\n"
         f"Сумма: {sign}{_fmt_money(amount)} {currency}\n"
         f"Категория: {entry.get('category') or '-'}\n"
@@ -398,7 +378,7 @@ def format_finance_detail(entry: dict[str, Any], currency: str) -> str:
 
 
 def format_finance_pending(items: list[dict[str, Any]], currency: str) -> str:
-    lines = ["Проверка перед сохранением", ""]
+    lines = ["Финансы / Проверка перед сохранением", ""]
     for item in items:
         amount = float(item.get("amount") or 0)
         entry_type = str(item.get("type") or "expense")
@@ -411,7 +391,7 @@ def format_finance_pending(items: list[dict[str, Any]], currency: str) -> str:
             f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket)}{note_part}"
         )
     lines.append("")
-    lines.append("Сохранить операции?")
+    lines.append("Сохранить эти операции?")
     return "\n".join(lines)
 
 
@@ -510,31 +490,37 @@ def _day_names(days: list[int]) -> str:
 
 def _goals_text(goals: list[dict[str, Any]]) -> str:
     if not goals:
-        return 'Цели: пока пусто.\nДобавь первую цель.'
+        return 'Цели пока не добавлены.\nНажми «Добавить цель».'
 
-    rows = ['Цели:']
+    goal_labels = {'weight': 'Вес', 'budget': 'Бюджет', 'habit': 'Привычка'}
+    rows = ['Цели / Активные']
     for goal in goals[:12]:
         goal_type = str(goal.get('goal_type') or '')
         title = str(goal.get('title') or '')
         target = goal.get('target_value')
         target_text = f' -> {target}' if target is not None else ''
-        rows.append(f'- [{goal_type}] {title}{target_text}')
+        label = goal_labels.get(goal_type, goal_type or 'Цель')
+        rows.append(f'- [{label}] {title}{target_text}')
     return '\n'.join(rows)
 
 
 def _habits_text(habits: list[dict[str, Any]]) -> str:
     if not habits:
-        return 'Привычек пока нет. Добавь первую.'
+        return 'Привычек пока нет.\nДобавь первую, чтобы начать трекинг.'
     done = len([h for h in habits if h.get('completed_today')])
     total = len(habits)
-    return f'Привычки сегодня: {done}/{total}\nНажми на привычку, чтобы отметить выполнение.'
+    return (
+        'Привычки / Сегодня\n'
+        f'Выполнено: {done}/{total}\n'
+        'Нажми на привычку, чтобы отметить выполнение.'
+    )
 
 
 def _reminders_text(reminders: list[dict[str, Any]]) -> str:
     if not reminders:
-        return 'Напоминаний пока нет.'
+        return 'Напоминаний пока нет.\nДобавь первое напоминание.'
 
-    lines = ['Напоминания:']
+    lines = ['Напоминания / Активные']
     for rem in reminders[:10]:
         reminder_time = str(rem.get('reminder_time') or '')[:5]
         reminder_text = str(rem.get('reminder_text') or '').strip()
@@ -712,7 +698,7 @@ async def cmd_help(message: Message) -> None:
     await ensure_user_message(message)
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await message.answer('Все управление через инлайн-кнопки.\nГлавное меню: /menu', reply_markup=main_menu_keyboard())
+    await message.answer('Управление ботом через кнопки ниже.\nДля возврата в главное меню: /menu', reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == 'noop')
@@ -757,7 +743,7 @@ async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
         await _remember_panel(callback, state)
         await safe_edit_message(
             callback,
-            "Свой план: калории;белки;жиры;углеводы\nПример: 2400;160;70;260",
+            "Ручной план: калории;белки;жиры;углеводы\nПример: 2400;160;70;260",
             reply_markup=back_to_menu_keyboard(),
         )
         await callback.answer()
@@ -769,7 +755,7 @@ async def cb_nutri_set(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer("Цель сохранена")
+    await callback.answer("Профиль сохранен")
 
 
 @router.message(BotStates.waiting_nutrition_custom, F.text)
@@ -789,12 +775,12 @@ async def msg_nutri_custom(message: Message, state: FSMContext) -> None:
         carbs = int(float(parts[3].replace(",", ".")))
     except Exception:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, "Не удалось прочитать числа. Пример: 2400;160;70;260", back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, "Не удалось распознать числа. Пример: 2400;160;70;260", back_to_menu_keyboard())
         return
 
     if calories <= 0 or protein < 0 or fat < 0 or carbs < 0:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, "Проверь значения. Они должны быть положительными.", back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, "Проверь значения: они должны быть положительными.", back_to_menu_keyboard())
         return
 
     profile = {
@@ -907,7 +893,7 @@ async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None
     data = await state.get_data()
     pending = data.get('pending_calorie')
     if not pending:
-        await callback.answer('Нет данных', show_alert=True)
+        await callback.answer('Нет данных для сохранения', show_alert=True)
         return
 
     try:
@@ -932,7 +918,7 @@ async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None
     await _remember_panel(callback, state)
     await state.update_data(pending_calorie=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Сохранено')
+    await callback.answer('Запись сохранена')
 
 
 @router.callback_query(F.data == 'calorie:cancel')
@@ -943,7 +929,7 @@ async def cb_calorie_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await _remember_panel(callback, state)
     await state.update_data(pending_calorie=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Отменено')
+    await callback.answer('Действие отменено')
 
 
 @router.callback_query(F.data.startswith('calorie:view:'))
@@ -967,7 +953,7 @@ async def cb_calorie_ask_delete(callback: CallbackQuery) -> None:
     log_id = callback.data.split('calorie:ask_del:', 1)[1]
     await safe_edit_message(
         callback,
-        'Удалить это блюдо?\nДействие необратимо.',
+        'Удалить запись о блюде?\nДействие необратимо.',
         reply_markup=calorie_delete_confirm_keyboard(log_id),
     )
     await callback.answer()
@@ -988,7 +974,7 @@ async def cb_calorie_delete(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries))
-    await callback.answer('Удалено')
+    await callback.answer('Запись удалена')
 
 
 @router.callback_query(F.data == 'menu:finance')
@@ -1046,7 +1032,7 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
     if not items:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += '\n\nНе понял операции.'
+        text += '\n\nНе удалось распознать операции.'
         await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
         return
 
@@ -1075,7 +1061,7 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
     if not prepared:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
-        text += '\n\nНе нашел валидные суммы.'
+        text += '\n\nНе найдены корректные суммы.'
         await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries))
         return
 
@@ -1099,7 +1085,7 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
     items = data.get("pending_finance_items") or []
     source = str(data.get("pending_finance_source") or "text_ai")
     if not items:
-        await callback.answer("Нет данных", show_alert=True)
+        await callback.answer("Нет данных для сохранения", show_alert=True)
         return
 
     for item in items:
@@ -1118,7 +1104,7 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
     await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer("Сохранено")
+    await callback.answer("Операции сохранены")
 
 
 @router.callback_query(F.data == "finance:add_cancel")
@@ -1129,7 +1115,7 @@ async def cb_finance_add_cancel(callback: CallbackQuery, state: FSMContext) -> N
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
     await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer("Отменено")
+    await callback.answer("Действие отменено")
 
 
 @router.callback_query(F.data.startswith('finance:view:'))
@@ -1176,7 +1162,7 @@ async def cb_finance_delete(callback: CallbackQuery, state: FSMContext) -> None:
     await _remember_panel(callback, state)
     await state.update_data(pending_finance_items=None, pending_finance_source=None)
     await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries))
-    await callback.answer('Удалено')
+    await callback.answer('Операция удалена')
 
 
 @router.callback_query(F.data == 'menu:habits')
@@ -1194,7 +1180,7 @@ async def cb_habit_add(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.set_state(BotStates.waiting_habit_name)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Напиши название привычки.', reply_markup=back_to_menu_keyboard())
+    await safe_edit_message(callback, 'Введи название привычки.', reply_markup=back_to_menu_keyboard())
     await callback.answer()
 
 
@@ -1204,7 +1190,7 @@ async def msg_habit_add(message: Message, state: FSMContext) -> None:
     name = (message.text or '').strip()
     if not name:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Название пустое.', back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, 'Название не может быть пустым.', back_to_menu_keyboard())
         return
 
     db.add_habit(message.from_user.id, name=name, target_per_week=7)
@@ -1240,7 +1226,7 @@ async def cb_menu_checkin(callback: CallbackQuery, state: FSMContext) -> None:
     await _remember_panel(callback, state)
     await safe_edit_message(
         callback,
-        'Ежедневная отметка. Пример: 8 7 78.5 тренировка',
+        'Ежедневный чекин. Формат: 8 7 78.5 тренировка',
         reply_markup=back_to_menu_keyboard(),
     )
     await callback.answer()
@@ -1253,7 +1239,7 @@ async def msg_checkin(message: Message, state: FSMContext) -> None:
 
     if mood is None and energy is None and weight is None and not note:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Формат не понял. Пример: 8 7 78.5 тренировка', back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, 'Формат не распознан. Пример: 8 7 78.5 тренировка', back_to_menu_keyboard())
         return
 
     _, tz_name, _ = _user_profile(message.from_user.id)
@@ -1270,7 +1256,7 @@ async def msg_checkin(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.clear()
     streak = db.get_checkin_streak(message.from_user.id, tz_name=tz_name)
-    await message.answer(f'Сохранено. Серия: {streak} дн.', reply_markup=main_menu_keyboard())
+    await message.answer(f'Чекин сохранен. Серия: {streak} дн.', reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == 'menu:goals')
@@ -1287,7 +1273,7 @@ async def cb_goal_add(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.set_state(BotStates.waiting_goal)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Новая цель: тип;название;значение\nПример: вес;Сбросить вес;78', reply_markup=back_to_menu_keyboard())
+    await safe_edit_message(callback, 'Новая цель: тип;название;значение\nПример: вес;Снизить до 78;78', reply_markup=back_to_menu_keyboard())
     await callback.answer()
 
 
@@ -1297,7 +1283,7 @@ async def msg_goal_add(message: Message, state: FSMContext) -> None:
     parsed = _parse_goal_input(message.text or '')
     if parsed is None:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Неверный формат.', back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, 'Неверный формат цели.', back_to_menu_keyboard())
         return
 
     goal_type, title, target_value = parsed
@@ -1337,7 +1323,7 @@ async def msg_reminder_add(message: Message, state: FSMContext) -> None:
     parsed = _parse_reminder_input(message.text or '')
     if parsed is None:
         await safe_delete_message(message)
-        await _edit_panel_from_state(message, state, 'Неверный формат.', back_to_menu_keyboard())
+        await _edit_panel_from_state(message, state, 'Неверный формат напоминания.', back_to_menu_keyboard())
         return
 
     reminder_time, reminder_text, days = parsed
@@ -1369,7 +1355,7 @@ async def cb_reminder_delete(callback: CallbackQuery) -> None:
 
     reminders = db.list_reminders(callback.from_user.id)
     await safe_edit_message(callback, _reminders_text(reminders), reply_markup=reminders_keyboard(reminders))
-    await callback.answer('Удалено')
+    await callback.answer('Напоминание удалено')
 
 
 def _weekly_summary_for_user(telegram_id: int) -> str:
@@ -1434,7 +1420,7 @@ async def cb_menu_ai(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.set_state(BotStates.waiting_ai_question)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, 'Напиши вопрос для AI.', reply_markup=back_to_menu_keyboard())
+    await safe_edit_message(callback, 'Задай вопрос AI-помощнику.', reply_markup=back_to_menu_keyboard())
     await callback.answer()
 
 
@@ -1446,14 +1432,14 @@ async def cmd_ai(message: Message, state: FSMContext) -> None:
     if len(parts) == 1:
         await state.set_state(BotStates.waiting_ai_question)
         await safe_delete_message(message)
-        await message.answer('Напиши вопрос сообщением.', reply_markup=back_to_menu_keyboard())
+        await message.answer('Отправь вопрос отдельным сообщением.', reply_markup=back_to_menu_keyboard())
         return
 
     question = parts[1].strip()
     if not question:
         await state.set_state(BotStates.waiting_ai_question)
         await safe_delete_message(message)
-        await message.answer('Напиши вопрос текстом.', reply_markup=back_to_menu_keyboard())
+        await message.answer('Нужен текстовый вопрос.', reply_markup=back_to_menu_keyboard())
         return
 
     await safe_delete_message(message)
@@ -1494,12 +1480,6 @@ async def fallback_message(message: Message) -> None:
         await send_main_menu(message, message.from_user.id)
         return
     await safe_delete_message(message)
-
-
-@router.errors()
-async def on_error(event: ErrorEvent) -> bool:
-    logger.exception("Unhandled router error: %s", event.exception)
-    return True
 
 
 async def reminder_worker(bot: Bot) -> None:
@@ -1589,9 +1569,6 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
-    trace = UpdateTraceMiddleware()
-    dp.message.outer_middleware(trace)
-    dp.callback_query.outer_middleware(trace)
     dp.include_router(router)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
