@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
+    ErrorEvent,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -52,6 +53,30 @@ TMP_DIR = Path('.tmp')
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 background_tasks: list[asyncio.Task[Any]] = []
+
+
+class UpdateTraceMiddleware(BaseMiddleware):
+    async def __call__(self, handler: Any, event: Any, data: dict[str, Any]) -> Any:
+        try:
+            if isinstance(event, Message):
+                text = (event.text or event.caption or "").strip()
+                logger.info(
+                    "Incoming message chat=%s user=%s text=%r",
+                    event.chat.id if event.chat else None,
+                    event.from_user.id if event.from_user else None,
+                    text[:200],
+                )
+            elif isinstance(event, CallbackQuery):
+                logger.info(
+                    "Incoming callback chat=%s user=%s data=%r",
+                    event.message.chat.id if event.message and event.message.chat else None,
+                    event.from_user.id if event.from_user else None,
+                    (event.data or "")[:200],
+                )
+        except Exception:
+            logger.exception("Update trace middleware failed")
+
+        return await handler(event, data)
 
 GOAL_TYPE_ALIASES = {
     'weight': 'weight',
@@ -1470,6 +1495,12 @@ async def fallback_message(message: Message) -> None:
     await safe_delete_message(message)
 
 
+@router.errors()
+async def on_error(event: ErrorEvent) -> bool:
+    logger.exception("Unhandled router error: %s", event.exception)
+    return True
+
+
 async def reminder_worker(bot: Bot) -> None:
     while True:
         try:
@@ -1557,6 +1588,9 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
+    trace = UpdateTraceMiddleware()
+    dp.message.outer_middleware(trace)
+    dp.callback_query.outer_middleware(trace)
     dp.include_router(router)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
