@@ -131,12 +131,13 @@ def build_dashboard_text(telegram_id: int) -> str:
 
     balance_today = float(finance["income"]) - float(finance["expense"])
     return (
-        f'Дашборд • {today}\n\n'
-        f'Калории: {int(calorie["calories"])} ккал ({int(calorie["meals"])} прием.)\n'
-        f'Привычки: {done_habits}/{total_habits} (осталось {left_habits})\n'
-        f'Финансы сегодня: +{_fmt_money(finance["income"])} / -{_fmt_money(finance["expense"])} / { _fmt_money(balance_today) } {currency}\n'
-        f'Отметка дня: {"есть" if checkin_done else "нет"}\n'
-        f'Серия: {streak} дн.'
+        "FLOWUZ • Личный кабинет\n"
+        f"{today}\n\n"
+        f"Питание: {int(calorie['calories'])} ккал • {int(calorie['meals'])} прием.\n"
+        f"Привычки: {done_habits}/{total_habits} • осталось {left_habits}\n"
+        f"Финансы: +{_fmt_money(finance['income'])} / -{_fmt_money(finance['expense'])} / {_fmt_money(balance_today)} {currency}\n"
+        f"Чекин: {'выполнен' if checkin_done else 'нет'}\n"
+        f"Серия: {streak} дн."
     )
 
 
@@ -203,8 +204,8 @@ def nutrition_preset(mode: str) -> dict[str, Any]:
 
 def build_nutrition_setup_text() -> str:
     return (
-        "Настройка питания\n\n"
-        "Выбери цель. Будут рассчитаны дневные нормы КБЖУ и остаток на сегодня."
+        "Питание • настройка\n\n"
+        "Выбери цель. Бот рассчитает дневные нормы КБЖУ и покажет остаток на сегодня."
     )
 
 
@@ -216,11 +217,11 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     if not profile:
         lines = [
-            "Калории",
+            "Питание",
             "",
             "Сначала выбери цель питания.",
             "",
-            "После этого будет показ: план на день и сколько осталось.",
+            "После выбора цели появятся план на день и остаток.",
         ]
         return "\n".join(lines), entries
 
@@ -235,7 +236,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     left_c = target_c - totals["carbs"]
 
     lines = [
-        "Калории",
+        "Питание",
         f"Цель: {profile.get('title') or '-'}",
         "",
         f"План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
