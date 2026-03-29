@@ -23,6 +23,305 @@ class CalorieEstimate:
     advice: str | None
 
 
+@dataclass
+class VacancyTemplateData:
+    titles: list[str]
+    region_tag: str
+    address: str
+    salary: str
+    schedule: str
+    requirements: list[str]
+    benefits: list[str]
+    duties: list[str]
+    phone: str | None
+    telegram: str | None
+
+
+_VACANCY_REGION_MAP = {
+    "tashkent": "#TOSHKENT",
+    "toshkent": "#TOSHKENT",
+    "ташкент": "#TOSHKENT",
+    "ташкенте": "#TOSHKENT",
+    "andijon": "#ANDIJON",
+    "андижан": "#ANDIJON",
+    "andijan": "#ANDIJON",
+    "samarqand": "#SAMARQAND",
+    "самарканд": "#SAMARQAND",
+    "buxoro": "#BUXORO",
+    "бухара": "#BUXORO",
+    "fergana": "#FARGONA",
+    "fargona": "#FARGONA",
+    "фаргана": "#FARGONA",
+    "namangan": "#NAMANGAN",
+    "наманган": "#NAMANGAN",
+    "jizzax": "#JIZZAX",
+    "джизак": "#JIZZAX",
+    "sirdayo": "#SIRDARYO",
+    "sirdaryo": "#SIRDARYO",
+    "сырдар": "#SIRDARYO",
+    "qashqadaryo": "#QASHQADARYO",
+    "кашкадар": "#QASHQADARYO",
+    "surxondaryo": "#SURXONDARYO",
+    "сурхандар": "#SURXONDARYO",
+    "xorazm": "#XORAZM",
+    "хорезм": "#XORAZM",
+    "navoiy": "#NAVOIY",
+    "навои": "#NAVOIY",
+    "nukus": "#NUKUS",
+    "қорақалпоқ": "#QORAQALPOQISTON",
+    "каракалпак": "#QORAQALPOQISTON",
+}
+
+_VACANCY_PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
+_VACANCY_TELEGRAM_RE = re.compile(r"(https?://t\.me/[A-Za-z0-9_]{3,}|@[A-Za-z0-9_]{3,})", re.IGNORECASE)
+
+
+def _normalize_text_value(value: Any, default: str = "-", max_len: int = 220) -> str:
+    if value is None:
+        return default
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text or default
+
+
+def _normalize_list_value(value: Any, *, max_items: int = 6, max_len: int = 180) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        chunks = re.split(r"[\n;]+", value)
+    elif isinstance(value, list):
+        chunks = value
+    else:
+        chunks = [value]
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for chunk in chunks:
+        text = str(chunk or "").strip()
+        text = re.sub(r"^[\-*•\u2022]+\s*", "", text)
+        text = re.sub(r"\s+", " ", text).strip(" -")
+        if not text or text == "-":
+            continue
+        if len(text) > max_len:
+            text = text[: max_len - 1].rstrip() + "…"
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= max_items:
+            break
+
+    return result
+
+
+def _normalize_telegram_value(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+
+    match = re.search(r"t\.me/([A-Za-z0-9_]{3,})", text, flags=re.IGNORECASE)
+    if match:
+        return f"@{match.group(1)}"
+
+    match = re.search(r"@([A-Za-z0-9_]{3,})", text)
+    if match:
+        return f"@{match.group(1)}"
+
+    return None
+
+
+def _normalize_phone_value(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+    match = _VACANCY_PHONE_RE.search(text)
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip()
+    return None
+
+
+def _normalize_region_tag(value: Any, raw_text: str, default_region_tag: str) -> str:
+    text = str(value or "").strip()
+    if text and text != "-":
+        if not text.startswith("#"):
+            text = f"#{text}"
+        return text.upper().replace(" ", "_")
+
+    lower = raw_text.lower()
+    for token, tag in _VACANCY_REGION_MAP.items():
+        if token in lower:
+            return tag
+
+    hashtag_match = re.search(r"#([A-Za-zА-Яа-яЁё_]+)", raw_text)
+    if hashtag_match:
+        return f"#{hashtag_match.group(1).upper()}"
+
+    return default_region_tag
+
+
+def _vacancy_section_lines(raw_text: str, keywords: tuple[str, ...]) -> list[str]:
+    lines = [line.strip() for line in raw_text.splitlines()]
+    result: list[str] = []
+    collecting = False
+
+    for line in lines:
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
+        lower = clean.lower()
+
+        if any(keyword in lower for keyword in keywords):
+            collecting = True
+            tail = clean.split(":", 1)[1].strip() if ":" in clean else ""
+            if tail and tail != "-":
+                result.append(tail)
+            continue
+
+        if collecting:
+            if not clean:
+                break
+            if ":" in clean and any(
+                marker in lower
+                for marker in (
+                    "talab",
+                    "треб",
+                    "qulay",
+                    "услов",
+                    "vazifa",
+                    "обязан",
+                    "aloqa",
+                    "контакт",
+                    "telegram",
+                    "телеграм",
+                    "hudud",
+                    "адрес",
+                    "manzil",
+                    "ish vaqti",
+                    "график",
+                    "maosh",
+                    "зарплат",
+                )
+            ):
+                break
+            result.append(clean)
+
+    return _normalize_list_value(result)
+
+
+def _vacancy_fallback_titles(raw_text: str) -> list[str]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+    prioritized: list[str] = []
+
+    for line in lines:
+        if not line:
+            continue
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
+        lower = clean.lower()
+        if any(token in lower for token in ("вакан", "vakans", "требует", "kerak", "bo'sh ish", "bo‘sh ish")):
+            tail = clean.split(":", 1)[1].strip() if ":" in clean else clean
+            tail = re.sub(r"^(вакансия|vakansiya|требуется|kerak)\s*", "", tail, flags=re.IGNORECASE).strip(" -")
+            if tail:
+                prioritized.append(tail)
+
+    if prioritized:
+        return _normalize_list_value(prioritized, max_items=3)
+
+    fallback: list[str] = []
+    for line in lines:
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
+        lower = clean.lower()
+        if not clean or clean.startswith("#"):
+            continue
+        if any(
+            token in lower
+            for token in (
+                "aloqa",
+                "контакт",
+                "telegram",
+                "телеграм",
+                "hudud",
+                "manzil",
+                "адрес",
+                "talab",
+                "треб",
+                "qulay",
+                "услов",
+                "vazifa",
+                "обязан",
+                "maosh",
+                "зарплат",
+                "grafik",
+                "график",
+                "ish vaqti",
+                "📞",
+                "💰",
+            )
+        ):
+            continue
+        if len(clean) < 3:
+            continue
+        fallback.append(clean)
+        if len(fallback) >= 3:
+            break
+    return _normalize_list_value(fallback, max_items=3)
+
+
+def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> VacancyTemplateData:
+    salary = "-"
+    schedule = "-"
+    address = "-"
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    for line in lines:
+        lower = line.lower()
+        if salary == "-" and any(token in lower for token in ("зарплат", "оклад", "maosh", "ish haqi", "salary", "оплата")):
+            salary = line.split(":", 1)[1].strip() if ":" in line else line
+        if schedule == "-" and any(token in lower for token in ("график", "смен", "ish vaqti", "рабоч", "schedule")):
+            schedule = line.split(":", 1)[1].strip() if ":" in line else line
+        if address == "-" and any(token in lower for token in ("адрес", "manzil", "локац", "hudud", "location")):
+            address = line.split(":", 1)[1].strip() if ":" in line else line
+
+    phone = None
+    phone_match = _VACANCY_PHONE_RE.search(raw_text)
+    if phone_match:
+        phone = re.sub(r"\s+", " ", phone_match.group(0)).strip()
+
+    telegram = None
+    telegram_match = _VACANCY_TELEGRAM_RE.search(raw_text)
+    if telegram_match:
+        telegram = _normalize_telegram_value(telegram_match.group(0))
+
+    return VacancyTemplateData(
+        titles=_vacancy_fallback_titles(raw_text),
+        region_tag=_normalize_region_tag(None, raw_text, default_region_tag),
+        address=_normalize_text_value(address),
+        salary=_normalize_text_value(salary),
+        schedule=_normalize_text_value(schedule),
+        requirements=_vacancy_section_lines(raw_text, ("talab", "треб", "requirements")),
+        benefits=_vacancy_section_lines(raw_text, ("qulay", "услов", "benefit")),
+        duties=_vacancy_section_lines(raw_text, ("vazifa", "обязан", "duties")),
+        phone=phone,
+        telegram=telegram,
+    )
+
+
+def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: str) -> VacancyTemplateData:
+    data = payload if isinstance(payload, dict) else {}
+    return VacancyTemplateData(
+        titles=_normalize_list_value(data.get("titles"), max_items=3, max_len=90),
+        region_tag=_normalize_region_tag(data.get("region_tag"), raw_text, default_region_tag),
+        address=_normalize_text_value(data.get("address")),
+        salary=_normalize_text_value(data.get("salary")),
+        schedule=_normalize_text_value(data.get("schedule")),
+        requirements=_normalize_list_value(data.get("requirements"), max_items=6, max_len=160),
+        benefits=_normalize_list_value(data.get("benefits"), max_items=6, max_len=160),
+        duties=_normalize_list_value(data.get("duties"), max_items=6, max_len=160),
+        phone=_normalize_phone_value(data.get("phone")),
+        telegram=_normalize_telegram_value(data.get("telegram")),
+    )
+
 def _extract_json(text: str) -> Any:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -348,3 +647,48 @@ class AIService:
             ],
             temperature=0.3,
         ).strip()
+
+    def extract_vacancy_template_data(
+        self,
+        raw_text: str,
+        *,
+        default_region_tag: str = "#TOSHKENT",
+    ) -> VacancyTemplateData:
+        prompt = (
+            "Ты извлекаешь данные из текста вакансии для Telegram-шаблона. "
+            "Текст может быть на русском или узбекском, с шумом, эмодзи, пересланным оформлением или без структуры. "
+            "Нельзя придумывать факты. Если данных нет, используй '-' для строк и [] для списков. "
+            "Ответ только JSON без пояснений. "
+            'Формат: {"titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
+            '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
+            '"phone":"+998...","telegram":"@username"}. '
+            "Поле titles: 1-3 коротких названия должности, можно включить компанию, если это важно. "
+            "region_tag: только uppercase hashtag вида #TOSHKENT или #ANDIJON."
+        )
+
+        parsed: Any = {}
+        try:
+            response_text = self._generate_content(
+                model=self.text_model,
+                parts=[{"text": f"{prompt}\n\nТекст вакансии:\n{raw_text}"}],
+                temperature=0.0,
+            )
+            parsed = _extract_json(response_text)
+        except Exception:
+            parsed = {}
+
+        ai_data = _normalize_vacancy_payload(parsed, raw_text, default_region_tag)
+        fallback = _extract_vacancy_fallback(raw_text, default_region_tag)
+
+        return VacancyTemplateData(
+            titles=ai_data.titles or fallback.titles,
+            region_tag=ai_data.region_tag or fallback.region_tag,
+            address=ai_data.address if ai_data.address != "-" else fallback.address,
+            salary=ai_data.salary if ai_data.salary != "-" else fallback.salary,
+            schedule=ai_data.schedule if ai_data.schedule != "-" else fallback.schedule,
+            requirements=ai_data.requirements or fallback.requirements,
+            benefits=ai_data.benefits or fallback.benefits,
+            duties=ai_data.duties or fallback.duties,
+            phone=ai_data.phone or fallback.phone,
+            telegram=ai_data.telegram or fallback.telegram,
+        )

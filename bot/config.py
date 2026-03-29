@@ -40,6 +40,15 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
+def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    if value in {"gemini-3-flash-preview", "gemini-3-flash"}:
+        return default
+    return value
+
+
 @lru_cache(maxsize=1)
 def load_settings() -> Settings:
     load_dotenv()
@@ -49,9 +58,9 @@ def load_settings() -> Settings:
         supabase_service_role_key=_required("SUPABASE_SERVICE_ROLE_KEY"),
         db_table_prefix=os.getenv("DB_TABLE_PREFIX", "").strip(),
         gemini_api_key=_required("GEMINI_API_KEY"),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
-        gemini_vision_model=os.getenv("GEMINI_VISION_MODEL", "gemini-3-flash-preview"),
-        gemini_transcribe_model=os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-3-flash-preview"),
+        gemini_model=_gemini_model("GEMINI_MODEL"),
+        gemini_vision_model=_gemini_model("GEMINI_VISION_MODEL"),
+        gemini_transcribe_model=_gemini_model("GEMINI_TRANSCRIBE_MODEL"),
         app_timezone=os.getenv("APP_TIMEZONE", "Asia/Tashkent"),
         default_currency=os.getenv("DEFAULT_CURRENCY", "UZS"),
         default_language=os.getenv("DEFAULT_LANGUAGE", "ru"),

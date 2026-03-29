@@ -45,9 +45,17 @@ from .keyboards import (
     nutrition_goal_keyboard,
     report_settings_keyboard,
     trainer_keyboard,
+    vacancy_panel_keyboard,
+    vacancy_result_keyboard,
 )
 from .reports import build_weekly_summary
 from .states import BotStates
+from .vacancy import (
+    VACANCY_DEFAULT_REGION_TAG,
+    build_vacancy_panel_text,
+    format_vacancy_post,
+    looks_like_vacancy,
+)
 
 settings = load_settings()
 db = Database(settings)
@@ -1358,6 +1366,105 @@ async def _download_voice_to_temp(message: Message) -> Path:
         return Path(tmp.name)
 
 
+def _message_text_payload(message: Message) -> str:
+    return str(message.text or message.caption or "").strip()
+
+
+async def _edit_panel_from_state_with_fallback(
+    message: Message,
+    state: FSMContext,
+    premium_text: str,
+    fallback_text: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> None:
+    data = await state.get_data()
+    panel_message_id = data.get("panel_message_id")
+    text_variants = [premium_text] if premium_text == fallback_text else [premium_text, fallback_text]
+
+    for index, text in enumerate(text_variants):
+        try:
+            if panel_message_id is not None:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=int(panel_message_id),
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+                return
+
+            sent = await message.answer(text, reply_markup=reply_markup)
+            await state.update_data(panel_message_id=sent.message_id)
+            return
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if index == len(text_variants) - 1:
+                raise
+
+
+async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    raw_text = _message_text_payload(message)
+
+    if not raw_text:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "Нужен текст вакансии или подпись к пересланному посту.",
+                "Vakansiya matni yoki forward post caption kerak.",
+            ),
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
+    try:
+        payload = await asyncio.to_thread(
+            ai_service.extract_vacancy_template_data,
+            raw_text,
+            default_region_tag=VACANCY_DEFAULT_REGION_TAG,
+        )
+        premium_text = format_vacancy_post(payload, premium=True)
+        fallback_text = format_vacancy_post(payload, premium=False)
+    except Exception as exc:
+        logger.exception("Vacancy template build failed")
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            f"{_tr(lang, 'Ошибка шаблона вакансии', 'Vakansiya shabloni xatosi')}: {_h(exc)}",
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
+    await safe_delete_message(message)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    try:
+        await _edit_panel_from_state_with_fallback(
+            message,
+            state,
+            premium_text,
+            fallback_text,
+            vacancy_result_keyboard(lang),
+        )
+    except Exception as exc:
+        logger.exception("Vacancy result send failed")
+        error_label = _tr(
+            lang,
+            "Не удалось отправить шаблон вакансии",
+            "Vakansiya shablonini yuborib bo'lmadi",
+        )
+        await _edit_panel_from_state(
+            message,
+            state,
+            f"{error_label}: {_h(exc)}",
+            vacancy_panel_keyboard(lang),
+        )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -2350,6 +2457,40 @@ async def cmd_report(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.callback_query(F.data == "menu:vacancy")
+@router.callback_query(F.data == "vacancy:again")
+async def cb_menu_vacancy(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(
+        callback,
+        build_vacancy_panel_text(lang),
+        reply_markup=vacancy_panel_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.message(Command("vacancy"))
+async def cmd_vacancy(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    await safe_delete_message(message)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await _edit_panel_from_state(
+        message,
+        state,
+        build_vacancy_panel_text(lang),
+        vacancy_panel_keyboard(lang),
+    )
+
+
+@router.message(BotStates.waiting_vacancy_input)
+async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
+    await _process_vacancy_message(message, state)
+
+
 @router.callback_query(F.data == "menu:language")
 async def cb_menu_language(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
@@ -2651,12 +2792,17 @@ async def msg_ai_question(message: Message, state: FSMContext) -> None:
 
 
 @router.message()
-async def fallback_message(message: Message) -> None:
+async def fallback_message(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    text = (message.text or '').strip().lower()
+    raw_text = _message_text_payload(message)
+    text = raw_text.lower()
     if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
         await safe_delete_message(message)
         await send_main_menu(message, message.from_user.id)
+        return
+    if raw_text and looks_like_vacancy(raw_text):
+        await state.set_state(BotStates.waiting_vacancy_input)
+        await _process_vacancy_message(message, state)
         return
     await safe_delete_message(message)
 

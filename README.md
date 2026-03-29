@@ -11,6 +11,7 @@
 - цели
 - экспорт CSV/PDF
 - голосовой ввод нескольких операций (доход/расход)
+- шаблон вакансий с AI-нормализацией под Telegram-пост
 
 ## 1) Быстрый старт
 
@@ -27,7 +28,7 @@ copy .env.example .env
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `DB_TABLE_PREFIX=bot_` (рекомендуется, чтобы не конфликтовать с существующими таблицами в проекте)
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL=gemini-3-flash-preview`
+- `GEMINI_MODEL=gemini-2.5-flash`
 
 ## 2) Supabase
 
@@ -63,6 +64,7 @@ python -m bot.main
 - `/weekly`
 - `/export`
 - `/ai вопрос`
+- `/vacancy`
 
 ## 6) Как использовать голос для нескольких операций
 

@@ -17,3 +17,4 @@ class BotStates(StatesGroup):
     waiting_ai_question = State()
     waiting_trainer_profile = State()
     waiting_trainer_question = State()
+    waiting_vacancy_input = State()
