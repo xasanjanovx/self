@@ -26,15 +26,15 @@ _VACANCY_KEYWORDS = (
     "требует",
     "требуется",
     "работа",
+    "зарплат",
+    "оклад",
+    "контакт",
     "ish kerak",
     "vakans",
     "bo'sh ish",
     "bo‘sh ish",
     "maosh",
-    "зарплат",
-    "оклад",
     "aloqa",
-    "контакт",
 )
 
 
@@ -52,13 +52,13 @@ def _h(value: str) -> str:
 def _list_block(items: list[str]) -> str:
     if not items:
         return "-"
-    return "<br/>".join(f"- {_h(item)}" for item in items)
+    return "\n".join(f"- {_h(item)}" for item in items)
 
 
 def _titles_block(titles: list[str], premium: bool) -> str:
     if not titles:
         return f"{_emoji('title', premium)} <b>-</b>"
-    return "<br/>".join(f"{_emoji('title', premium)} <b>{_h(title)}</b>" for title in titles)
+    return "\n".join(f"{_emoji('title', premium)} <b>{_h(title)}</b>" for title in titles)
 
 
 def _telegram_block(value: str | None) -> str:
@@ -93,26 +93,43 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
     phone = data.phone or "-"
     telegram = _telegram_block(data.telegram)
 
-    return (
-        f"<b>{_emoji('top', premium)}</b><br/>"
-        "— — — — — — — — — — —<br/>"
-        "<b>Bo'sh ish o'rinlari:</b><br/>"
-        f"{_titles_block(data.titles, premium)}<br/><br/>"
-        f"{_emoji('location', premium)}<b>Hudud:</b> <b>{_h(region.upper())}</b><br/>"
-        f"<b>Manzil:</b> {_h(address)}<br/><br/>"
-        f"{_emoji('salary', premium)}<b>Oylik maosh:</b><br/>{_h(salary)}<br/><br/>"
-        f"{_emoji('schedule', premium)}<b>Ish vaqti:</b><br/>{_h(schedule)}<br/><br/>"
-        f"{_emoji('requirements', premium)}<b>Talablar:</b><br/>{_list_block(data.requirements)}<br/><br/>"
-        f"{_emoji('benefits', premium)}<b>Qulayliklar:</b><br/>{_list_block(data.benefits)}<br/><br/>"
-        f"<b>{_emoji('duties', premium)}</b><b>Vazifalar:</b><br/>{_list_block(data.duties)}<br/><br/>"
-        f"{_emoji('phone', premium)}<b>Aloqa:</b> {_h(phone)}<br/>"
-        f"{_emoji('telegram', premium)}<b>Telegram:</b> {telegram}<br/><br/>"
-        "<blockquote><b>❗️E'lonlardagi ma'lumotlar uchun kanal ma'muriyati javobgar emas. "
-        "Shaxsiy ma'lumotlaringizni bermang, ish beruvchi pul so'rasa - adminni ogohlantiring.\n"
-        "Ogoh bo'ling!</b></blockquote><br/><br/>"
+    lines = [
+        f"<b>{_emoji('top', premium)}</b>",
+        "— — — — — — — — — — —",
+        "<b>Bo'sh ish o'rinlari:</b>",
+        _titles_block(data.titles, premium),
+        "",
+        f"{_emoji('location', premium)}<b>Hudud:</b> <b>{_h(region.upper())}</b>",
+        f"<b>Manzil:</b> {_h(address)}",
+        "",
+        f"{_emoji('salary', premium)}<b>Oylik maosh:</b>",
+        _h(salary),
+        "",
+        f"{_emoji('schedule', premium)}<b>Ish vaqti:</b>",
+        _h(schedule),
+        "",
+        f"{_emoji('requirements', premium)}<b>Talablar:</b>",
+        _list_block(data.requirements),
+        "",
+        f"{_emoji('benefits', premium)}<b>Qulayliklar:</b>",
+        _list_block(data.benefits),
+        "",
+        f"<b>{_emoji('duties', premium)}</b><b>Vazifalar:</b>",
+        _list_block(data.duties),
+        "",
+        f"{_emoji('phone', premium)}<b>Aloqa:</b> {_h(phone)}",
+        f"{_emoji('telegram', premium)}<b>Telegram:</b> {telegram}",
+        "",
+        (
+            "<blockquote><b>❗️E'lonlardagi ma'lumotlar uchun kanal ma'muriyati javobgar emas. "
+            "Shaxsiy ma'lumotlaringizni bermang, ish beruvchi pul so'rasa - adminni ogohlantiring.\n"
+            "Ogoh bo'ling!</b></blockquote>"
+        ),
+        "",
         f"{_emoji('footer', premium)} <a href=\"https://t.me/ishdasiz\"><b>ISHDASIZ</b></a> - "
-        "<b>Tez va oson ish toping!</b>"
-    )
+        "<b>Tez va oson ish toping!</b>",
+    ]
+    return "\n".join(lines)
 
 
 def looks_like_vacancy(text: str) -> bool:
