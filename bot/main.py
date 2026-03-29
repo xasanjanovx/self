@@ -52,6 +52,7 @@ from .reports import build_weekly_summary
 from .states import BotStates
 from .vacancy import (
     VACANCY_DEFAULT_REGION_TAG,
+    build_contact_url,
     build_vacancy_panel_text,
     format_vacancy_post,
     looks_like_vacancy,
@@ -1386,7 +1387,7 @@ async def _edit_panel_from_state_with_fallback(
     premium_text: str,
     fallback_text: str,
     reply_markup: InlineKeyboardMarkup,
-) -> None:
+) -> str:
     data = await state.get_data()
     panel_message_id = data.get("panel_message_id")
     text_variants = [premium_text] if premium_text == fallback_text else [premium_text, fallback_text]
@@ -1399,15 +1400,20 @@ async def _edit_panel_from_state_with_fallback(
                     message_id=int(panel_message_id),
                     text=text,
                     reply_markup=reply_markup,
+                    disable_web_page_preview=True,
                 )
-                return
+                return text
 
-            sent = await message.answer(text, reply_markup=reply_markup)
+            sent = await message.answer(
+                text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
             await state.update_data(panel_message_id=sent.message_id)
-            return
+            return text
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
-                return
+                return text
             if index == len(text_variants) - 1:
                 raise
 
@@ -1439,6 +1445,7 @@ async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
         )
         premium_text = format_vacancy_post(payload, premium=True)
         fallback_text = format_vacancy_post(payload, premium=False)
+        contact_url = build_contact_url(payload.telegram)
     except Exception as exc:
         logger.exception("Vacancy template build failed")
         await safe_delete_message(message)
@@ -1453,12 +1460,16 @@ async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.set_state(BotStates.waiting_vacancy_input)
     try:
-        await _edit_panel_from_state_with_fallback(
+        rendered = await _edit_panel_from_state_with_fallback(
             message,
             state,
             premium_text,
             fallback_text,
-            vacancy_result_keyboard(lang),
+            vacancy_result_keyboard(lang, contact_url),
+        )
+        await state.update_data(
+            last_vacancy_text=rendered,
+            last_vacancy_contact_url=contact_url,
         )
     except Exception as exc:
         logger.exception("Vacancy result send failed")
@@ -1473,6 +1484,36 @@ async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
             f"{error_label}: {_h(exc)}",
             vacancy_panel_keyboard(lang),
         )
+
+
+async def _attach_vacancy_preview_photo(message: Message, state: FSMContext) -> bool:
+    if not message.photo:
+        return False
+
+    data = await state.get_data()
+    text = str(data.get("last_vacancy_text") or "").strip()
+    if not text:
+        return False
+
+    lang = _lang_for_user_id(message.from_user.id)
+    contact_url = str(data.get("last_vacancy_contact_url") or "").strip() or None
+    panel_message_id = data.get("panel_message_id")
+
+    await safe_delete_message(message)
+
+    if panel_message_id is not None:
+        try:
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
+        except Exception:
+            pass
+
+    sent = await message.answer_photo(
+        photo=message.photo[-1].file_id,
+        caption=text,
+        reply_markup=vacancy_result_keyboard(lang, contact_url),
+    )
+    await state.update_data(panel_message_id=sent.message_id)
+    return True
 
 
 @router.message(CommandStart())
@@ -2498,6 +2539,26 @@ async def cmd_vacancy(message: Message, state: FSMContext) -> None:
 
 @router.message(BotStates.waiting_vacancy_input)
 async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
+    raw_text = _message_text_payload(message)
+
+    if message.photo and not raw_text:
+        attached = await _attach_vacancy_preview_photo(message, state)
+        if attached:
+            return
+        lang = _lang_for_user_id(message.from_user.id)
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "Сначала отправь текст вакансии, потом фото превью.",
+                "Avval vakansiya matnini yuboring, keyin preview rasmni yuboring.",
+            ),
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
     await _process_vacancy_message(message, state)
 
 

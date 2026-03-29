@@ -55,6 +55,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Мобилити",
         "trainer_ask": "✍️ Спросить тренера",
         "vacancy_again": "📣 Еще вакансия",
+        "vacancy_contact": "✉️ Написать работодателю",
         "delete_reminder": "Удалить • {time} {text}",
     },
     "uz": {
@@ -105,6 +106,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Mobiliti",
         "trainer_ask": "✍️ Trenerga savol",
         "vacancy_again": "📣 Yana vakansiya",
+        "vacancy_contact": "✉️ Ish beruvchiga yozish",
         "delete_reminder": "O'chirish • {time} {text}",
     },
 }
@@ -393,13 +395,13 @@ def vacancy_panel_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
-def vacancy_result_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=_t(lang, "vacancy_again"), callback_data="vacancy:again")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
-        ]
-    )
+def vacancy_result_keyboard(lang: str = "ru", contact_url: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if contact_url:
+        rows.append([InlineKeyboardButton(text=_t(lang, "vacancy_contact"), url=contact_url)])
+    rows.append([InlineKeyboardButton(text=_t(lang, "vacancy_again"), callback_data="vacancy:again")])
+    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
