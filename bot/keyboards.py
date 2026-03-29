@@ -15,6 +15,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_trainer": "🏋️ Тренер",
         "menu_report": "📊 Отчет",
         "menu_vacancy": "📣 Вакансии",
+        "menu_ai": "🤖 AI",
         "menu_language": "🌐 Язык",
         "back": "⬅️ Назад",
         "to_menu": "🏠 В меню",
@@ -64,6 +65,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_trainer": "🏋️ Trener",
         "menu_report": "📊 Hisobot",
         "menu_vacancy": "📣 Vakansiya",
+        "menu_ai": "🤖 AI",
         "menu_language": "🌐 Til",
         "back": "⬅️ Ortga",
         "to_menu": "🏠 Menyu",
@@ -131,6 +133,9 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text=_t(lang, "menu_vacancy"), callback_data="menu:vacancy"),
+                InlineKeyboardButton(text=_t(lang, "menu_ai"), callback_data="menu:ai"),
+            ],
+            [
                 InlineKeyboardButton(text=_t(lang, "menu_language"), callback_data="menu:language"),
             ],
         ]

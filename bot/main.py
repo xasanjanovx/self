@@ -1370,6 +1370,16 @@ def _message_text_payload(message: Message) -> str:
     return str(message.text or message.caption or "").strip()
 
 
+def _command_argument(text: str | None) -> str:
+    raw = str(text or "").strip()
+    if not raw.startswith("/"):
+        return raw
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return parts[1].strip()
+
+
 async def _edit_panel_from_state_with_fallback(
     message: Message,
     state: FSMContext,
@@ -2771,24 +2781,90 @@ async def cmd_export(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == 'menu:ai')
 async def cb_menu_ai(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await callback.answer(_tr(lang, "AI-помощник отключен", "AI yordamchi o'chirilgan"), show_alert=True)
+    await state.set_state(BotStates.waiting_ai_question)
+    await _remember_panel(callback, state)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "🤖 <b>AI-помощник</b>\n\nНапиши вопрос одним сообщением.\nПример: Как сократить расходы на еду на 15% в этом месяце?",
+            "🤖 <b>AI-yordamchi</b>\n\nSavolingizni bitta xabarda yozing.\nMisol: Shu oy ovqat xarajatlarini 15% ga qanday kamaytirsam bo'ladi?",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
+    await callback.answer()
 
 
 @router.message(Command('ai'))
 async def cmd_ai(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    await safe_delete_message(message)
-    await state.clear()
     lang = _lang_for_user_id(message.from_user.id)
-    await message.answer(_tr(lang, "AI-помощник отключен в этой версии.", "AI yordamchi bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
+    question = _command_argument(message.text)
+    await safe_delete_message(message)
+
+    if not question:
+        await state.set_state(BotStates.waiting_ai_question)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(
+                lang,
+                "🤖 <b>AI-помощник</b>\n\nНапиши вопрос одним сообщением.",
+                "🤖 <b>AI-yordamchi</b>\n\nSavolingizni bitta xabarda yozing.",
+            ),
+            back_to_menu_keyboard(lang),
+        )
+        return
+
+    try:
+        context = db.get_ai_context(message.from_user.id)
+        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
+    except Exception as exc:
+        logger.exception("AI assistant failed in /ai command")
+        await message.answer(
+            f"{_tr(lang, 'Ошибка AI', 'AI xatosi')}: {_h(exc)}",
+            reply_markup=back_to_menu_keyboard(lang),
+        )
+        return
+
+    await state.clear()
+    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
 
 
 @router.message(BotStates.waiting_ai_question, F.text)
 async def msg_ai_question(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    question = (message.text or "").strip()
+
+    if not question:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            _tr(lang, "Вопрос пустой.", "Savol bo'sh."),
+            back_to_menu_keyboard(lang),
+        )
+        return
+
+    try:
+        context = db.get_ai_context(message.from_user.id)
+        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
+    except Exception as exc:
+        logger.exception("AI assistant failed")
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            f"{_tr(lang, 'Ошибка AI', 'AI xatosi')}: {_h(exc)}",
+            back_to_menu_keyboard(lang),
+        )
+        return
+
     await safe_delete_message(message)
     await state.clear()
+    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
 
 
 @router.message()
