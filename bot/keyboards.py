@@ -45,6 +45,9 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "report_weekly": "🔔 Раз в неделю",
         "report_monthly": "🗓️ Раз в месяц",
         "report_off": "⛔ Выключить",
+        "report_view_week": "📅 Неделя",
+        "report_view_month": "🗓️ Месяц",
+        "report_view_all": "🧾 Всё",
         "report_status_on": "Сейчас: включено",
         "report_status_off": "Сейчас: выключено",
         "lang_ru": "Русский",
@@ -55,7 +58,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Мобилити",
         "trainer_ask": "✍️ Спросить тренера",
         "vacancy_again": "📣 Еще вакансия",
-        "vacancy_contact": "Bog'lanish",
+        "vacancy_contact": "📩 Bog'lanish",
         "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
         "delete_reminder": "Удалить • {time} {text}",
     },
@@ -97,6 +100,9 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "report_weekly": "🔔 Haftada bir marta",
         "report_monthly": "🗓️ Oyda bir marta",
         "report_off": "⛔ O'chirish",
+        "report_view_week": "📅 Hafta",
+        "report_view_month": "🗓️ Oy",
+        "report_view_all": "🧾 Hammasi",
         "report_status_on": "Hozir: yoqilgan",
         "report_status_off": "Hozir: o'chirilgan",
         "lang_ru": "Русский",
@@ -107,7 +113,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Mobiliti",
         "trainer_ask": "✍️ Trenerga savol",
         "vacancy_again": "📣 Yana vakansiya",
-        "vacancy_contact": "Bog'lanish",
+        "vacancy_contact": "📩 Bog'lanish",
         "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
         "delete_reminder": "O'chirish • {time} {text}",
     },
@@ -346,15 +352,37 @@ def reminders_keyboard(reminders: list[dict], lang: str = "ru") -> InlineKeyboar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def report_settings_keyboard(lang: str = "ru", *, frequency: str = "weekly", enabled: bool = True) -> InlineKeyboardMarkup:
+def report_settings_keyboard(
+    lang: str = "ru",
+    *,
+    frequency: str = "weekly",
+    enabled: bool = True,
+    period: str = "week",
+) -> InlineKeyboardMarkup:
     if enabled:
         current_label = _t(lang, "report_weekly") if frequency == "weekly" else _t(lang, "report_monthly")
         status = f"{_t(lang, 'report_status_on')} · {current_label}"
     else:
         status = _t(lang, "report_status_off")
 
+    period = period if period in {"week", "month", "all"} else "week"
+    week_text = _t(lang, "report_view_week")
+    month_text = _t(lang, "report_view_month")
+    all_text = _t(lang, "report_view_all")
+    if period == "week":
+        week_text = f"✅ {week_text}"
+    elif period == "month":
+        month_text = f"✅ {month_text}"
+    else:
+        all_text = f"✅ {all_text}"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text=week_text, callback_data="report:view:week"),
+                InlineKeyboardButton(text=month_text, callback_data="report:view:month"),
+                InlineKeyboardButton(text=all_text, callback_data="report:view:all"),
+            ],
             [InlineKeyboardButton(text=status, callback_data="noop")],
             [
                 InlineKeyboardButton(text=_t(lang, "report_weekly"), callback_data="report:set:weekly"),

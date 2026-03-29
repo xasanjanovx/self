@@ -2501,35 +2501,97 @@ def _report_prefs_label(lang: str, enabled: bool, frequency: str) -> str:
     return _tr(lang, "Раз в неделю", "Haftada bir marta") if frequency == "weekly" else _tr(lang, "Раз в месяц", "Oyda bir marta")
 
 
-def _report_days(enabled: bool, frequency: str) -> int:
-    if not enabled:
-        return 7
-    return 30 if frequency == "monthly" else 7
+def _report_period_days(period: str) -> int:
+    safe = str(period or "week").strip().lower()
+    if safe == "month":
+        return 30
+    if safe == "all":
+        return 36500
+    return 7
 
 
-def _report_summary_for_user(telegram_id: int, *, days: int) -> str:
-    user, _, currency = _user_profile(telegram_id)
-    lang = _lang_from_user(user)
-    payload = db.get_period_payload(telegram_id, days=days)
-    summary = build_weekly_summary(payload, currency=currency)
-    title = _tr(lang, "Недельный срез" if days == 7 else "Месячный срез", "Haftalik kesim" if days == 7 else "Oylik kesim")
-    return f"<b>{title}</b>\n{_h(summary)}"
+def _report_period_label(lang: str, period: str) -> str:
+    safe = str(period or "week").strip().lower()
+    if safe == "month":
+        return _tr(lang, "Месяц", "Oy")
+    if safe == "all":
+        return _tr(lang, "Всё время", "Barcha vaqt")
+    return _tr(lang, "Неделя", "Hafta")
 
 
-def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
-    user = db.get_user(telegram_id) or {}
+def _report_panel_text(telegram_id: int, period: str = "week") -> tuple[str, dict[str, Any], str]:
+    user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
     prefs = db.get_report_preferences(telegram_id)
     enabled = bool(prefs.get("enabled", True))
     frequency = str(prefs.get("frequency") or "weekly")
-    days = _report_days(enabled, frequency)
-    summary = _report_summary_for_user(telegram_id, days=days)
+    safe_period = str(period or "week").strip().lower()
+    if safe_period not in {"week", "month", "all"}:
+        safe_period = "week"
+    days = _report_period_days(safe_period)
+
+    payload = db.get_period_payload(telegram_id, days=days)
+    finance_entries = payload.get("finance_entries", [])
+    clean_finance_entries = [
+        entry
+        for entry in finance_entries
+        if not str(entry.get("note") or "").strip().lower().startswith("[x:")
+    ]
+    income = sum(float(entry.get("amount") or 0) for entry in clean_finance_entries if entry.get("entry_type") == "income")
+    expense = sum(float(entry.get("amount") or 0) for entry in clean_finance_entries if entry.get("entry_type") == "expense")
+    net = income - expense
+
+    calorie_logs = payload.get("calorie_logs", [])
+    meal_count = len(calorie_logs)
+    total_kcal = sum(float(item.get("calories") or 0) for item in calorie_logs)
+    total_p = sum(float(item.get("protein") or 0) for item in calorie_logs)
+    total_f = sum(float(item.get("fat") or 0) for item in calorie_logs)
+    total_c = sum(float(item.get("carbs") or 0) for item in calorie_logs)
+    avg_kcal = (total_kcal / meal_count) if meal_count else 0.0
+
+    habits = payload.get("habits", [])
+    habit_logs = payload.get("habit_logs", [])
+    habits_total = len(habits)
+    done_habit_logs = len([log for log in habit_logs if bool(log.get("completed", True))])
+    habit_days = len({str(log.get("log_date") or "") for log in habit_logs if log.get("log_date")})
+    checkins = payload.get("checkins", [])
+    checkin_streak = db.get_checkin_streak(telegram_id, tz_name=tz_name)
+    goals_count = len(payload.get("goals", []))
+
+    nutrition_profile = db.get_nutrition_profile(telegram_id) or {}
+    target_kcal = float(nutrition_profile.get("daily_calories") or 0)
+    period_label = _report_period_label(lang, safe_period)
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+
     status = _report_prefs_label(lang, enabled, frequency)
     text = (
         f"📊 <b>{_tr(lang, 'Отчет / Аналитика', 'Hisobot / Analitika')}</b>\n"
+        f"<i>{_tr(lang, 'Период', 'Davr')}: {period_label} ({start_date} — {end_date})</i>\n"
         f"<i>{_tr(lang, 'Авто-уведомления', 'Avto-xabarnomalar')}: {status}</i>\n\n"
-        f"{summary}\n\n"
-        f"{_tr(lang, 'Выбери режим уведомлений ниже.', 'Quyida xabarnoma rejimini tanlang.')}"
+        f"💰 <b>{_tr(lang, 'Финансы', 'Moliya')}</b>\n"
+        f"• {_tr(lang, 'Доход', 'Daromad')}: <b>{_fmt_money(income)} {currency}</b>\n"
+        f"• {_tr(lang, 'Расход', 'Xarajat')}: <b>{_fmt_money(expense)} {currency}</b>\n"
+        f"• {_tr(lang, 'Баланс', 'Balans')}: <b>{_fmt_money(net)} {currency}</b>\n"
+        f"• {_tr(lang, 'Операций', 'Operatsiyalar')}: {len(clean_finance_entries)}\n\n"
+        f"🍽️ <b>{_tr(lang, 'Питание', 'Oziqlanish')}</b>\n"
+        f"• {_tr(lang, 'Приемов', 'Qabullar')}: {meal_count}\n"
+        f"• {_tr(lang, 'Калории (среднее)', 'Kaloriya (o‘rtacha)')}: {int(total_kcal)} / {int(avg_kcal)}\n"
+        f"• {_tr(lang, 'Б/Ж/У всего', 'O/Y/U jami')}: {int(total_p)} / {int(total_f)} / {int(total_c)}\n"
+        + (
+            f"• {_tr(lang, 'Цель ккал/день', 'Kunlik maqsad kkal')}: {int(target_kcal)}\n\n"
+            if target_kcal > 0
+            else "\n"
+        )
+        + (
+            f"✅ <b>{_tr(lang, 'Привычки и прогресс', 'Odatlar va progress')}</b>\n"
+            f"• {_tr(lang, 'Активных привычек', 'Faol odatlar')}: {habits_total}\n"
+            f"• {_tr(lang, 'Выполнений', 'Bajarilgan')}: {done_habit_logs} ({_tr(lang, 'дней с отметкой', 'belgili kunlar')}: {habit_days})\n"
+            f"• {_tr(lang, 'Дневные отметки', 'Kunlik belgilashlar')}: {len(checkins)}\n"
+            f"• {_tr(lang, 'Серия дней', 'Ketma-ket kunlar')}: {checkin_streak}\n"
+            f"• {_tr(lang, 'Целей', 'Maqsadlar')}: {goals_count}\n\n"
+            f"{_tr(lang, 'Выбери период и настройки ниже.', 'Quyida davr va sozlamani tanlang.')}"
+        )
     )
     return text, prefs, lang
 
@@ -2539,7 +2601,8 @@ def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
 async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    text, prefs, lang = _report_panel_text(callback.from_user.id)
+    period = "week"
+    text, prefs, lang = _report_panel_text(callback.from_user.id, period=period)
     await safe_edit_message(
         callback,
         text,
@@ -2547,14 +2610,43 @@ async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
         ),
     )
+    await _remember_panel(callback, state)
+    await state.update_data(report_view_period=period)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report:view:"))
+async def cb_report_view_period(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    period = callback.data.split("report:view:", 1)[1].strip().lower()
+    if period not in {"week", "month", "all"}:
+        period = "week"
+    text, prefs, lang = _report_panel_text(callback.from_user.id, period=period)
+    await safe_edit_message(
+        callback,
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+            period=period,
+        ),
+    )
+    await _remember_panel(callback, state)
+    await state.update_data(report_view_period=period)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    data = await state.get_data()
+    period = str(data.get("report_view_period") or "week").strip().lower()
+    if period not in {"week", "month", "all"}:
+        period = "week"
     await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
     mode = callback.data.split("report:set:", 1)[1].strip().lower()
@@ -2577,7 +2669,7 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             last_sent_key=last_key,
         )
 
-    text, prefs, _ = _report_panel_text(callback.from_user.id)
+    text, prefs, _ = _report_panel_text(callback.from_user.id, period=period)
     await safe_edit_message(
         callback,
         text,
@@ -2585,8 +2677,11 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
         ),
     )
+    await _remember_panel(callback, state)
+    await state.update_data(report_view_period=period)
     await callback.answer(_tr(lang, "Настройки обновлены", "Sozlamalar yangilandi"))
 
 
@@ -2596,15 +2691,19 @@ async def cmd_report(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     await safe_delete_message(message)
     await state.clear()
-    text, prefs, lang = _report_panel_text(message.from_user.id)
-    await message.answer(
+    period = "week"
+    text, prefs, lang = _report_panel_text(message.from_user.id, period=period)
+    sent = await message.answer(
         text,
         reply_markup=report_settings_keyboard(
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
         ),
+        disable_web_page_preview=True,
     )
+    await state.update_data(panel_message_id=sent.message_id, report_view_period=period)
 
 
 @router.callback_query(F.data == "menu:vacancy")
@@ -2681,7 +2780,15 @@ async def cmd_vacancy(message: Message, state: FSMContext) -> None:
 
 @router.message(BotStates.waiting_vacancy_input)
 async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    data = await state.get_data()
     raw_text = _message_text_payload(message)
+    has_ready_vacancy = bool(str(data.get("last_vacancy_text") or "").strip())
+
+    if message.photo and has_ready_vacancy and (not raw_text or (not looks_like_vacancy(raw_text) and not _looks_like_finance_text(raw_text))):
+        attached = await _attach_vacancy_preview_photo(message, state)
+        if attached:
+            return
 
     if message.photo and not raw_text:
         attached = await _attach_vacancy_preview_photo(message, state)
@@ -2699,6 +2806,11 @@ async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
             ),
             vacancy_panel_keyboard(lang),
         )
+        return
+
+    if raw_text and _looks_like_finance_text(raw_text):
+        await state.set_state(BotStates.waiting_finance_input)
+        await msg_finance_input(message, state)
         return
 
     await _process_vacancy_message(message, state)

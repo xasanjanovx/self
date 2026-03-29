@@ -77,7 +77,7 @@ _VACANCY_DISCLAIMER_LINES = (
     "Ogoh bo'ling!",
 )
 _VACANCY_FOOTER_TEXT = "ISHDASIZ - Tez va oson ish toping!"
-_VACANCY_DIVIDER = "_ _ _ _ _ _ _ _ _ _ _"
+_VACANCY_DIVIDER = "— — — — — — — — — — —"
 
 
 def _emoji(name: str, premium: bool) -> str:
@@ -256,7 +256,7 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
     telegram = _telegram_block(data.telegram)
 
     lines: list[str] = [
-        f"{_emoji('top', premium)} <b>{_h(headline)}</b>",
+        f"{_emoji('top', premium)} <b><i>{_h(headline)}</i></b>",
         _VACANCY_DIVIDER,
         "",
     ]
@@ -268,40 +268,40 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
         _append_blank(lines)
 
     if company:
-        lines.append(f"Kompaniya: <b>{_h(company)}</b>")
+        lines.append(f"<b>Kompaniya:</b> <b>{_h(company)}</b>")
     if region:
-        lines.append(f"Hudud: <b>{_h(region.upper())}</b>")
+        lines.append(f"<b>Hudud:</b> <b>{_h(region.upper())}</b>")
     if address:
-        lines.append(f"Manzil: {_h(address)}")
+        lines.append(f"<b>Manzil:</b> {_h(address)}")
     if company or region or address:
         _append_blank(lines)
 
     if salary:
-        lines.append(f"{_emoji('salary', premium)} Oylik maosh:")
+        lines.append(f"{_emoji('salary', premium)} <b>Oylik maosh:</b>")
         lines.append(_h(salary))
         _append_blank(lines)
 
     if schedule:
-        lines.append(f"{_emoji('schedule', premium)} Ish vaqti:")
+        lines.append(f"{_emoji('schedule', premium)} <b>Ish vaqti:</b>")
         lines.append(_h(schedule))
         _append_blank(lines)
 
-    _append_section(lines, f"{_emoji('requirements', premium)} Talablar:", requirements)
-    _append_section(lines, f"{_emoji('benefits', premium)} Qulayliklar:", benefits)
-    _append_section(lines, f"{_emoji('duties', premium)} Vazifalar:", duties)
-    _append_section(lines, "Qo'shimcha ma'lumotlar:", details)
+    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements)
+    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits)
+    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties)
+    _append_section(lines, "<b>Qo'shimcha ma'lumotlar:</b>", details)
 
     if phone:
-        lines.append(f"{_emoji('phone', premium)} Aloqa: {_h(phone)}")
+        lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {_h(phone)}")
     if telegram:
-        lines.append(f"{_emoji('telegram', premium)} Telegram: {telegram}")
+        lines.append(f"{_emoji('telegram', premium)} <b>Telegram:</b> {telegram}")
     if phone or telegram:
         _append_blank(lines)
 
-    lines.append(_h(_VACANCY_DISCLAIMER_LINES[0]))
-    lines.append(_h(_VACANCY_DISCLAIMER_LINES[1]))
+    quote_text = _h(_VACANCY_DISCLAIMER_LINES[0]) + "\n" + _h(_VACANCY_DISCLAIMER_LINES[1])
+    lines.append(f"<blockquote>{quote_text}</blockquote>")
     _append_blank(lines)
-    lines.append(f"{_emoji('footer', premium)} {_h(_VACANCY_FOOTER_TEXT)}")
+    lines.append(f"{_emoji('footer', premium)} <b>{_h(_VACANCY_FOOTER_TEXT)}</b>")
 
     while lines and not lines[-1].strip():
         lines.pop()
