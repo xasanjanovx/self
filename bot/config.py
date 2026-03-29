@@ -40,11 +40,14 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
-def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
+def _gemini_model(name: str, default: str = "gemini-3-flash-preview") -> str:
     value = os.getenv(name, "").strip()
     if not value:
         return default
-    if value in {"gemini-3-flash-preview", "gemini-3-flash"}:
+    lower = value.lower()
+    if lower.startswith("gemini-2.5"):
+        return default
+    if lower == "gemini-3-flash":
         return default
     return value
 

@@ -45,6 +45,7 @@ from .keyboards import (
     nutrition_goal_keyboard,
     report_settings_keyboard,
     trainer_keyboard,
+    vacancy_channel_keyboard,
     vacancy_panel_keyboard,
     vacancy_result_keyboard,
 )
@@ -1252,7 +1253,7 @@ async def safe_delete_message(message: Message | None) -> None:
         pass
 
 
-async def send_main_menu(message: Message, telegram_id: int) -> None:
+async def send_main_menu(message: Message, telegram_id: int) -> Message:
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
     try:
@@ -1260,7 +1261,7 @@ async def send_main_menu(message: Message, telegram_id: int) -> None:
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    await message.answer(text, reply_markup=main_menu_keyboard(lang))
+    return await message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
 async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
@@ -1328,6 +1329,17 @@ async def _edit_panel_from_state(
     await state.update_data(panel_message_id=sent.message_id)
 
 
+async def _delete_panel_from_state(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    panel_message_id = data.get("panel_message_id")
+    if panel_message_id is None:
+        return
+    try:
+        await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
+    except Exception:
+        pass
+
+
 async def force_remove_reply_keyboard(message: Message) -> None:
     try:
         ghost = await message.answer('\u2063', reply_markup=ReplyKeyboardRemove())
@@ -1386,8 +1398,11 @@ def _looks_like_finance_text(text: str) -> bool:
     if not lower:
         return False
 
-    has_amount = bool(re.search(r"\d[\d\s]{2,}", lower))
-    finance_words = (
+    has_amount = bool(re.search(r"\d[\d\s]{1,}", lower))
+    if not has_amount:
+        return False
+
+    direct = (
         "доход",
         "расход",
         "трата",
@@ -1395,17 +1410,21 @@ def _looks_like_finance_text(text: str) -> bool:
         "expense",
         "daromad",
         "xarajat",
-        "карта",
-        "нал",
+        "потрат",
+        "заработ",
+        "оплатил",
+    )
+    transfer = (
+        "в долг",
         "долг",
         "qarz",
-        "uzs",
-        "sum",
-        "so'm",
-        "сум",
+        "карта",
+        "налич",
+        "naqd",
+        "kartaga",
+        "kartadan",
     )
-    has_keyword = any(word in lower for word in finance_words)
-    return has_keyword and has_amount
+    return any(token in lower for token in direct) or any(token in lower for token in transfer)
 
 
 async def _edit_panel_from_state_with_fallback(
@@ -1492,11 +1511,12 @@ async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
             state,
             premium_text,
             fallback_text,
-            vacancy_result_keyboard(lang, contact_url),
+            vacancy_result_keyboard(lang, contact_url, show_publish=False),
         )
         await state.update_data(
             last_vacancy_text=rendered,
             last_vacancy_contact_url=contact_url,
+            last_vacancy_photo_file_id=None,
         )
     except Exception as exc:
         logger.exception("Vacancy result send failed")
@@ -1537,37 +1557,46 @@ async def _attach_vacancy_preview_photo(message: Message, state: FSMContext) -> 
     sent = await message.answer_photo(
         photo=message.photo[-1].file_id,
         caption=text,
-        reply_markup=vacancy_result_keyboard(lang, contact_url),
+        reply_markup=vacancy_result_keyboard(lang, contact_url, show_publish=True),
     )
-    await state.update_data(panel_message_id=sent.message_id)
+    await state.update_data(
+        panel_message_id=sent.message_id,
+        last_vacancy_photo_file_id=message.photo[-1].file_id,
+    )
     return True
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    sent = await send_main_menu(message, message.from_user.id)
+    await state.update_data(panel_message_id=sent.message_id)
 
 
 @router.message(Command('menu'))
 async def cmd_menu(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    sent = await send_main_menu(message, message.from_user.id)
+    await state.update_data(panel_message_id=sent.message_id)
 
 
 @router.message(Command('help'))
 async def cmd_help(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
+    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    sent = await send_main_menu(message, message.from_user.id)
+    await state.update_data(panel_message_id=sent.message_id)
 
 
 @router.callback_query(F.data == 'noop')
@@ -1580,6 +1609,8 @@ async def cb_menu_open(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
     await edit_main_menu(callback, callback.from_user.id)
+    if callback.message:
+        await state.update_data(panel_message_id=callback.message.message_id)
     await callback.answer()
 
 
@@ -2570,6 +2601,49 @@ async def cb_menu_vacancy(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "vacancy:publish")
+async def cb_vacancy_publish(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    data = await state.get_data()
+
+    photo_file_id = str(data.get("last_vacancy_photo_file_id") or "").strip()
+    caption = str(data.get("last_vacancy_text") or "").strip()
+    contact_url = str(data.get("last_vacancy_contact_url") or "").strip() or None
+
+    if not photo_file_id or not caption:
+        await callback.answer(
+            _tr(
+                lang,
+                "Сначала отправь фото превью вакансии.",
+                "Avval vakansiya preview rasmini yuboring.",
+            ),
+            show_alert=True,
+        )
+        return
+
+    try:
+        await callback.bot.send_photo(
+            chat_id="@ishdasiz",
+            photo=photo_file_id,
+            caption=caption,
+            reply_markup=vacancy_channel_keyboard(lang, contact_url),
+        )
+    except Exception as exc:
+        logger.exception("Vacancy publish to channel failed")
+        await callback.answer(
+            _tr(
+                lang,
+                "Не удалось опубликовать. Дай боту права админа в @ishdasiz.",
+                "E'lon qilib bo'lmadi. Botni @ishdasiz kanaliga admin qiling.",
+            ),
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(_tr(lang, "Опубликовано в @ishdasiz", "@ishdasiz kanaliga yuborildi"))
+
+
 @router.message(Command("vacancy"))
 async def cmd_vacancy(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -2630,6 +2704,8 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     selected = "uz" if selected == "uz" else "ru"
     db.update_user_language(callback.from_user.id, selected)
     await edit_main_menu(callback, callback.from_user.id)
+    if callback.message:
+        await state.update_data(panel_message_id=callback.message.message_id)
     await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
 
 
@@ -2981,8 +3057,10 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
     raw_text = _message_text_payload(message)
     text = raw_text.lower()
     if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
+        await _delete_panel_from_state(message, state)
         await safe_delete_message(message)
-        await send_main_menu(message, message.from_user.id)
+        sent = await send_main_menu(message, message.from_user.id)
+        await state.update_data(panel_message_id=sent.message_id)
         return
     if message.photo:
         await state.set_state(BotStates.waiting_calorie_input)
