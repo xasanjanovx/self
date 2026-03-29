@@ -140,6 +140,7 @@ def build_dashboard_text(telegram_id: int) -> str:
     habits = db.list_today_habits(telegram_id, tz_name=tz_name)
     finance_settings = db.get_finance_settings(telegram_id)
     live_balances = _finance_account_balances(telegram_id)
+    today_income, today_expense = _finance_today_totals(telegram_id, tz_name)
 
     card_balance = float(finance_settings.get("card_base") or 0.0) + float(live_balances["card"])
     cash_balance = float(finance_settings.get("cash_base") or 0.0) + float(live_balances["cash"])
@@ -166,6 +167,7 @@ def build_dashboard_text(telegram_id: int) -> str:
             f"✅ <b>Odatlar</b>\n"
             f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
             f"💰 <b>Moliya</b>\n"
+            f"• Bugun: +{_fmt_money(today_income)} / -{_fmt_money(today_expense)} {currency}\n"
             f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>"
         )
 
@@ -178,6 +180,7 @@ def build_dashboard_text(telegram_id: int) -> str:
         f"✅ <b>Привычки</b>\n"
         f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
         f"💰 <b>Финансы</b>\n"
+        f"• Сегодня: +{_fmt_money(today_income)} / -{_fmt_money(today_expense)} {currency}\n"
         f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>"
     )
 
@@ -692,10 +695,31 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
     return balances
 
 
+def _finance_today_totals(telegram_id: int, tz_name: str | None = None) -> tuple[float, float]:
+    entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
+    income = 0.0
+    expense = 0.0
+
+    for row in entries:
+        note = str(row.get("note") or "").strip().lower()
+        if note.startswith("[x:"):
+            continue
+        amount = float(row.get("amount") or 0.0)
+        if amount <= 0:
+            continue
+        if str(row.get("entry_type") or "expense") == "income":
+            income += amount
+        else:
+            expense += amount
+
+    return income, expense
+
+
 def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
+    today_income, today_expense = _finance_today_totals(telegram_id, tz_name)
     settings_fin = db.get_finance_settings(telegram_id)
     balances_live = _finance_account_balances(telegram_id)
     balances = {
@@ -710,6 +734,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         lines = [
             "💰 <b>Moliya / Professional nazorat</b>",
             "",
+            f"• Bugun: +<b>{_fmt_money(today_income)} {currency}</b> / -<b>{_fmt_money(today_expense)} {currency}</b>",
             f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Joriy hisoblar</b>",
@@ -727,6 +752,7 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         lines = [
             "💰 <b>Финансы / Профессиональный контроль</b>",
             "",
+            f"• Сегодня: +<b>{_fmt_money(today_income)} {currency}</b> / -<b>{_fmt_money(today_expense)} {currency}</b>",
             f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Текущие счета</b>",
@@ -1261,12 +1287,12 @@ async def send_main_menu(message: Message, telegram_id: int) -> Message:
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    return await message.answer(text, reply_markup=main_menu_keyboard(lang))
+    return await message.answer(text, reply_markup=main_menu_keyboard(lang), disable_web_page_preview=True)
 
 
-async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
+async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> int | None:
     if callback.message is None:
-        return
+        return None
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
 
@@ -1276,11 +1302,31 @@ async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
         logger.exception('build_dashboard_text failed in edit_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
     try:
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard(lang))
+        await callback.message.edit_text(
+            text,
+            reply_markup=main_menu_keyboard(lang),
+            disable_web_page_preview=True,
+        )
+        return callback.message.message_id
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
-            return
-        await callback.message.answer(text, reply_markup=main_menu_keyboard(lang))
+            return callback.message.message_id
+        try:
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=main_menu_keyboard(lang),
+            )
+            return callback.message.message_id
+        except Exception as cap_exc:
+            if "message is not modified" in str(cap_exc).lower():
+                return callback.message.message_id
+        sent = await callback.message.answer(
+            text,
+            reply_markup=main_menu_keyboard(lang),
+            disable_web_page_preview=True,
+        )
+        await safe_delete_message(callback.message)
+        return sent.message_id
 
 
 async def safe_edit_message(
@@ -1299,11 +1345,17 @@ async def safe_edit_message(
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
             return
-        await callback.message.answer(
-            text,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        try:
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as cap_exc:
+            if "message is not modified" in str(cap_exc).lower():
+                return
+        await callback.message.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
+        await safe_delete_message(callback.message)
 
 
 async def _remember_panel(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1617,9 +1669,9 @@ async def cb_noop(callback: CallbackQuery) -> None:
 async def cb_menu_open(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    await edit_main_menu(callback, callback.from_user.id)
-    if callback.message:
-        await state.update_data(panel_message_id=callback.message.message_id)
+    panel_id = await edit_main_menu(callback, callback.from_user.id)
+    if panel_id is not None:
+        await state.update_data(panel_message_id=panel_id)
     await callback.answer()
 
 
@@ -2836,9 +2888,9 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     selected = callback.data.split("lang:set:", 1)[1].strip().lower()
     selected = "uz" if selected == "uz" else "ru"
     db.update_user_language(callback.from_user.id, selected)
-    await edit_main_menu(callback, callback.from_user.id)
-    if callback.message:
-        await state.update_data(panel_message_id=callback.message.message_id)
+    panel_id = await edit_main_menu(callback, callback.from_user.id)
+    if panel_id is not None:
+        await state.update_data(panel_message_id=panel_id)
     await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
 
 
