@@ -1381,6 +1381,33 @@ def _command_argument(text: str | None) -> str:
     return parts[1].strip()
 
 
+def _looks_like_finance_text(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    if not lower:
+        return False
+
+    has_amount = bool(re.search(r"\d[\d\s]{2,}", lower))
+    finance_words = (
+        "доход",
+        "расход",
+        "трата",
+        "income",
+        "expense",
+        "daromad",
+        "xarajat",
+        "карта",
+        "нал",
+        "долг",
+        "qarz",
+        "uzs",
+        "sum",
+        "so'm",
+        "сум",
+    )
+    has_keyword = any(word in lower for word in finance_words)
+    return has_keyword and has_amount
+
+
 async def _edit_panel_from_state_with_fallback(
     message: Message,
     state: FSMContext,
@@ -1803,6 +1830,16 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
 
+    if looks_like_vacancy(raw_text):
+        await state.set_state(BotStates.waiting_vacancy_input)
+        await _process_vacancy_message(message, state)
+        return
+
+    if _looks_like_finance_text(raw_text):
+        await state.set_state(BotStates.waiting_finance_input)
+        await msg_finance_input(message, state)
+        return
+
     try:
         estimate = await asyncio.to_thread(ai_service.estimate_calories_by_text, raw_text)
     except Exception as exc:
@@ -2018,6 +2055,16 @@ async def msg_finance_settings_invalid(message: Message) -> None:
 async def msg_finance_input(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
+
+    if message.photo:
+        await state.set_state(BotStates.waiting_calorie_input)
+        await msg_calorie_input_photo(message, state)
+        return
+
+    if message.text and looks_like_vacancy(message.text):
+        await state.set_state(BotStates.waiting_vacancy_input)
+        await _process_vacancy_message(message, state)
+        return
 
     if not message.text and not message.voice and not message.audio:
         await safe_delete_message(message)
@@ -2937,9 +2984,17 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
         await safe_delete_message(message)
         await send_main_menu(message, message.from_user.id)
         return
+    if message.photo:
+        await state.set_state(BotStates.waiting_calorie_input)
+        await msg_calorie_input_photo(message, state)
+        return
     if raw_text and looks_like_vacancy(raw_text):
         await state.set_state(BotStates.waiting_vacancy_input)
         await _process_vacancy_message(message, state)
+        return
+    if raw_text and _looks_like_finance_text(raw_text):
+        await state.set_state(BotStates.waiting_finance_input)
+        await msg_finance_input(message, state)
         return
     await safe_delete_message(message)
 

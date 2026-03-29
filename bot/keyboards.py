@@ -55,7 +55,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Мобилити",
         "trainer_ask": "✍️ Спросить тренера",
         "vacancy_again": "📣 Еще вакансия",
-        "vacancy_contact": "✉️ Написать работодателю",
+        "vacancy_contact": "Bog'lanish",
         "delete_reminder": "Удалить • {time} {text}",
     },
     "uz": {
@@ -106,7 +106,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Mobiliti",
         "trainer_ask": "✍️ Trenerga savol",
         "vacancy_again": "📣 Yana vakansiya",
-        "vacancy_contact": "✉️ Ish beruvchiga yozish",
+        "vacancy_contact": "Bog'lanish",
         "delete_reminder": "O'chirish • {time} {text}",
     },
 }

@@ -9,7 +9,7 @@ from .ai import VacancyTemplateData
 VACANCY_DEFAULT_REGION_TAG = "#TOSHKENT"
 VACANCY_CONTACT_TEMPLATE = (
     "Assalomu Alaykum. @ishdasiz kanalida joylashtirilgan vakansiya bo'yicha bezovta qilyapman. "
-    "Menga to'liqroq ma'lumo bera olasizmi ?"
+    "Menga to'liqroq ma'lumot bera olasizmi ?"
 )
 
 _EMOJI_META = {
@@ -21,9 +21,9 @@ _EMOJI_META = {
     "requirements": ("⚠️", "5881702736843511327"),
     "benefits": ("✅", "5985596818912712352"),
     "duties": ("❗️", "5879813604068298387"),
+    "details": ("ℹ️", "5875465628285931233"),
     "phone": ("📞", "5897938112654348733"),
     "telegram": ("✈️", "5875465628285931233"),
-    "footer": ("➡️", "5260450573768990626"),
 }
 
 _VACANCY_KEYWORDS = (
@@ -62,22 +62,7 @@ def _clean_value(value: str | None) -> str | None:
     return raw
 
 
-def _clean_titles(titles: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for title in titles:
-        clean = _clean_value(title)
-        if not clean:
-            continue
-        key = clean.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(clean)
-    return result
-
-
-def _clean_items(items: list[str]) -> list[str]:
+def _clean_list(items: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for item in items:
@@ -108,19 +93,23 @@ def _username_from_telegram(value: str | None) -> str | None:
     return None
 
 
-def _telegram_block(value: str | None) -> str | None:
-    username = _username_from_telegram(value)
-    if username:
-        return f"@{_h(username)}"
-    clean = _clean_value(value)
-    return _h(clean) if clean else None
-
-
 def build_contact_url(telegram_value: str | None) -> str | None:
     username = _username_from_telegram(telegram_value)
     if not username:
         return None
-    return f"https://t.me/{username}?text={quote(VACANCY_CONTACT_TEMPLATE, safe='')}"
+    encoded = quote(VACANCY_CONTACT_TEMPLATE, safe="")
+    return f"tg://resolve?domain={username}&text={encoded}"
+
+
+def _telegram_block(value: str | None) -> str | None:
+    username = _username_from_telegram(value)
+    if username:
+        contact_url = build_contact_url(f"@{username}")
+        if contact_url:
+            return f'<a href="{html.escape(contact_url)}"><b>@{_h(username)}</b></a>'
+        return f"@{_h(username)}"
+    clean = _clean_value(value)
+    return _h(clean) if clean else None
 
 
 def build_vacancy_panel_text(lang: str = "ru") -> str:
@@ -128,13 +117,13 @@ def build_vacancy_panel_text(lang: str = "ru") -> str:
         return (
             "📣 <b>Vakansiya shabloni</b>\n\n"
             "Vakansiya matnini yoki forward qilingan postni yuboring.\n"
-            "Bot bo'sh kriteriyalarni chiqarib tashlaydi va postni aniq ko'rinishga keltiradi.\n"
-            "Keyin xohlasangiz, preview foto yuborib matn bilan birlashtirishingiz mumkin."
+            "Bot manbadagi ma'lumotlarni to'liq yig'ib, reklama qismini olib tashlaydi.\n"
+            "Keyin xohlasangiz preview foto yuborib matn bilan birlashtirishingiz mumkin."
         )
     return (
         "📣 <b>Шаблон вакансии</b>\n\n"
         "Пришли текст вакансии или перешли пост.\n"
-        "Бот уберет пустые критерии и соберет аккуратный пост.\n"
+        "Бот соберет все данные из источника и уберет рекламу чужого канала.\n"
         "Потом можно отправить фото превью, и бот объединит его с этим текстом."
     )
 
@@ -144,30 +133,36 @@ def _append_blank(lines: list[str]) -> None:
         lines.append("")
 
 
+def _append_section(lines: list[str], title: str, items: list[str]) -> None:
+    if not items:
+        return
+    lines.append(title)
+    lines.extend(f"- {_h(item)}" for item in items)
+    _append_blank(lines)
+
+
 def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> str:
-    titles = _clean_titles(data.titles)
+    titles = _clean_list(data.titles)
     region = _clean_value(data.region_tag)
     if region and not region.startswith("#"):
         region = f"#{region}"
     address = _clean_value(data.address)
     salary = _clean_value(data.salary)
     schedule = _clean_value(data.schedule)
-    requirements = _clean_items(data.requirements)
-    benefits = _clean_items(data.benefits)
-    duties = _clean_items(data.duties)
+    requirements = _clean_list(data.requirements)
+    benefits = _clean_list(data.benefits)
+    duties = _clean_list(data.duties)
+    details = _clean_list(data.details)
     phone = _clean_value(data.phone)
     telegram = _telegram_block(data.telegram)
 
     first_title = titles[0] if titles else "Xodim"
-    first_region = region.upper() if region else None
-    if first_region:
-        first_line = f"{first_region.lstrip('#')}ga {first_title} kerak!"
-    else:
-        first_line = f"{first_title} kerak!"
+    first_region = region.upper().lstrip("#") if region else None
+    first_line = f"{first_region}ga {first_title} kerak!" if first_region else f"{first_title} kerak!"
 
     lines: list[str] = [
         f"{_emoji('top', premium)} <b>{_h(first_line)}</b>",
-        "<i>Diqqat: dolzarb vakansiya, quyida batafsil ma'lumot.</i>",
+        "<i>Quyida vakansiya bo'yicha aniq va to'liq ma'lumotlar.</i>",
         "",
     ]
 
@@ -194,28 +189,15 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
         lines.append(_h(schedule))
         _append_blank(lines)
 
-    if requirements:
-        lines.append(f"{_emoji('requirements', premium)} <b>Talablar:</b>")
-        lines.extend(f"- {_h(item)}" for item in requirements)
-        _append_blank(lines)
-
-    if benefits:
-        lines.append(f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>")
-        lines.extend(f"- {_h(item)}" for item in benefits)
-        _append_blank(lines)
-
-    if duties:
-        lines.append(f"{_emoji('duties', premium)} <b>Vazifalar:</b>")
-        lines.extend(f"- {_h(item)}" for item in duties)
-        _append_blank(lines)
+    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements)
+    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits)
+    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties)
+    _append_section(lines, f"{_emoji('details', premium)} <b>Qo'shimcha ma'lumotlar:</b>", details)
 
     if phone:
         lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {_h(phone)}")
     if telegram:
         lines.append(f"{_emoji('telegram', premium)} <b>Telegram:</b> {telegram}")
-
-    _append_blank(lines)
-    lines.append(f"{_emoji('footer', premium)} <b>ISHDASIZ</b> - <b>Tez va oson ish toping!</b>")
 
     while lines and not lines[-1].strip():
         lines.pop()

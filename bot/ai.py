@@ -33,6 +33,7 @@ class VacancyTemplateData:
     requirements: list[str]
     benefits: list[str]
     duties: list[str]
+    details: list[str]
     phone: str | None
     telegram: str | None
 
@@ -74,6 +75,21 @@ _VACANCY_REGION_MAP = {
 
 _VACANCY_PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
 _VACANCY_TELEGRAM_RE = re.compile(r"(https?://t\.me/[A-Za-z0-9_]{3,}|@[A-Za-z0-9_]{3,})", re.IGNORECASE)
+_VACANCY_AD_TOKENS = (
+    "ishdasiz",
+    "join",
+    "join our",
+    "подпис",
+    "subscribe",
+    "follow our channel",
+    "our channel",
+    "telegram channel",
+    "obuna",
+    "kanal",
+    "канал",
+    "adminni ogohlantiring",
+    "ma'muriyati javobgar emas",
+)
 
 
 def _normalize_text_value(value: Any, default: str = "-", max_len: int = 220) -> str:
@@ -161,6 +177,85 @@ def _normalize_region_tag(value: Any, raw_text: str, default_region_tag: str) ->
         return f"#{hashtag_match.group(1).upper()}"
 
     return default_region_tag
+
+
+def _is_vacancy_ad_line(line: str) -> bool:
+    lower = line.lower()
+    return any(token in lower for token in _VACANCY_AD_TOKENS)
+
+
+def _extract_vacancy_details_fallback(raw_text: str) -> list[str]:
+    known_prefixes = (
+        "hudud",
+        "manzil",
+        "адрес",
+        "location",
+        "maosh",
+        "зарплат",
+        "oklad",
+        "salary",
+        "ish vaqti",
+        "график",
+        "schedule",
+        "talablar",
+        "треб",
+        "requirements",
+        "qulayliklar",
+        "услов",
+        "benefit",
+        "vazifalar",
+        "обязан",
+        "duties",
+        "aloqa",
+        "контакт",
+        "telegram",
+        "телеграм",
+        "bo'sh ish o'rinlari",
+        "bo‘sh ish o'rinlari",
+        "kerak",
+        "vacancy",
+        "vakansiya",
+    )
+
+    details: list[str] = []
+    seen: set[str] = set()
+
+    for raw_line in raw_text.splitlines():
+        line = re.sub(r"^[\-*•\u2022]+\s*", "", raw_line).strip()
+        line = re.sub(r"\s+", " ", line)
+        if not line or line == "-":
+            continue
+        if _is_vacancy_ad_line(line):
+            continue
+        if line.startswith("#"):
+            continue
+
+        lower = line.lower()
+        if lower in {"...", "—", "-", "━━━━━━━━━━━━━━━"}:
+            continue
+        if any(lower.startswith(prefix) for prefix in known_prefixes):
+            continue
+        if ":" in lower:
+            key = lower.split(":", 1)[0].strip()
+            if any(key.startswith(prefix) for prefix in known_prefixes):
+                continue
+
+        if len(line) < 3:
+            continue
+
+        normalized = line.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        details.append(line)
+        if len(details) >= 12:
+            break
+
+    return _normalize_list_value(details, max_items=12, max_len=180)
+
+
+def _strip_ad_lines(items: list[str]) -> list[str]:
+    return [item for item in items if not _is_vacancy_ad_line(item)]
 
 
 def _vacancy_section_lines(raw_text: str, keywords: tuple[str, ...]) -> list[str]:
@@ -293,15 +388,18 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
     if telegram_match:
         telegram = _normalize_telegram_value(telegram_match.group(0))
 
+    details = _extract_vacancy_details_fallback(raw_text)
+
     return VacancyTemplateData(
-        titles=_vacancy_fallback_titles(raw_text),
+        titles=_strip_ad_lines(_vacancy_fallback_titles(raw_text)),
         region_tag=_normalize_region_tag(None, raw_text, default_region_tag),
         address=_normalize_text_value(address),
         salary=_normalize_text_value(salary),
         schedule=_normalize_text_value(schedule),
-        requirements=_vacancy_section_lines(raw_text, ("talab", "треб", "requirements")),
-        benefits=_vacancy_section_lines(raw_text, ("qulay", "услов", "benefit")),
-        duties=_vacancy_section_lines(raw_text, ("vazifa", "обязан", "duties")),
+        requirements=_strip_ad_lines(_vacancy_section_lines(raw_text, ("talab", "треб", "requirements"))),
+        benefits=_strip_ad_lines(_vacancy_section_lines(raw_text, ("qulay", "услов", "benefit"))),
+        duties=_strip_ad_lines(_vacancy_section_lines(raw_text, ("vazifa", "обязан", "duties"))),
+        details=_strip_ad_lines(details),
         phone=phone,
         telegram=telegram,
     )
@@ -309,15 +407,22 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
 
 def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: str) -> VacancyTemplateData:
     data = payload if isinstance(payload, dict) else {}
+    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=3, max_len=90))
+    requirements = _strip_ad_lines(_normalize_list_value(data.get("requirements"), max_items=6, max_len=160))
+    benefits = _strip_ad_lines(_normalize_list_value(data.get("benefits"), max_items=6, max_len=160))
+    duties = _strip_ad_lines(_normalize_list_value(data.get("duties"), max_items=6, max_len=160))
+    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=12, max_len=180))
+
     return VacancyTemplateData(
-        titles=_normalize_list_value(data.get("titles"), max_items=3, max_len=90),
+        titles=titles,
         region_tag=_normalize_region_tag(data.get("region_tag"), raw_text, default_region_tag),
         address=_normalize_text_value(data.get("address")),
         salary=_normalize_text_value(data.get("salary")),
         schedule=_normalize_text_value(data.get("schedule")),
-        requirements=_normalize_list_value(data.get("requirements"), max_items=6, max_len=160),
-        benefits=_normalize_list_value(data.get("benefits"), max_items=6, max_len=160),
-        duties=_normalize_list_value(data.get("duties"), max_items=6, max_len=160),
+        requirements=requirements,
+        benefits=benefits,
+        duties=duties,
+        details=details,
         phone=_normalize_phone_value(data.get("phone")),
         telegram=_normalize_telegram_value(data.get("telegram")),
     )
@@ -657,11 +762,13 @@ class AIService:
         prompt = (
             "Ты извлекаешь данные из текста вакансии для Telegram-шаблона. "
             "Текст может быть на русском или узбекском, с шумом, эмодзи, пересланным оформлением или без структуры. "
-            "Нельзя придумывать факты. Если данных нет, используй '-' для строк и [] для списков. "
+            "Нужно перенести максимум фактов из исходника. Нельзя придумывать факты. "
+            "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
+            "Если данных нет, используй '-' для строк и [] для списков. "
             "Ответ только JSON без пояснений. "
             'Формат: {"titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
             '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
-            '"phone":"+998...","telegram":"@username"}. '
+            '"details":["..."],"phone":"+998...","telegram":"@username"}. '
             "Поле titles: 1-3 коротких названия должности, можно включить компанию, если это важно. "
             "region_tag: только uppercase hashtag вида #TOSHKENT или #ANDIJON."
         )
@@ -689,6 +796,7 @@ class AIService:
             requirements=ai_data.requirements or fallback.requirements,
             benefits=ai_data.benefits or fallback.benefits,
             duties=ai_data.duties or fallback.duties,
+            details=ai_data.details or fallback.details,
             phone=ai_data.phone or fallback.phone,
             telegram=ai_data.telegram or fallback.telegram,
         )
