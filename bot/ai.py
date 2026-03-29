@@ -36,6 +36,8 @@ class VacancyTemplateData:
     details: list[str]
     phone: str | None
     telegram: str | None
+    headline: str | None = None
+    company: str | None = None
 
 
 _VACANCY_REGION_MAP = {
@@ -101,6 +103,13 @@ def _normalize_text_value(value: Any, default: str = "-", max_len: int = 220) ->
     return text or default
 
 
+def _normalize_optional_text(value: Any, *, max_len: int = 220) -> str | None:
+    text = _normalize_text_value(value, default="", max_len=max_len).strip()
+    if not text or text == "-":
+        return None
+    return text
+
+
 def _normalize_list_value(value: Any, *, max_items: int = 6, max_len: int = 180) -> list[str]:
     if value is None:
         return []
@@ -150,14 +159,23 @@ def _normalize_telegram_value(value: Any) -> str | None:
     return None
 
 
+def _extract_phone_from_text(text: str) -> str | None:
+    for match in _VACANCY_PHONE_RE.finditer(text or ""):
+        raw = re.sub(r"\s+", " ", match.group(0)).strip()
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) < 9:
+            continue
+        if len(digits) <= 10 and not raw.startswith("+") and not digits.startswith("998"):
+            continue
+        return raw
+    return None
+
+
 def _normalize_phone_value(value: Any) -> str | None:
     text = str(value or "").strip()
     if not text or text == "-":
         return None
-    match = _VACANCY_PHONE_RE.search(text)
-    if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()
-    return None
+    return _extract_phone_from_text(text)
 
 
 def _normalize_region_tag(value: Any, raw_text: str, default_region_tag: str) -> str:
@@ -210,6 +228,10 @@ def _extract_vacancy_details_fallback(raw_text: str) -> list[str]:
         "контакт",
         "telegram",
         "телеграм",
+        "kompaniya",
+        "компания",
+        "ish beruvchi",
+        "работодатель",
         "bo'sh ish o'rinlari",
         "bo‘sh ish o'rinlari",
         "kerak",
@@ -307,6 +329,10 @@ def _vacancy_section_lines(raw_text: str, keywords: tuple[str, ...]) -> list[str
 
 def _vacancy_fallback_titles(raw_text: str) -> list[str]:
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+    openings = _vacancy_openings_block(raw_text)
+    if openings:
+        return _normalize_list_value(openings, max_items=20)
+
     prioritized: list[str] = []
 
     for line in lines:
@@ -321,7 +347,7 @@ def _vacancy_fallback_titles(raw_text: str) -> list[str]:
                 prioritized.append(tail)
 
     if prioritized:
-        return _normalize_list_value(prioritized, max_items=3)
+        return _normalize_list_value(prioritized, max_items=20)
 
     fallback: list[str] = []
     for line in lines:
@@ -358,9 +384,156 @@ def _vacancy_fallback_titles(raw_text: str) -> list[str]:
         if len(clean) < 3:
             continue
         fallback.append(clean)
-        if len(fallback) >= 3:
+        if len(fallback) >= 20:
             break
-    return _normalize_list_value(fallback, max_items=3)
+    return _normalize_list_value(fallback, max_items=20)
+
+
+def _vacancy_openings_block(raw_text: str) -> list[str]:
+    lines = [line.strip() for line in raw_text.splitlines()]
+    result: list[str] = []
+    collecting = False
+
+    for line in lines:
+        clean = re.sub(r"^[\-*•\u2022✅]+\s*", "", line).strip()
+        lower = clean.lower()
+        if not clean:
+            if collecting and result:
+                break
+            continue
+
+        if any(token in lower for token in ("bo'sh ish o'rinlari", "bo‘sh ish o'rinlari", "вакансии", "bo'sh ish")):
+            collecting = True
+            tail = clean.split(":", 1)[1].strip() if ":" in clean else ""
+            if tail and tail != "-":
+                result.append(tail)
+            continue
+
+        if not collecting:
+            continue
+
+        if ":" in clean and any(
+            marker in lower
+            for marker in (
+                "hudud",
+                "manzil",
+                "maosh",
+                "ish vaqti",
+                "talab",
+                "qulay",
+                "vazifa",
+                "aloqa",
+                "telegram",
+                "kompaniya",
+                "ish beruvchi",
+                "адрес",
+                "зарплат",
+                "график",
+                "компания",
+                "работодатель",
+                "контакт",
+            )
+        ):
+            break
+
+        result.append(clean)
+        if len(result) >= 20:
+            break
+
+    return _normalize_list_value(result, max_items=20, max_len=90)
+
+
+def _extract_company_fallback(raw_text: str) -> str | None:
+    for raw_line in raw_text.splitlines():
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", raw_line).strip()
+        clean = re.sub(r"\s+", " ", clean)
+        if not clean or _is_vacancy_ad_line(clean):
+            continue
+        lower = clean.lower()
+
+        if ":" in clean:
+            key, value = clean.split(":", 1)
+            key_lower = key.strip().lower()
+            value = value.strip()
+            if value and any(token in key_lower for token in ("kompaniya", "компания", "ish beruvchi", "работодатель", "firma", "фирма")):
+                return _normalize_text_value(value, default="-", max_len=120)
+
+        if re.search(r"\b(ooo|ооо|mchj|llc|inc|aj|jsc)\b", lower):
+            return _normalize_text_value(clean, default="-", max_len=120)
+    return None
+
+
+def _extract_headline_fallback(
+    raw_text: str,
+    titles: list[str],
+    region_tag: str,
+    company: str | None,
+) -> str | None:
+    section_tokens = (
+        "hudud",
+        "manzil",
+        "maosh",
+        "ish vaqti",
+        "talab",
+        "qulaylik",
+        "vazifa",
+        "aloqa",
+        "telegram",
+        "адрес",
+        "зарплат",
+        "график",
+        "контакт",
+    )
+    headline_tokens = (
+        "vakans",
+        "вакан",
+        "kerak",
+        "требуется",
+        "ishga",
+        "ishga ol",
+        "bo'sh ish",
+        "bo‘sh ish",
+        "lavozim",
+    )
+
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+
+    for line in lines:
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip(" -")
+        lower = clean.lower()
+        if not clean or _is_vacancy_ad_line(clean):
+            continue
+        if len(clean) < 4:
+            continue
+        if "bo'sh ish o'rinlari" in lower or "bo‘sh ish o'rinlari" in lower:
+            continue
+        if any(token in lower for token in headline_tokens):
+            return _normalize_text_value(clean, default="-", max_len=140)
+
+    for line in lines:
+        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip(" -")
+        lower = clean.lower()
+        if not clean or _is_vacancy_ad_line(clean):
+            continue
+        if len(clean) < 4:
+            continue
+        if any(token in lower for token in section_tokens):
+            continue
+        if "bo'sh ish o'rinlari" in lower or "bo‘sh ish o'rinlari" in lower:
+            continue
+        if clean.startswith("#"):
+            continue
+        return _normalize_text_value(clean, default="-", max_len=140)
+
+    first_title = titles[0] if titles else "Xodim"
+    region = str(region_tag or "").strip().upper().lstrip("#")
+    if region and company:
+        return f"{region}ga {first_title} ({company})"
+    if region:
+        return f"{region}ga {first_title} kerak"
+    if company:
+        return f"{first_title} ({company})"
+    return f"{first_title} kerak"
 
 
 def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> VacancyTemplateData:
@@ -375,13 +548,10 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
             salary = line.split(":", 1)[1].strip() if ":" in line else line
         if schedule == "-" and any(token in lower for token in ("график", "смен", "ish vaqti", "рабоч", "schedule")):
             schedule = line.split(":", 1)[1].strip() if ":" in line else line
-        if address == "-" and any(token in lower for token in ("адрес", "manzil", "локац", "hudud", "location")):
+        if address == "-" and any(token in lower for token in ("адрес", "manzil", "локац", "location")):
             address = line.split(":", 1)[1].strip() if ":" in line else line
 
-    phone = None
-    phone_match = _VACANCY_PHONE_RE.search(raw_text)
-    if phone_match:
-        phone = re.sub(r"\s+", " ", phone_match.group(0)).strip()
+    phone = _extract_phone_from_text(raw_text)
 
     telegram = None
     telegram_match = _VACANCY_TELEGRAM_RE.search(raw_text)
@@ -389,10 +559,14 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
         telegram = _normalize_telegram_value(telegram_match.group(0))
 
     details = _extract_vacancy_details_fallback(raw_text)
+    titles = _strip_ad_lines(_vacancy_fallback_titles(raw_text))
+    region_tag = _normalize_region_tag(None, raw_text, default_region_tag)
+    company = _extract_company_fallback(raw_text)
+    headline = _extract_headline_fallback(raw_text, titles, region_tag, company)
 
     return VacancyTemplateData(
-        titles=_strip_ad_lines(_vacancy_fallback_titles(raw_text)),
-        region_tag=_normalize_region_tag(None, raw_text, default_region_tag),
+        titles=titles,
+        region_tag=region_tag,
         address=_normalize_text_value(address),
         salary=_normalize_text_value(salary),
         schedule=_normalize_text_value(schedule),
@@ -402,16 +576,18 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
         details=_strip_ad_lines(details),
         phone=phone,
         telegram=telegram,
+        headline=headline,
+        company=company,
     )
 
 
 def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: str) -> VacancyTemplateData:
     data = payload if isinstance(payload, dict) else {}
-    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=3, max_len=90))
+    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=20, max_len=90))
     requirements = _strip_ad_lines(_normalize_list_value(data.get("requirements"), max_items=6, max_len=160))
     benefits = _strip_ad_lines(_normalize_list_value(data.get("benefits"), max_items=6, max_len=160))
     duties = _strip_ad_lines(_normalize_list_value(data.get("duties"), max_items=6, max_len=160))
-    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=12, max_len=180))
+    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=20, max_len=180))
 
     return VacancyTemplateData(
         titles=titles,
@@ -425,6 +601,8 @@ def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: 
         details=details,
         phone=_normalize_phone_value(data.get("phone")),
         telegram=_normalize_telegram_value(data.get("telegram")),
+        headline=_normalize_optional_text(data.get("headline"), max_len=140),
+        company=_normalize_optional_text(data.get("company"), max_len=120),
     )
 
 def _extract_json(text: str) -> Any:
@@ -766,10 +944,12 @@ class AIService:
             "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
             "Если данных нет, используй '-' для строк и [] для списков. "
             "Ответ только JSON без пояснений. "
-            'Формат: {"titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
+            'Формат: {"headline":"...","company":"...","titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
             '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
             '"details":["..."],"phone":"+998...","telegram":"@username"}. '
-            "Поле titles: 1-3 коротких названия должности, можно включить компанию, если это важно. "
+            "headline: цепляющая первая строка по исходнику (без выдумок и без рекламных слоганов канала). "
+            "company: название компании/работодателя, если явно указано, иначе '-'. "
+            "Поле titles: 1-20 названий должности/ролей, сколько реально указано в источнике. "
             "region_tag: только uppercase hashtag вида #TOSHKENT или #ANDIJON."
         )
 
@@ -799,4 +979,6 @@ class AIService:
             details=ai_data.details or fallback.details,
             phone=ai_data.phone or fallback.phone,
             telegram=ai_data.telegram or fallback.telegram,
+            headline=ai_data.headline or fallback.headline,
+            company=ai_data.company or fallback.company,
         )

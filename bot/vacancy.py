@@ -14,16 +14,16 @@ VACANCY_CONTACT_TEMPLATE = (
 
 _EMOJI_META = {
     "top": ("✅", "5389061359403039918"),
-    "title": ("✅", "6307344346748290621"),
+    "openings": ("✅", "6307344346748290621"),
     "location": ("📍", "5886446115905082831"),
     "salary": ("💰", "5348418461838098123"),
     "schedule": ("🕔", "5258419835922030550"),
     "requirements": ("⚠️", "5881702736843511327"),
     "benefits": ("✅", "5985596818912712352"),
     "duties": ("❗️", "5879813604068298387"),
-    "details": ("ℹ️", "5875465628285931233"),
     "phone": ("📞", "5897938112654348733"),
     "telegram": ("✈️", "5875465628285931233"),
+    "footer": ("➡️", "5260450573768990626"),
 }
 
 _VACANCY_KEYWORDS = (
@@ -36,12 +36,48 @@ _VACANCY_KEYWORDS = (
     "контакт",
     "телеграм",
     "ish kerak",
+    "ishga kerak",
+    "ishga olamiz",
+    "ishga taklif",
     "vakans",
+    "vakansiya",
     "bo'sh ish",
     "bo‘sh ish",
+    "bo'sh ish o'rni",
+    "bo'sh ish o'rinlari",
+    "lavozim",
+    "xodim kerak",
     "maosh",
     "aloqa",
+    "ish vaqti",
+    "talablar",
+    "vazifalar",
 )
+_VACANCY_SECTION_TOKENS = (
+    "hudud",
+    "manzil",
+    "maosh",
+    "ish vaqti",
+    "talab",
+    "qulaylik",
+    "vazifa",
+    "aloqa",
+    "telegram",
+    "адрес",
+    "зарплат",
+    "график",
+    "треб",
+    "услов",
+    "обязан",
+    "контакт",
+)
+_VACANCY_DISCLAIMER_LINES = (
+    "❗️E'lonlardagi ma'lumotlar uchun kanal ma'muriyati javobgar emas. "
+    "Shaxsiy ma'lumotlaringizni bermang, ish beruvchi pul so'rasa - adminni ogohlantiring.",
+    "Ogoh bo'ling!",
+)
+_VACANCY_FOOTER_TEXT = "ISHDASIZ - Tez va oson ish toping!"
+_VACANCY_DIVIDER = "_ _ _ _ _ _ _ _ _ _ _"
 
 
 def _emoji(name: str, premium: bool) -> str:
@@ -104,9 +140,6 @@ def build_contact_url(telegram_value: str | None) -> str | None:
 def _telegram_block(value: str | None) -> str | None:
     username = _username_from_telegram(value)
     if username:
-        contact_url = build_contact_url(f"@{username}")
-        if contact_url:
-            return f'<a href="{html.escape(contact_url)}"><b>@{_h(username)}</b></a>'
         return f"@{_h(username)}"
     clean = _clean_value(value)
     return _h(clean) if clean else None
@@ -141,63 +174,134 @@ def _append_section(lines: list[str], title: str, items: list[str]) -> None:
     _append_blank(lines)
 
 
+def _remove_cross_duplicates(items: list[str], blocked: set[str]) -> list[str]:
+    cleaned: list[str] = []
+    for item in items:
+        key = item.casefold().strip()
+        if not key or key in blocked:
+            continue
+        blocked.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
+def _build_headline(
+    data: VacancyTemplateData,
+    titles: list[str],
+    region: str | None,
+    company: str | None,
+) -> str:
+    headline = _clean_value(data.headline)
+    if headline:
+        return headline
+
+    first_title = titles[0] if titles else "Xodim"
+    first_region = region.upper().lstrip("#") if region else None
+    if first_region and company:
+        return f"{first_region}ga {first_title} ({company})"
+    if first_region:
+        return f"{first_region}ga {first_title} kerak"
+    if company:
+        return f"{first_title} ({company})"
+    return f"{first_title} kerak"
+
+
 def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> str:
-    titles = _clean_list(data.titles)
+    titles = _clean_list(data.titles)[:50]
+    titles = [
+        title
+        for title in titles
+        if not title.casefold().strip().startswith(("kompaniya", "компания", "ish beruvchi", "работодатель"))
+    ]
     region = _clean_value(data.region_tag)
     if region and not region.startswith("#"):
         region = f"#{region}"
     address = _clean_value(data.address)
     salary = _clean_value(data.salary)
     schedule = _clean_value(data.schedule)
-    requirements = _clean_list(data.requirements)
-    benefits = _clean_list(data.benefits)
-    duties = _clean_list(data.duties)
-    details = _clean_list(data.details)
+    company = _clean_value(data.company)
+    headline = _build_headline(data, titles, region, company)
+    blocked_keys: set[str] = set()
+    blocked_keys.update(item.casefold().strip() for item in titles if item.strip())
+    for direct_value in (region or "", address or "", salary or "", schedule or "", company or "", headline):
+        if direct_value.strip():
+            blocked_keys.add(direct_value.casefold().strip())
+    requirements = _remove_cross_duplicates(_clean_list(data.requirements), blocked_keys)
+    benefits = _remove_cross_duplicates(_clean_list(data.benefits), blocked_keys)
+    duties = _remove_cross_duplicates(_clean_list(data.duties), blocked_keys)
+    details = _remove_cross_duplicates(_clean_list(data.details), blocked_keys)
+    details = [
+        item
+        for item in details
+        if not item.casefold().strip().startswith(
+            (
+                "hudud",
+                "manzil",
+                "maosh",
+                "oylik maosh",
+                "ish vaqti",
+                "talab",
+                "qulaylik",
+                "vazifa",
+                "aloqa",
+                "telegram",
+                "адрес",
+                "зарплат",
+                "график",
+                "контакт",
+            )
+        )
+    ]
     phone = _clean_value(data.phone)
     telegram = _telegram_block(data.telegram)
 
-    first_title = titles[0] if titles else "Xodim"
-    first_region = region.upper().lstrip("#") if region else None
-    first_line = f"{first_region}ga {first_title} kerak!" if first_region else f"{first_title} kerak!"
-
     lines: list[str] = [
-        f"{_emoji('top', premium)} <b>{_h(first_line)}</b>",
-        "<i>Quyida vakansiya bo'yicha aniq va to'liq ma'lumotlar.</i>",
+        f"{_emoji('top', premium)} <b>{_h(headline)}</b>",
+        _VACANCY_DIVIDER,
         "",
     ]
 
-    if len(titles) > 1:
+    if titles:
         lines.append("<b>Bo'sh ish o'rinlari:</b>")
         for title in titles:
-            lines.append(f"{_emoji('title', premium)} <b>{_h(title)}</b>")
+            lines.append(f"{_emoji('openings', premium)} {_h(title)}")
         _append_blank(lines)
 
+    if company:
+        lines.append(f"Kompaniya: <b>{_h(company)}</b>")
     if region:
-        lines.append(f"{_emoji('location', premium)} <b>Hudud:</b> <b>{_h(region.upper())}</b>")
+        lines.append(f"Hudud: <b>{_h(region.upper())}</b>")
     if address:
-        lines.append(f"<b>Manzil:</b> {_h(address)}")
-    if region or address:
+        lines.append(f"Manzil: {_h(address)}")
+    if company or region or address:
         _append_blank(lines)
 
     if salary:
-        lines.append(f"{_emoji('salary', premium)} <b>Oylik maosh:</b>")
+        lines.append(f"{_emoji('salary', premium)} Oylik maosh:")
         lines.append(_h(salary))
         _append_blank(lines)
 
     if schedule:
-        lines.append(f"{_emoji('schedule', premium)} <b>Ish vaqti:</b>")
+        lines.append(f"{_emoji('schedule', premium)} Ish vaqti:")
         lines.append(_h(schedule))
         _append_blank(lines)
 
-    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements)
-    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits)
-    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties)
-    _append_section(lines, f"{_emoji('details', premium)} <b>Qo'shimcha ma'lumotlar:</b>", details)
+    _append_section(lines, f"{_emoji('requirements', premium)} Talablar:", requirements)
+    _append_section(lines, f"{_emoji('benefits', premium)} Qulayliklar:", benefits)
+    _append_section(lines, f"{_emoji('duties', premium)} Vazifalar:", duties)
+    _append_section(lines, "Qo'shimcha ma'lumotlar:", details)
 
     if phone:
-        lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {_h(phone)}")
+        lines.append(f"{_emoji('phone', premium)} Aloqa: {_h(phone)}")
     if telegram:
-        lines.append(f"{_emoji('telegram', premium)} <b>Telegram:</b> {telegram}")
+        lines.append(f"{_emoji('telegram', premium)} Telegram: {telegram}")
+    if phone or telegram:
+        _append_blank(lines)
+
+    lines.append(_h(_VACANCY_DISCLAIMER_LINES[0]))
+    lines.append(_h(_VACANCY_DISCLAIMER_LINES[1]))
+    _append_blank(lines)
+    lines.append(f"{_emoji('footer', premium)} {_h(_VACANCY_FOOTER_TEXT)}")
 
     while lines and not lines[-1].strip():
         lines.pop()
@@ -210,7 +314,27 @@ def looks_like_vacancy(text: str) -> bool:
         return False
 
     hits = sum(1 for token in _VACANCY_KEYWORDS if token in normalized)
+    section_hits = sum(1 for token in _VACANCY_SECTION_TOKENS if token in normalized)
     has_phone = bool(re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", normalized))
-    has_tg = "t.me/" in normalized or "telegram" in normalized or "телеграм" in normalized
+    has_tg = "t.me/" in normalized or "telegram" in normalized or "телеграм" in normalized or "@" in normalized
+    has_job_word = any(
+        token in normalized
+        for token in (
+            "kerak",
+            "ishga",
+            "vakans",
+            "вакан",
+            "требуется",
+            "bo'sh ish",
+            "bo‘sh ish",
+            "lavozim",
+            "xodim",
+            "ish o'rni",
+        )
+    )
 
+    if has_job_word and (has_phone or has_tg or section_hits >= 1):
+        return True
+    if section_hits >= 3 and has_job_word:
+        return True
     return hits >= 2 or (hits >= 1 and has_phone) or (has_phone and has_tg)

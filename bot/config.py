@@ -3,8 +3,9 @@
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 @dataclass(frozen=True)
@@ -40,21 +41,28 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
-def _gemini_model(name: str, default: str = "gemini-3-flash-preview") -> str:
+def _gemini_model(name: str, default: str = "gemini-3-flash") -> str:
     value = os.getenv(name, "").strip()
     if not value:
         return default
     lower = value.lower()
-    if lower.startswith("gemini-2.5"):
+    if lower in {"gemini-3-flash-preview", "gemini-3.0-flash", "gemini-3.0-flash-preview"}:
         return default
-    if lower == "gemini-3-flash":
+    if lower.startswith("gemini-2.5"):
         return default
     return value
 
 
 @lru_cache(maxsize=1)
 def load_settings() -> Settings:
+    root_env = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(dotenv_path=root_env)
     load_dotenv()
+    if root_env.exists():
+        for key, value in dotenv_values(root_env, encoding="utf-8-sig").items():
+            if not key or value is None:
+                continue
+            os.environ.setdefault(key, value)
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         supabase_url=_required("SUPABASE_URL"),

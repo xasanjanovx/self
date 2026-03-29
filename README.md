@@ -28,7 +28,7 @@ copy .env.example .env
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `DB_TABLE_PREFIX=bot_` (рекомендуется, чтобы не конфликтовать с существующими таблицами в проекте)
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL=gemini-3-flash-preview`
+- `GEMINI_MODEL=gemini-3-flash`
 
 ## 2) Supabase
 
