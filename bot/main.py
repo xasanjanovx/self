@@ -528,6 +528,82 @@ def _extract_amount_from_text(text: str) -> float | None:
     return amount if amount > 0 else None
 
 
+def _finance_balance_update_from_text(text: str) -> tuple[str, float] | None:
+    lower = str(text or "").strip().lower()
+    if not lower:
+        return None
+
+    amount = _extract_amount_from_text(lower)
+    if amount is None:
+        return None
+
+    direct_ops_tokens = (
+        "доход",
+        "расход",
+        "rasxod",
+        "rashod",
+        "трата",
+        "income",
+        "expense",
+        "daromad",
+        "xarajat",
+        "перевод",
+        "o'tkaz",
+    )
+    if any(token in lower for token in direct_ops_tokens):
+        return None
+
+    now_tokens = ("теперь", "сейчас", "endi", "hozir", "now")
+    has_now_hint = any(token in lower for token in now_tokens)
+
+    if any(
+        token in lower
+        for token in ("мой долг", "мои долги", "долг у меня", "moy dolg", "dolg u menya", "qarzim", "mening qarzim")
+    ):
+        return "debt", amount
+    if any(token in lower for token in ("дал в долг", "мне должны", "dal v dolg", "qarzga berdim", "qarzga berilgan")) and has_now_hint:
+        return "lent", amount
+    if any(token in lower for token in ("на карте", "карта", "na karte", "karta", "kartada")):
+        return "card", amount
+    if any(token in lower for token in ("налич", "наличные", "nalich", "naqd")):
+        return "cash", amount
+
+    return None
+
+
+def _apply_finance_balance_override(telegram_id: int, bucket: str, amount: float) -> None:
+    current = db.get_finance_settings(telegram_id)
+    live = _finance_account_balances(telegram_id)
+    safe_bucket = _normalize_fin_bucket(bucket)
+    base_value = float(amount) - float(live.get(safe_bucket, 0.0))
+
+    payload = {
+        "card_base": float(current.get("card_base") or 0.0),
+        "cash_base": float(current.get("cash_base") or 0.0),
+        "lent_base": float(current.get("lent_base") or 0.0),
+        "debt_base": float(current.get("debt_base") or 0.0),
+        "monthly_credit_payment": float(current.get("monthly_credit_payment") or 0.0),
+    }
+    key_map = {
+        "card": "card_base",
+        "cash": "cash_base",
+        "lent": "lent_base",
+        "debt": "debt_base",
+    }
+    target_key = key_map.get(safe_bucket)
+    if target_key:
+        payload[target_key] = base_value
+
+    db.save_finance_settings(
+        telegram_id,
+        card_base=payload["card_base"],
+        cash_base=payload["cash_base"],
+        lent_base=payload["lent_base"],
+        debt_base=payload["debt_base"],
+        monthly_credit_payment=payload["monthly_credit_payment"],
+    )
+
+
 def _split_finance_chunks(text: str) -> list[str]:
     chunks = [part.strip() for part in re.split(r"[\n;,]+", text) if part.strip()]
     return chunks or ([text.strip()] if text.strip() else [])
@@ -1516,6 +1592,11 @@ async def _edit_panel_from_state_with_fallback(
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
             )
+            if panel_message_id is not None:
+                try:
+                    await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
+                except Exception:
+                    pass
             await state.update_data(panel_message_id=sent.message_id)
             return text
         except Exception as exc:
@@ -1576,6 +1657,8 @@ async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
         )
         await state.update_data(
             last_vacancy_text=rendered,
+            last_vacancy_text_premium=premium_text,
+            last_vacancy_text_fallback=fallback_text,
             last_vacancy_contact_url=contact_url,
             last_vacancy_photo_file_id=None,
         )
@@ -1599,8 +1682,11 @@ async def _attach_vacancy_preview_photo(message: Message, state: FSMContext) -> 
         return False
 
     data = await state.get_data()
-    text = str(data.get("last_vacancy_text") or "").strip()
-    if not text:
+    premium_text = str(data.get("last_vacancy_text_premium") or "").strip()
+    fallback_text = str(data.get("last_vacancy_text_fallback") or "").strip()
+    rendered_text = str(data.get("last_vacancy_text") or "").strip()
+    text_variants = [text for text in [premium_text, rendered_text, fallback_text] if text]
+    if not text_variants:
         return False
 
     lang = _lang_for_user_id(message.from_user.id)
@@ -1615,13 +1701,27 @@ async def _attach_vacancy_preview_photo(message: Message, state: FSMContext) -> 
         except Exception:
             pass
 
-    sent = await message.answer_photo(
-        photo=message.photo[-1].file_id,
-        caption=text,
-        reply_markup=vacancy_result_keyboard(lang, contact_url, show_publish=True),
-    )
+    sent: Message | None = None
+    used_text: str | None = None
+    for text in text_variants:
+        try:
+            sent = await message.answer_photo(
+                photo=message.photo[-1].file_id,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=vacancy_result_keyboard(lang, contact_url, show_publish=True),
+            )
+            used_text = text
+            break
+        except Exception:
+            continue
+
+    if sent is None or used_text is None:
+        return False
+
     await state.update_data(
         panel_message_id=sent.message_id,
+        last_vacancy_text=used_text,
         last_vacancy_photo_file_id=message.photo[-1].file_id,
     )
     return True
@@ -2109,9 +2209,18 @@ async def cb_finance_ops_period(callback: CallbackQuery, state: FSMContext) -> N
 async def cb_finance_settings(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_finance_settings)
+    await state.set_state(BotStates.waiting_finance_input)
+    text, entries = build_finance_panel(callback.from_user.id)
     await _remember_panel(callback, state)
-    await safe_edit_message(callback, build_finance_settings_text(callback.from_user.id), reply_markup=back_to_menu_keyboard(lang))
+    await safe_edit_message(
+        callback,
+        text + "\n\n" + _tr(
+            lang,
+            "Ручные настройки скрыты. Напиши фразу вроде: «теперь долг у меня 450000».",
+            "Qo'lda sozlama yashirilgan. Masalan: «hozir qarzim 450000» deb yozing.",
+        ),
+        reply_markup=finance_panel_keyboard(entries, lang),
+    )
     await callback.answer()
 
 
@@ -2196,6 +2305,28 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         finally:
             if temp_path and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
+
+    balance_override = _finance_balance_update_from_text(raw_text)
+    if balance_override is not None:
+        bucket, amount = balance_override
+        _apply_finance_balance_override(message.from_user.id, bucket, amount)
+        await safe_delete_message(message)
+        text, entries = build_finance_panel(message.from_user.id)
+        bucket_labels = {
+            "card": _tr(lang, "Карта", "Karta"),
+            "cash": _tr(lang, "Наличные", "Naqd"),
+            "lent": _tr(lang, "Дал в долг", "Qarzga berilgan"),
+            "debt": _tr(lang, "Мои долги", "Mening qarzim"),
+        }
+        text += "\n\n" + _tr(
+            lang,
+            f"Обновил текущий баланс: {bucket_labels.get(bucket, bucket)} = {_fmt_money(amount)}.",
+            f"Joriy balans yangilandi: {bucket_labels.get(bucket, bucket)} = {_fmt_money(amount)}.",
+        )
+        await state.set_state(BotStates.waiting_finance_input)
+        await state.update_data(pending_finance_items=None, pending_finance_source=None)
+        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
+        return
 
     parse_error: Exception | None = None
     try:
@@ -2780,10 +2911,13 @@ async def cb_vacancy_publish(callback: CallbackQuery, state: FSMContext) -> None
     data = await state.get_data()
 
     photo_file_id = str(data.get("last_vacancy_photo_file_id") or "").strip()
-    caption = str(data.get("last_vacancy_text") or "").strip()
+    caption_premium = str(data.get("last_vacancy_text_premium") or "").strip()
+    caption_rendered = str(data.get("last_vacancy_text") or "").strip()
+    caption_fallback = str(data.get("last_vacancy_text_fallback") or "").strip()
+    caption_variants = [text for text in [caption_premium, caption_rendered, caption_fallback] if text]
     contact_url = str(data.get("last_vacancy_contact_url") or "").strip() or None
 
-    if not photo_file_id or not caption:
+    if not photo_file_id or not caption_variants:
         await callback.answer(
             _tr(
                 lang,
@@ -2794,14 +2928,23 @@ async def cb_vacancy_publish(callback: CallbackQuery, state: FSMContext) -> None
         )
         return
 
-    try:
-        await callback.bot.send_photo(
-            chat_id="@ishdasiz",
-            photo=photo_file_id,
-            caption=caption,
-            reply_markup=vacancy_channel_keyboard(lang, contact_url),
-        )
-    except Exception as exc:
+    publish_ok = False
+    for caption in caption_variants:
+        try:
+            await callback.bot.send_photo(
+                chat_id="@ishdasiz",
+                photo=photo_file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=vacancy_channel_keyboard(lang, contact_url),
+            )
+            publish_ok = True
+            await state.update_data(last_vacancy_text=caption)
+            break
+        except Exception:
+            continue
+
+    if not publish_ok:
         logger.exception("Vacancy publish to channel failed")
         await callback.answer(
             _tr(
@@ -3003,45 +3146,18 @@ async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await safe_edit_message(
-        callback,
-        _tr(
-            lang,
-            "🏋️ <b>Тренер / Персональный модуль</b>\n\n"
-            "Выбери цель. Далее бот запросит <b>вес;рост;возраст</b> и соберёт недельный план.\n"
-            "<i>План включает нагрузку, отдых и ссылки на технику упражнений.</i>",
-            "🏋️ <b>Trener / Shaxsiy modul</b>\n\n"
-            "Maqsadni tanlang. Keyin bot <b>vazn;bo'y;yosh</b> so'rab haftalik reja tuzadi.\n"
-            "<i>Rejada yuklama, dam olish va mashqlar texnikasi havolalari bo'ladi.</i>",
-        ),
-        reply_markup=trainer_keyboard(lang),
-    )
-    await callback.answer()
+    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
+    panel_id = await edit_main_menu(callback, callback.from_user.id)
+    if panel_id is not None:
+        await state.update_data(panel_message_id=panel_id)
 
 
 @router.callback_query(F.data.startswith("trainer:plan:"))
 async def cb_trainer_plan(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    mode = callback.data.split("trainer:plan:", 1)[1].strip().lower()
-    goal = "muscle" if mode == "muscle" else "fat"
-    await state.set_state(BotStates.waiting_trainer_profile)
-    await _remember_panel(callback, state)
-    await state.update_data(trainer_goal=goal)
-    await safe_edit_message(
-        callback,
-        _tr(
-            lang,
-            "Введите профиль: <b>вес;рост;возраст</b>\n"
-            "Пример: <code>82;178;27</code>\n"
-            "<i>На основе профиля рассчитаю безопасный недельный план.</i>",
-            "Profilni kiriting: <b>vazn;bo'y;yosh</b>\n"
-            "Misol: <code>82;178;27</code>\n"
-            "<i>Profil asosida xavfsiz haftalik reja hisoblayman.</i>",
-        ),
-        reply_markup=back_to_menu_keyboard(lang),
-    )
-    await callback.answer()
+    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
 
 
 @router.message(BotStates.waiting_trainer_profile, F.text)
@@ -3081,19 +3197,9 @@ async def msg_trainer_profile_invalid(message: Message) -> None:
 @router.callback_query(F.data == "trainer:ask")
 async def cb_trainer_ask(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_trainer_question)
-    await _remember_panel(callback, state)
-    await safe_edit_message(
-        callback,
-        _tr(
-            lang,
-            "✍️ Напиши запрос тренеру.\nПример: «Составь план на 3 дня для дома без инвентаря».",
-            "✍️ Trenerga so'rov yozing.\nMisol: «Uy sharoitida 3 kunlik mashg'ulot rejasini tuzib bering».",
-        ),
-        reply_markup=back_to_menu_keyboard(lang),
-    )
-    await callback.answer()
+    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
 
 
 @router.message(BotStates.waiting_trainer_question, F.text)
@@ -3150,90 +3256,36 @@ async def cmd_export(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == 'menu:ai')
 async def cb_menu_ai(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
+    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_ai_question)
-    await _remember_panel(callback, state)
-    await safe_edit_message(
-        callback,
-        _tr(
-            lang,
-            "🤖 <b>AI-помощник</b>\n\nНапиши вопрос одним сообщением.\nПример: Как сократить расходы на еду на 15% в этом месяце?",
-            "🤖 <b>AI-yordamchi</b>\n\nSavolingizni bitta xabarda yozing.\nMisol: Shu oy ovqat xarajatlarini 15% ga qanday kamaytirsam bo'ladi?",
-        ),
-        reply_markup=back_to_menu_keyboard(lang),
-    )
-    await callback.answer()
+    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
 
 
 @router.message(Command('ai'))
 async def cmd_ai(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
-    question = _command_argument(message.text)
     await safe_delete_message(message)
-
-    if not question:
-        await state.set_state(BotStates.waiting_ai_question)
-        await _edit_panel_from_state(
-            message,
-            state,
-            _tr(
-                lang,
-                "🤖 <b>AI-помощник</b>\n\nНапиши вопрос одним сообщением.",
-                "🤖 <b>AI-yordamchi</b>\n\nSavolingizni bitta xabarda yozing.",
-            ),
-            back_to_menu_keyboard(lang),
-        )
-        return
-
-    try:
-        context = db.get_ai_context(message.from_user.id)
-        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
-    except Exception as exc:
-        logger.exception("AI assistant failed in /ai command")
-        await message.answer(
-            f"{_tr(lang, 'Ошибка AI', 'AI xatosi')}: {_h(exc)}",
-            reply_markup=back_to_menu_keyboard(lang),
-        )
-        return
-
     await state.clear()
-    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
+    await _edit_panel_from_state(
+        message,
+        state,
+        _tr(lang, "Раздел AI отключен.", "AI bo'limi o'chirilgan."),
+        back_to_menu_keyboard(lang),
+    )
 
 
 @router.message(BotStates.waiting_ai_question, F.text)
 async def msg_ai_question(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    lang = _lang_for_user_id(message.from_user.id)
-    question = (message.text or "").strip()
-
-    if not question:
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
-            _tr(lang, "Вопрос пустой.", "Savol bo'sh."),
-            back_to_menu_keyboard(lang),
-        )
-        return
-
-    try:
-        context = db.get_ai_context(message.from_user.id)
-        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context)
-    except Exception as exc:
-        logger.exception("AI assistant failed")
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
-            f"{_tr(lang, 'Ошибка AI', 'AI xatosi')}: {_h(exc)}",
-            back_to_menu_keyboard(lang),
-        )
-        return
-
     await safe_delete_message(message)
     await state.clear()
-    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
+    lang = _lang_for_user_id(message.from_user.id)
+    await _edit_panel_from_state(
+        message,
+        state,
+        _tr(lang, "Раздел AI отключен.", "AI bo'limi o'chirilgan."),
+        back_to_menu_keyboard(lang),
+    )
 
 
 @router.message()

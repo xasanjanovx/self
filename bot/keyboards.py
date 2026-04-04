@@ -138,12 +138,8 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=_t(lang, "menu_goals"), callback_data="menu:goals"),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "menu_trainer"), callback_data="menu:trainer"),
                 InlineKeyboardButton(text=_t(lang, "menu_report"), callback_data="menu:report"),
-            ],
-            [
                 InlineKeyboardButton(text=_t(lang, "menu_vacancy"), callback_data="menu:vacancy"),
-                InlineKeyboardButton(text=_t(lang, "menu_ai"), callback_data="menu:ai"),
             ],
             [
                 InlineKeyboardButton(text=_t(lang, "menu_language"), callback_data="menu:language"),
@@ -236,7 +232,6 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
 def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings")])
     rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -76,7 +76,8 @@ _VACANCY_DISCLAIMER_LINES = (
     "Shaxsiy ma'lumotlaringizni bermang, ish beruvchi pul so'rasa - adminni ogohlantiring.",
     "Ogoh bo'ling!",
 )
-_VACANCY_FOOTER_TEXT = "ISHDASIZ - Tez va oson ish toping!"
+_VACANCY_FOOTER_URL = "https://t.me/ishdasiz"
+_VACANCY_FOOTER_TEXT = "Tez va oson ish toping!"
 _VACANCY_DIVIDER = "— — — — — — — — — — —"
 
 
@@ -261,7 +262,7 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
         "",
     ]
 
-    if titles:
+    if len(titles) > 1:
         lines.append("<b>Bo'sh ish o'rinlari:</b>")
         for title in titles:
             lines.append(f"{_emoji('openings', premium)} {_h(title)}")
@@ -301,7 +302,9 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
     quote_text = _h(_VACANCY_DISCLAIMER_LINES[0]) + "\n" + _h(_VACANCY_DISCLAIMER_LINES[1])
     lines.append(f"<blockquote>{quote_text}</blockquote>")
     _append_blank(lines)
-    lines.append(f"{_emoji('footer', premium)} <b>{_h(_VACANCY_FOOTER_TEXT)}</b>")
+    lines.append(
+        f'{_emoji("footer", premium)} <a href="{_VACANCY_FOOTER_URL}"><b>ISHDASIZ</b></a> - <b>{_h(_VACANCY_FOOTER_TEXT)}</b>'
+    )
 
     while lines and not lines[-1].strip():
         lines.pop()
