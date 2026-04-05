@@ -499,9 +499,11 @@ def _normalize_fin_bucket(bucket: str | None) -> str:
     return "card"
 
 
-def _infer_fin_bucket(text: str, entry_type: str) -> str:
+def _infer_fin_bucket(text: str, entry_type: str, default_wallet_bucket: str = "card") -> str:
     lower = text.lower()
-    if any(token in lower for token in ["нал", "налич", "naqd"]):
+    if any(token in lower for token in ["карт", "карта", "kart", "karta", "card"]):
+        return "card"
+    if any(token in lower for token in ["нал", "налич", "naqd", "cash", "nal"]):
         return "cash"
     if any(token in lower for token in ["долг", "в долг", "qarz"]):
         if any(token in lower for token in ["дал", "одолжил", "berdim"]):
@@ -513,6 +515,9 @@ def _infer_fin_bucket(text: str, entry_type: str) -> str:
         if any(token in lower for token in ["вернул", "погасил", "to'ladim"]):
             return "debt"
         return "debt" if entry_type == "income" else "lent"
+    safe_default = _normalize_fin_bucket(default_wallet_bucket)
+    if safe_default in {"card", "cash"}:
+        return safe_default
     return "card"
 
 
@@ -613,9 +618,17 @@ def _contains_any(text: str, tokens: list[str]) -> bool:
     return any(token in text for token in tokens)
 
 
+def _has_explicit_wallet_hint(text: str) -> bool:
+    lower = str(text or "").lower()
+    return (
+        _pick_bucket_by_text(lower, for_destination=False) is not None
+        or _pick_bucket_by_text(lower, for_destination=True) is not None
+    )
+
+
 def _pick_bucket_by_text(lower: str, *, for_destination: bool) -> str | None:
-    card_tokens = ["карт", "карта", "kart", "karta"]
-    cash_tokens = ["налич", "нал", "naqd"]
+    card_tokens = ["карт", "карта", "kart", "karta", "card"]
+    cash_tokens = ["налич", "нал", "naqd", "cash", "nal"]
 
     if for_destination:
         if _contains_any(lower, ["на карту", "в карту", "kartaga", "to card"]):
@@ -637,34 +650,255 @@ def _pick_bucket_by_text(lower: str, *, for_destination: bool) -> str | None:
     return None
 
 
-def _transfer_from_chunk(chunk: str, lang: str) -> dict[str, Any] | None:
+def _sanitize_counterparty(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    cleaned = raw.strip(".,;:!?()[]{}<>\"' ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return None
+
+    lower = cleaned.lower().lstrip("@")
+    normalized = lower.replace("’", "'").replace("`", "'").replace("'", "")
+    stop = {
+        "долг",
+        "qarz",
+        "qarzga",
+        "qarzni",
+        "dolg",
+        "vdolg",
+        "debt",
+        "loan",
+        "karta",
+        "карта",
+        "karty",
+        "kartadan",
+        "kartaga",
+        "naqd",
+        "нал",
+        "налич",
+        "naqddan",
+        "naqdga",
+        "uzs",
+        "sum",
+        "so'm",
+        "som",
+        "rub",
+        "usd",
+        "eur",
+        "to",
+        "for",
+        "from",
+        "u",
+        "ot",
+        "iz",
+        "s",
+        "v",
+        "ga",
+        "ka",
+        "dan",
+        "toladim",
+        "oplatil",
+        "vernul",
+        "berdim",
+        "oldim",
+        "qaytardi",
+        "zanyal",
+        "vzyal",
+        "daromad",
+        "xarajat",
+        "dohod",
+        "rashod",
+        "rasxod",
+        "income",
+        "expense",
+    }
+    if normalized in stop:
+        return None
+    if len(normalized) < 2:
+        return None
+    if normalized.isdigit():
+        return None
+    return cleaned
+
+
+def _extract_counterparty(chunk: str) -> str | None:
+    text = str(chunk or "")
+    # Prefer explicit @username first.
+    at_match = re.search(r"@([A-Za-z0-9_]{3,})", text)
+    if at_match:
+        return _sanitize_counterparty("@" + at_match.group(1))
+
+    patterns = [
+        r"(?:у|от|from)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})",
+        r"(?:кому|for|to)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})",
+        r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})\s*(?:ga|ге|га|ka|ке|dan|дан)\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            candidate = _sanitize_counterparty(match.group(1))
+            if candidate:
+                return candidate
+
+    # Common pattern: amount followed by name (e.g. "70000 Ali").
+    amount_followed = list(
+        re.finditer(
+            r"\d[\d\s.,]*\s+(@?[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.\-’'`]{1,40})\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    for match in reversed(amount_followed):
+        candidate = _sanitize_counterparty(match.group(1))
+        if candidate:
+            return candidate
+
+    # Fallback: first meaningful token with letters.
+    for token in re.findall(r"[A-Za-zА-Яа-яЁё@][A-Za-zА-Яа-яЁё0-9_.\-’'`]{1,40}", text):
+        candidate = _sanitize_counterparty(token)
+        if candidate is None:
+            continue
+        normalized = candidate.lower().lstrip("@").replace("’", "'").replace("`", "'").replace("'", "")
+        if normalized in {
+            "dal",
+            "v",
+            "dolg",
+            "debt",
+            "loan",
+            "to",
+            "ga",
+            "dan",
+            "u",
+            "ot",
+            "from",
+            "for",
+            "olgan",
+            "oldim",
+            "berdim",
+            "berildi",
+            "vernul",
+            "vernut",
+            "to'ladim",
+            "toladim",
+            "oplatil",
+            "zanyal",
+            "vzyal",
+            "daromad",
+            "xarajat",
+            "dohod",
+            "rashod",
+            "rasxod",
+        }:
+            continue
+        return candidate
+    return None
+
+
+def _finance_default_wallet_bucket(telegram_id: int) -> str:
+    rows = db.list_finance_entries_all(telegram_id)
+    for row in reversed(rows):
+        note = str(row.get("note") or "")
+        if note.strip().lower().startswith("[x:"):
+            continue
+        bucket = _finance_bucket_from_note(note)
+        if bucket in {"card", "cash"}:
+            return bucket
+
+    balances = _finance_account_balances(telegram_id)
+    card = float(balances.get("card") or 0.0)
+    cash = float(balances.get("cash") or 0.0)
+    if abs(cash) > abs(card):
+        return "cash"
+    return "card"
+
+
+def _format_transfer_category(
+    *,
+    lang: str,
+    from_bucket: str,
+    to_bucket: str,
+    counterparty: str | None,
+) -> str:
+    if lang == "uz":
+        if to_bucket == "lent":
+            base = "Qarzga berish"
+        elif from_bucket == "lent":
+            base = "Qarzni qaytarish"
+        elif from_bucket == "debt":
+            base = "Qarz olish"
+        elif to_bucket == "debt":
+            base = "Qarz to'lovi"
+        else:
+            base = "Hisoblar o'tkazmasi"
+    else:
+        if to_bucket == "lent":
+            base = "Выдача долга"
+        elif from_bucket == "lent":
+            base = "Возврат долга"
+        elif from_bucket == "debt":
+            base = "Получение в долг"
+        elif to_bucket == "debt":
+            base = "Погашение долга"
+        else:
+            base = "Перевод между счетами"
+
+    if counterparty and (to_bucket in {"lent", "debt"} or from_bucket in {"lent", "debt"}):
+        return f"{base}: {counterparty}"
+    return base
+
+
+def _transfer_from_chunk(chunk: str, lang: str, default_wallet_bucket: str = "card") -> dict[str, Any] | None:
     lower = chunk.lower()
     amount = _extract_amount_from_text(chunk)
     if amount is None:
         return None
 
     transfer_words = ["перевод", "перевел", "перекинул", "o'tkaz", "transfer"]
-    give_loan_words = ["дал в долг", "одолжил", "qarzga berd"]
-    loan_back_words = ["вернули долг", "долг вернули", "получил обратно долг", "qarzni qaytardi", "qarz qaytdi"]
-    take_loan_words = ["взял в долг", "занял", "получил в долг", "qarz oldim"]
-    repay_loan_words = ["вернул долг", "погасил долг", "оплатил долг", "qarzni to'la", "qarzni yop"]
+    give_loan_words = ["дал в долг", "одолжил", "dal v dolg", "qarzga berd", "qarz berdim"]
+    loan_back_words = [
+        "вернули долг",
+        "долг вернули",
+        "получил обратно долг",
+        "dolg vernuli",
+        "qarzni qaytardi",
+        "qarz qaytdi",
+    ]
+    take_loan_words = ["взял в долг", "занял", "получил в долг", "vzyal v dolg", "zanyal", "qarz oldim"]
+    repay_loan_words = [
+        "вернул долг",
+        "погасил долг",
+        "оплатил долг",
+        "vernul dolg",
+        "oplatil dolg",
+        "qarzni to'la",
+        "qarzni tola",
+        "qarzni to'ladim",
+        "qarzni toladim",
+        "qarzni yop",
+        "qarzni yopdim",
+    ]
     card_to_cash_words = ["снял с карты", "обналичил", "наличные с карты", "kartadan naqd"]
     cash_to_card_words = ["внес на карту", "пополнил карту", "положил на карту", "naqdni kartaga", "kartaga naqd"]
 
     from_bucket: str | None = None
     to_bucket: str | None = None
+    safe_default_wallet = _normalize_fin_bucket(default_wallet_bucket)
+    if safe_default_wallet not in {"card", "cash"}:
+        safe_default_wallet = "card"
+    counterparty = _extract_counterparty(chunk)
 
     if _contains_any(lower, give_loan_words):
-        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or safe_default_wallet
         to_bucket = "lent"
     elif _contains_any(lower, loan_back_words):
         from_bucket = "lent"
-        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or safe_default_wallet
     elif _contains_any(lower, take_loan_words):
         from_bucket = "debt"
-        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or safe_default_wallet
     elif _contains_any(lower, repay_loan_words):
-        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or safe_default_wallet
         to_bucket = "debt"
     elif _contains_any(lower, card_to_cash_words):
         from_bucket, to_bucket = "card", "cash"
@@ -681,28 +915,12 @@ def _transfer_from_chunk(chunk: str, lang: str) -> dict[str, Any] | None:
     if not from_bucket or not to_bucket or from_bucket == to_bucket:
         return None
 
-    if lang == "uz":
-        if to_bucket == "lent":
-            category = "Qarzga berish"
-        elif from_bucket == "lent":
-            category = "Qarzni qaytarish"
-        elif from_bucket == "debt":
-            category = "Qarz olish"
-        elif to_bucket == "debt":
-            category = "Qarz to'lovi"
-        else:
-            category = "Hisoblar o'tkazmasi"
-    else:
-        if to_bucket == "lent":
-            category = "Выдача долга"
-        elif from_bucket == "lent":
-            category = "Возврат долга"
-        elif from_bucket == "debt":
-            category = "Получение в долг"
-        elif to_bucket == "debt":
-            category = "Погашение долга"
-        else:
-            category = "Перевод между счетами"
+    category = _format_transfer_category(
+        lang=lang,
+        from_bucket=from_bucket,
+        to_bucket=to_bucket,
+        counterparty=counterparty,
+    )
 
     return {
         "kind": "transfer",
@@ -711,13 +929,14 @@ def _transfer_from_chunk(chunk: str, lang: str) -> dict[str, Any] | None:
         "note": chunk.strip(),
         "from_bucket": from_bucket,
         "to_bucket": to_bucket,
+        "counterparty": counterparty,
     }
 
 
-def _extract_finance_transfers(raw_text: str, lang: str) -> list[dict[str, Any]]:
+def _extract_finance_transfers(raw_text: str, lang: str, default_wallet_bucket: str = "card") -> list[dict[str, Any]]:
     transfers: list[dict[str, Any]] = []
     for chunk in _split_finance_chunks(raw_text):
-        transfer = _transfer_from_chunk(chunk, lang)
+        transfer = _transfer_from_chunk(chunk, lang, default_wallet_bucket)
         if transfer:
             transfers.append(transfer)
     return transfers
@@ -2306,6 +2525,8 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             if temp_path and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
+    default_wallet_bucket = _finance_default_wallet_bucket(message.from_user.id)
+
     balance_override = _finance_balance_update_from_text(raw_text)
     if balance_override is not None:
         bucket, amount = balance_override
@@ -2336,10 +2557,14 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         parse_error = exc
         items = []
 
-    transfers = _extract_finance_transfers(raw_text, lang)
+    transfers = _extract_finance_transfers(raw_text, lang, default_wallet_bucket)
 
     prepared: list[dict[str, Any]] = []
     transfer_amounts = [float(item.get("amount") or 0) for item in transfers]
+
+    safe_default_wallet = _normalize_fin_bucket(default_wallet_bucket)
+    if safe_default_wallet not in {"card", "cash"}:
+        safe_default_wallet = "card"
 
     for item in items:
         entry_type = str(item.get("type") or "expense")
@@ -2353,9 +2578,22 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
 
         category = str(item.get("category") or "прочее").strip() or "прочее"
         note = item.get("note")
-        bucket = _normalize_fin_bucket(item.get("bucket"))
-        if bucket == "card":
-            bucket = _infer_fin_bucket(f"{category} {note or ''} {raw_text}", entry_type)
+        raw_bucket = str(item.get("bucket") or "").strip().lower()
+        bucket = _normalize_fin_bucket(raw_bucket)
+        inferred_bucket = _infer_fin_bucket(
+            f"{category} {note or ''}",
+            entry_type,
+            default_wallet_bucket=default_wallet_bucket,
+        )
+        has_wallet_hint = _has_explicit_wallet_hint(f"{category} {note or ''}")
+        if raw_bucket not in {"card", "cash", "lent", "debt"}:
+            bucket = inferred_bucket
+        elif inferred_bucket in {"lent", "debt"} and bucket in {"card", "cash"}:
+            bucket = inferred_bucket
+        elif bucket == "card" and inferred_bucket == "cash":
+            bucket = inferred_bucket
+        if bucket in {"card", "cash"} and not has_wallet_hint:
+            bucket = safe_default_wallet
 
         prepared.append(
             {
