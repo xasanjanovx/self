@@ -39,6 +39,12 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "calorie_meals": "🍽️ Приемы",
         "finance_settings": "⚙️ Настройки",
         "finance_ops": "📂 Операции",
+        "finance_set_card": "💳 Карта",
+        "finance_set_cash": "💵 Наличные",
+        "finance_set_lent": "🤝 Дал в долг",
+        "finance_set_debt": "📌 Мои долги",
+        "finance_set_credit": "🏦 Кредит/мес",
+        "finance_set_back_settings": "⬅️ К настройкам",
         "period_day": "📅 День",
         "period_week": "🗓️ Неделя",
         "period_month": "📆 Месяц",
@@ -94,6 +100,12 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "calorie_meals": "🍽️ Qabullar",
         "finance_settings": "⚙️ Sozlamalar",
         "finance_ops": "📂 Operatsiyalar",
+        "finance_set_card": "💳 Karta",
+        "finance_set_cash": "💵 Naqd",
+        "finance_set_lent": "🤝 Qarzga berilgan",
+        "finance_set_debt": "📌 Mening qarzim",
+        "finance_set_credit": "🏦 Kredit/oy",
+        "finance_set_back_settings": "⬅️ Sozlamalarga",
         "period_day": "📅 Kun",
         "period_week": "🗓️ Hafta",
         "period_month": "📆 Oy",
@@ -124,6 +136,10 @@ def _t(lang: str, key: str, **kwargs: object) -> str:
     data = TEXTS.get(lang if lang in TEXTS else "ru", TEXTS["ru"])
     template = data.get(key) or TEXTS["ru"].get(key) or key
     return template.format(**kwargs)
+
+
+def _money(value: float) -> str:
+    return f"{float(value):,.0f}".replace(",", " ")
 
 
 def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
@@ -234,6 +250,55 @@ def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeybo
     rows.append([InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day")])
     rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_settings_keyboard(settings: dict[str, float], currency: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=f"{_t(lang, 'finance_set_card')} • {_money(float(settings.get('card_base') or 0))} {currency}"[:64],
+                callback_data="finance:set:card",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{_t(lang, 'finance_set_cash')} • {_money(float(settings.get('cash_base') or 0))} {currency}"[:64],
+                callback_data="finance:set:cash",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{_t(lang, 'finance_set_lent')} • {_money(float(settings.get('lent_base') or 0))} {currency}"[:64],
+                callback_data="finance:set:lent",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{_t(lang, 'finance_set_debt')} • {_money(float(settings.get('debt_base') or 0))} {currency}"[:64],
+                callback_data="finance:set:debt",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=(
+                    f"{_t(lang, 'finance_set_credit')} • "
+                    f"{_money(float(settings.get('monthly_credit_payment') or 0))} {currency}"
+                )[:64],
+                callback_data="finance:set:credit",
+            )
+        ],
+        [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_setting_input_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=_t(lang, "finance_set_back_settings"), callback_data="finance:settings")],
+            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+        ]
+    )
 
 
 def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "ru") -> InlineKeyboardMarkup:

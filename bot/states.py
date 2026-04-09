@@ -10,6 +10,7 @@ class BotStates(StatesGroup):
     waiting_finance_input = State()
     waiting_finance_confirm = State()
     waiting_finance_settings = State()
+    waiting_finance_settings_value = State()
     waiting_habit_name = State()
     waiting_checkin = State()
     waiting_goal = State()

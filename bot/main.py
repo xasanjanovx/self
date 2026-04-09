@@ -39,25 +39,17 @@ from .keyboards import (
     finance_detail_keyboard,
     finance_operations_keyboard,
     finance_panel_keyboard,
+    finance_setting_input_keyboard,
+    finance_settings_keyboard,
     habits_keyboard,
     language_keyboard,
     main_menu_keyboard,
     nutrition_goal_keyboard,
     report_settings_keyboard,
     trainer_keyboard,
-    vacancy_channel_keyboard,
-    vacancy_panel_keyboard,
-    vacancy_result_keyboard,
 )
 from .reports import build_weekly_summary
 from .states import BotStates
-from .vacancy import (
-    VACANCY_DEFAULT_REGION_TAG,
-    build_contact_url,
-    build_vacancy_panel_text,
-    format_vacancy_post,
-    looks_like_vacancy,
-)
 
 settings = load_settings()
 db = Database(settings)
@@ -140,7 +132,6 @@ def build_dashboard_text(telegram_id: int) -> str:
     habits = db.list_today_habits(telegram_id, tz_name=tz_name)
     finance_settings = db.get_finance_settings(telegram_id)
     live_balances = _finance_account_balances(telegram_id)
-    today_income, today_expense = _finance_today_totals(telegram_id, tz_name)
 
     card_balance = float(finance_settings.get("card_base") or 0.0) + float(live_balances["card"])
     cash_balance = float(finance_settings.get("cash_base") or 0.0) + float(live_balances["cash"])
@@ -167,7 +158,6 @@ def build_dashboard_text(telegram_id: int) -> str:
             f"✅ <b>Odatlar</b>\n"
             f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
             f"💰 <b>Moliya</b>\n"
-            f"• Bugun: +{_fmt_money(today_income)} / -{_fmt_money(today_expense)} {currency}\n"
             f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>"
         )
 
@@ -180,7 +170,6 @@ def build_dashboard_text(telegram_id: int) -> str:
         f"✅ <b>Привычки</b>\n"
         f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
         f"💰 <b>Финансы</b>\n"
-        f"• Сегодня: +{_fmt_money(today_income)} / -{_fmt_money(today_expense)} {currency}\n"
         f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>"
     )
 
@@ -499,11 +488,9 @@ def _normalize_fin_bucket(bucket: str | None) -> str:
     return "card"
 
 
-def _infer_fin_bucket(text: str, entry_type: str, default_wallet_bucket: str = "card") -> str:
+def _infer_fin_bucket(text: str, entry_type: str) -> str:
     lower = text.lower()
-    if any(token in lower for token in ["карт", "карта", "kart", "karta", "card"]):
-        return "card"
-    if any(token in lower for token in ["нал", "налич", "naqd", "cash", "nal"]):
+    if any(token in lower for token in ["нал", "налич", "naqd"]):
         return "cash"
     if any(token in lower for token in ["долг", "в долг", "qarz"]):
         if any(token in lower for token in ["дал", "одолжил", "berdim"]):
@@ -515,9 +502,6 @@ def _infer_fin_bucket(text: str, entry_type: str, default_wallet_bucket: str = "
         if any(token in lower for token in ["вернул", "погасил", "to'ladim"]):
             return "debt"
         return "debt" if entry_type == "income" else "lent"
-    safe_default = _normalize_fin_bucket(default_wallet_bucket)
-    if safe_default in {"card", "cash"}:
-        return safe_default
     return "card"
 
 
@@ -533,82 +517,6 @@ def _extract_amount_from_text(text: str) -> float | None:
     return amount if amount > 0 else None
 
 
-def _finance_balance_update_from_text(text: str) -> tuple[str, float] | None:
-    lower = str(text or "").strip().lower()
-    if not lower:
-        return None
-
-    amount = _extract_amount_from_text(lower)
-    if amount is None:
-        return None
-
-    direct_ops_tokens = (
-        "доход",
-        "расход",
-        "rasxod",
-        "rashod",
-        "трата",
-        "income",
-        "expense",
-        "daromad",
-        "xarajat",
-        "перевод",
-        "o'tkaz",
-    )
-    if any(token in lower for token in direct_ops_tokens):
-        return None
-
-    now_tokens = ("теперь", "сейчас", "endi", "hozir", "now")
-    has_now_hint = any(token in lower for token in now_tokens)
-
-    if any(
-        token in lower
-        for token in ("мой долг", "мои долги", "долг у меня", "moy dolg", "dolg u menya", "qarzim", "mening qarzim")
-    ):
-        return "debt", amount
-    if any(token in lower for token in ("дал в долг", "мне должны", "dal v dolg", "qarzga berdim", "qarzga berilgan")) and has_now_hint:
-        return "lent", amount
-    if any(token in lower for token in ("на карте", "карта", "na karte", "karta", "kartada")):
-        return "card", amount
-    if any(token in lower for token in ("налич", "наличные", "nalich", "naqd")):
-        return "cash", amount
-
-    return None
-
-
-def _apply_finance_balance_override(telegram_id: int, bucket: str, amount: float) -> None:
-    current = db.get_finance_settings(telegram_id)
-    live = _finance_account_balances(telegram_id)
-    safe_bucket = _normalize_fin_bucket(bucket)
-    base_value = float(amount) - float(live.get(safe_bucket, 0.0))
-
-    payload = {
-        "card_base": float(current.get("card_base") or 0.0),
-        "cash_base": float(current.get("cash_base") or 0.0),
-        "lent_base": float(current.get("lent_base") or 0.0),
-        "debt_base": float(current.get("debt_base") or 0.0),
-        "monthly_credit_payment": float(current.get("monthly_credit_payment") or 0.0),
-    }
-    key_map = {
-        "card": "card_base",
-        "cash": "cash_base",
-        "lent": "lent_base",
-        "debt": "debt_base",
-    }
-    target_key = key_map.get(safe_bucket)
-    if target_key:
-        payload[target_key] = base_value
-
-    db.save_finance_settings(
-        telegram_id,
-        card_base=payload["card_base"],
-        cash_base=payload["cash_base"],
-        lent_base=payload["lent_base"],
-        debt_base=payload["debt_base"],
-        monthly_credit_payment=payload["monthly_credit_payment"],
-    )
-
-
 def _split_finance_chunks(text: str) -> list[str]:
     chunks = [part.strip() for part in re.split(r"[\n;,]+", text) if part.strip()]
     return chunks or ([text.strip()] if text.strip() else [])
@@ -618,309 +526,189 @@ def _contains_any(text: str, tokens: list[str]) -> bool:
     return any(token in text for token in tokens)
 
 
-def _has_explicit_wallet_hint(text: str) -> bool:
-    lower = str(text or "").lower()
-    return (
-        _pick_bucket_by_text(lower, for_destination=False) is not None
-        or _pick_bucket_by_text(lower, for_destination=True) is not None
-    )
+_FIN_BUCKET_TOKENS: dict[str, list[str]] = {
+    "card": ["карт", "карта", "card", "karta", "kart"],
+    "cash": ["налич", "нал", "cash", "naqd"],
+    "lent": ["дал в долг", "одолжил", "qarzga berd", "loaned", "lent"],
+    "debt": ["мои долги", "мой долг", "кредит", "qarz old", "debt"],
+}
+
+
+def _pick_bucket_by_fragment(fragment: str, *, for_destination: bool | None = None) -> str | None:
+    lower = fragment.lower()
+    hits = [bucket for bucket, tokens in _FIN_BUCKET_TOKENS.items() if _contains_any(lower, tokens)]
+    if len(hits) == 1:
+        return hits[0]
+
+    if _contains_any(lower, ["дал в долг", "одолжил", "qarzga berd", "loaned"]):
+        return "lent"
+    if _contains_any(lower, ["мои долги", "мой долг", "взял в долг", "занял", "qarz old", "kredit"]):
+        return "debt"
+
+    if _contains_any(lower, ["долг", "qarz", "debt"]):
+        if for_destination is True:
+            return "lent"
+        if for_destination is False:
+            return "debt"
+    return None
 
 
 def _pick_bucket_by_text(lower: str, *, for_destination: bool) -> str | None:
-    card_tokens = ["карт", "карта", "kart", "karta", "card"]
-    cash_tokens = ["налич", "нал", "naqd", "cash", "nal"]
-
     if for_destination:
-        if _contains_any(lower, ["на карту", "в карту", "kartaga", "to card"]):
+        if re.search(r"(?:\bна\b|\bв\b|\bво\b|to)\s+(?:карт\w*|card|karta\w*|kartaga)", lower):
             return "card"
-        if _contains_any(lower, ["в налич", "наличными", "naqdga", "to cash"]):
+        if re.search(r"(?:\bв\b|\bво\b|\bна\b|to)\s+(?:налич\w*|нал\b|cash|naqd\w*|naqdga)", lower):
             return "cash"
     else:
-        if _contains_any(lower, ["с карты", "из карты", "kartadan", "from card"]):
+        if re.search(r"(?:\bс\b|\bсо\b|\bиз\b|from)\s+(?:карт\w*|card|karta\w*|kartadan)", lower):
             return "card"
-        if _contains_any(lower, ["с налич", "из налич", "наличными", "naqddan", "from cash"]):
+        if re.search(r"(?:\bс\b|\bсо\b|\bиз\b|from)\s+(?:налич\w*|нал\b|cash|naqd\w*|naqddan)", lower):
             return "cash"
 
-    has_card = _contains_any(lower, card_tokens)
-    has_cash = _contains_any(lower, cash_tokens)
-    if has_card and not has_cash:
-        return "card"
-    if has_cash and not has_card:
-        return "cash"
-    return None
+    return _pick_bucket_by_fragment(lower, for_destination=for_destination)
 
 
-def _sanitize_counterparty(value: str | None) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    cleaned = raw.strip(".,;:!?()[]{}<>\"' ")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    if not cleaned:
-        return None
-
-    lower = cleaned.lower().lstrip("@")
-    normalized = lower.replace("’", "'").replace("`", "'").replace("'", "")
-    stop = {
-        "долг",
-        "qarz",
-        "qarzga",
-        "qarzni",
-        "dolg",
-        "vdolg",
-        "debt",
-        "loan",
-        "karta",
-        "карта",
-        "karty",
-        "kartadan",
-        "kartaga",
-        "naqd",
-        "нал",
-        "налич",
-        "naqddan",
-        "naqdga",
-        "uzs",
-        "sum",
-        "so'm",
-        "som",
-        "rub",
-        "usd",
-        "eur",
-        "to",
-        "for",
-        "from",
-        "u",
-        "ot",
-        "iz",
-        "s",
-        "v",
-        "ga",
-        "ka",
-        "dan",
-        "toladim",
-        "oplatil",
-        "vernul",
-        "berdim",
-        "oldim",
-        "qaytardi",
-        "zanyal",
-        "vzyal",
-        "daromad",
-        "xarajat",
-        "dohod",
-        "rashod",
-        "rasxod",
-        "income",
-        "expense",
-    }
-    if normalized in stop:
-        return None
-    if len(normalized) < 2:
-        return None
-    if normalized.isdigit():
-        return None
-    return cleaned
-
-
-def _extract_counterparty(chunk: str) -> str | None:
-    text = str(chunk or "")
-    # Prefer explicit @username first.
-    at_match = re.search(r"@([A-Za-z0-9_]{3,})", text)
-    if at_match:
-        return _sanitize_counterparty("@" + at_match.group(1))
-
-    patterns = [
-        r"(?:у|от|from)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})",
-        r"(?:кому|for|to)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})",
-        r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.-]{1,40})\s*(?:ga|ге|га|ka|ке|dan|дан)\b",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            candidate = _sanitize_counterparty(match.group(1))
-            if candidate:
-                return candidate
-
-    # Common pattern: amount followed by name (e.g. "70000 Ali").
-    amount_followed = list(
-        re.finditer(
-            r"\d[\d\s.,]*\s+(@?[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_.\-’'`]{1,40})\b",
-            text,
-            flags=re.IGNORECASE,
-        )
-    )
-    for match in reversed(amount_followed):
-        candidate = _sanitize_counterparty(match.group(1))
-        if candidate:
-            return candidate
-
-    # Fallback: first meaningful token with letters.
-    for token in re.findall(r"[A-Za-zА-Яа-яЁё@][A-Za-zА-Яа-яЁё0-9_.\-’'`]{1,40}", text):
-        candidate = _sanitize_counterparty(token)
-        if candidate is None:
-            continue
-        normalized = candidate.lower().lstrip("@").replace("’", "'").replace("`", "'").replace("'", "")
-        if normalized in {
-            "dal",
-            "v",
-            "dolg",
-            "debt",
-            "loan",
-            "to",
-            "ga",
-            "dan",
-            "u",
-            "ot",
-            "from",
-            "for",
-            "olgan",
-            "oldim",
-            "berdim",
-            "berildi",
-            "vernul",
-            "vernut",
-            "to'ladim",
-            "toladim",
-            "oplatil",
-            "zanyal",
-            "vzyal",
-            "daromad",
-            "xarajat",
-            "dohod",
-            "rashod",
-            "rasxod",
-        }:
-            continue
-        return candidate
-    return None
-
-
-def _finance_default_wallet_bucket(telegram_id: int) -> str:
-    rows = db.list_finance_entries_all(telegram_id)
-    for row in reversed(rows):
-        note = str(row.get("note") or "")
-        if note.strip().lower().startswith("[x:"):
-            continue
-        bucket = _finance_bucket_from_note(note)
-        if bucket in {"card", "cash"}:
-            return bucket
-
-    balances = _finance_account_balances(telegram_id)
-    card = float(balances.get("card") or 0.0)
-    cash = float(balances.get("cash") or 0.0)
-    if abs(cash) > abs(card):
-        return "cash"
-    return "card"
-
-
-def _format_transfer_category(
-    *,
-    lang: str,
-    from_bucket: str,
-    to_bucket: str,
-    counterparty: str | None,
-) -> str:
+def _transfer_category(from_bucket: str, to_bucket: str, lang: str) -> str:
     if lang == "uz":
         if to_bucket == "lent":
-            base = "Qarzga berish"
-        elif from_bucket == "lent":
-            base = "Qarzni qaytarish"
-        elif from_bucket == "debt":
-            base = "Qarz olish"
-        elif to_bucket == "debt":
-            base = "Qarz to'lovi"
-        else:
-            base = "Hisoblar o'tkazmasi"
-    else:
-        if to_bucket == "lent":
-            base = "Выдача долга"
-        elif from_bucket == "lent":
-            base = "Возврат долга"
-        elif from_bucket == "debt":
-            base = "Получение в долг"
-        elif to_bucket == "debt":
-            base = "Погашение долга"
-        else:
-            base = "Перевод между счетами"
+            return "Qarzga berish"
+        if from_bucket == "lent":
+            return "Qarzni qaytarish"
+        if from_bucket == "debt":
+            return "Qarz olish"
+        if to_bucket == "debt":
+            return "Qarz to'lovi"
+        return "Hisoblar o'tkazmasi"
 
-    if counterparty and (to_bucket in {"lent", "debt"} or from_bucket in {"lent", "debt"}):
-        return f"{base}: {counterparty}"
-    return base
+    if to_bucket == "lent":
+        return "Выдача долга"
+    if from_bucket == "lent":
+        return "Возврат долга"
+    if from_bucket == "debt":
+        return "Получение в долг"
+    if to_bucket == "debt":
+        return "Погашение долга"
+    return "Перевод между счетами"
 
 
-def _transfer_from_chunk(chunk: str, lang: str, default_wallet_bucket: str = "card") -> dict[str, Any] | None:
-    lower = chunk.lower()
-    amount = _extract_amount_from_text(chunk)
-    if amount is None:
+def _infer_transfer_route(text: str) -> tuple[str, str] | None:
+    lower = text.lower().strip()
+    if not lower:
         return None
 
-    transfer_words = ["перевод", "перевел", "перекинул", "o'tkaz", "transfer"]
-    give_loan_words = ["дал в долг", "одолжил", "dal v dolg", "qarzga berd", "qarz berdim"]
+    transfer_words = [
+        "перевод",
+        "перевел",
+        "перевела",
+        "перекинул",
+        "перекинула",
+        "перебросил",
+        "o'tkaz",
+        "otkaz",
+        "transfer",
+    ]
+    give_loan_words = [
+        "дал в долг",
+        "в долг дал",
+        "одолжил",
+        "qarzga berd",
+        "qarz berd",
+        "loaned",
+    ]
     loan_back_words = [
         "вернули долг",
         "долг вернули",
         "получил обратно долг",
-        "dolg vernuli",
+        "возврат долга",
         "qarzni qaytardi",
         "qarz qaytdi",
+        "qaytarib berdi",
     ]
-    take_loan_words = ["взял в долг", "занял", "получил в долг", "vzyal v dolg", "zanyal", "qarz oldim"]
+    take_loan_words = [
+        "взял в долг",
+        "занял",
+        "получил в долг",
+        "qarz old",
+        "borrowed",
+    ]
     repay_loan_words = [
         "вернул долг",
         "погасил долг",
+        "погашение долга",
         "оплатил долг",
-        "vernul dolg",
-        "oplatil dolg",
         "qarzni to'la",
         "qarzni tola",
-        "qarzni to'ladim",
-        "qarzni toladim",
         "qarzni yop",
-        "qarzni yopdim",
+        "debt payment",
     ]
-    card_to_cash_words = ["снял с карты", "обналичил", "наличные с карты", "kartadan naqd"]
-    cash_to_card_words = ["внес на карту", "пополнил карту", "положил на карту", "naqdni kartaga", "kartaga naqd"]
+    card_to_cash_words = [
+        "снял с карты",
+        "снятие с карты",
+        "обналичил",
+        "наличные с карты",
+        "kartadan naqd",
+    ]
+    cash_to_card_words = [
+        "внес на карту",
+        "пополнил карту",
+        "положил на карту",
+        "naqdni kartaga",
+        "kartaga naqd",
+    ]
 
     from_bucket: str | None = None
     to_bucket: str | None = None
-    safe_default_wallet = _normalize_fin_bucket(default_wallet_bucket)
-    if safe_default_wallet not in {"card", "cash"}:
-        safe_default_wallet = "card"
-    counterparty = _extract_counterparty(chunk)
 
     if _contains_any(lower, give_loan_words):
-        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or safe_default_wallet
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
         to_bucket = "lent"
     elif _contains_any(lower, loan_back_words):
         from_bucket = "lent"
-        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or safe_default_wallet
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
     elif _contains_any(lower, take_loan_words):
         from_bucket = "debt"
-        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or safe_default_wallet
+        to_bucket = _pick_bucket_by_text(lower, for_destination=True) or "card"
     elif _contains_any(lower, repay_loan_words):
-        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or safe_default_wallet
+        from_bucket = _pick_bucket_by_text(lower, for_destination=False) or "card"
         to_bucket = "debt"
     elif _contains_any(lower, card_to_cash_words):
         from_bucket, to_bucket = "card", "cash"
     elif _contains_any(lower, cash_to_card_words):
         from_bucket, to_bucket = "cash", "card"
-    elif _contains_any(lower, transfer_words):
-        from_bucket = _pick_bucket_by_text(lower, for_destination=False)
-        to_bucket = _pick_bucket_by_text(lower, for_destination=True)
-        if from_bucket is None and "долг" in lower:
-            from_bucket = "lent" if "вернули" in lower else "debt"
-        if to_bucket is None and "долг" in lower:
-            to_bucket = "debt" if "погас" in lower else "lent"
+    else:
+        arrow_match = re.search(r"(?P<from>[^;\n,]{1,90}?)(?:->|→|=>)(?P<to>[^;\n,]{1,90})", lower)
+        if arrow_match:
+            from_bucket = _pick_bucket_by_fragment(arrow_match.group("from"), for_destination=False)
+            to_bucket = _pick_bucket_by_fragment(arrow_match.group("to"), for_destination=True)
+        else:
+            explicit_from = _pick_bucket_by_text(lower, for_destination=False)
+            explicit_to = _pick_bucket_by_text(lower, for_destination=True)
+            if explicit_from and explicit_to and explicit_from != explicit_to:
+                from_bucket, to_bucket = explicit_from, explicit_to
+            elif _contains_any(lower, transfer_words):
+                from_bucket = explicit_from
+                to_bucket = explicit_to
+                if from_bucket is None and "долг" in lower:
+                    from_bucket = "lent" if "вернули" in lower else "debt"
+                if to_bucket is None and "долг" in lower:
+                    to_bucket = "debt" if _contains_any(lower, ["погас", "вернул", "to'la", "yop"]) else "lent"
 
     if not from_bucket or not to_bucket or from_bucket == to_bucket:
         return None
+    return from_bucket, to_bucket
 
-    category = _format_transfer_category(
-        lang=lang,
-        from_bucket=from_bucket,
-        to_bucket=to_bucket,
-        counterparty=counterparty,
-    )
+
+def _transfer_from_chunk(chunk: str, lang: str) -> dict[str, Any] | None:
+    amount = _extract_amount_from_text(chunk)
+    if amount is None:
+        return None
+
+    route = _infer_transfer_route(chunk)
+    if route is None:
+        return None
+    from_bucket, to_bucket = route
+
+    category = _transfer_category(from_bucket, to_bucket, lang)
 
     return {
         "kind": "transfer",
@@ -929,14 +717,13 @@ def _transfer_from_chunk(chunk: str, lang: str, default_wallet_bucket: str = "ca
         "note": chunk.strip(),
         "from_bucket": from_bucket,
         "to_bucket": to_bucket,
-        "counterparty": counterparty,
     }
 
 
-def _extract_finance_transfers(raw_text: str, lang: str, default_wallet_bucket: str = "card") -> list[dict[str, Any]]:
+def _extract_finance_transfers(raw_text: str, lang: str) -> list[dict[str, Any]]:
     transfers: list[dict[str, Any]] = []
     for chunk in _split_finance_chunks(raw_text):
-        transfer = _transfer_from_chunk(chunk, lang, default_wallet_bucket)
+        transfer = _transfer_from_chunk(chunk, lang)
         if transfer:
             transfers.append(transfer)
     return transfers
@@ -957,6 +744,107 @@ def _is_transfer_like_item(item: dict[str, Any]) -> bool:
             "naqd",
         ],
     )
+
+
+def _transfer_key(amount: float, from_bucket: str, to_bucket: str) -> tuple[float, str, str]:
+    return (
+        round(float(amount), 2),
+        _normalize_fin_bucket(from_bucket),
+        _normalize_fin_bucket(to_bucket),
+    )
+
+
+def _finance_transfer_from_ai_item(item: dict[str, Any], raw_text: str, lang: str) -> dict[str, Any] | None:
+    amount = float(item.get("amount") or 0)
+    if amount <= 0:
+        return None
+
+    category = str(item.get("category") or "").strip()
+    note = str(item.get("note") or "").strip()
+    probe_parts = [part for part in [category, note, raw_text] if part]
+
+    route: tuple[str, str] | None = None
+    for idx in range(len(probe_parts)):
+        probe = " ".join(probe_parts[idx:]).strip()
+        if not probe:
+            continue
+        route = _infer_transfer_route(probe)
+        if route:
+            break
+
+    if route is None:
+        return None
+    from_bucket, to_bucket = route
+
+    default_category = "boshqa" if lang == "uz" else "прочее"
+    if category.lower() in {"", "other", "boshqa", "прочее"}:
+        category = _transfer_category(from_bucket, to_bucket, lang)
+
+    return {
+        "kind": "transfer",
+        "amount": amount,
+        "category": category or default_category,
+        "note": note or None,
+        "from_bucket": from_bucket,
+        "to_bucket": to_bucket,
+    }
+
+
+def _apply_finance_item_to_balances(balances: dict[str, float], item: dict[str, Any]) -> None:
+    amount = float(item.get("amount") or 0)
+    if amount <= 0:
+        return
+
+    if str(item.get("kind") or "") == "transfer":
+        from_bucket = _normalize_fin_bucket(item.get("from_bucket"))
+        to_bucket = _normalize_fin_bucket(item.get("to_bucket"))
+        if from_bucket == to_bucket:
+            return
+        balances[from_bucket] = float(balances.get(from_bucket) or 0.0) - amount
+        balances[to_bucket] = float(balances.get(to_bucket) or 0.0) + amount
+        return
+
+    bucket = _normalize_fin_bucket(item.get("bucket"))
+    entry_type = str(item.get("type") or "expense")
+    if bucket in {"card", "cash"}:
+        balances[bucket] = float(balances.get(bucket) or 0.0) + (amount if entry_type == "income" else -amount)
+    elif bucket == "lent":
+        balances[bucket] = float(balances.get(bucket) or 0.0) + (amount if entry_type == "expense" else -amount)
+    elif bucket == "debt":
+        balances[bucket] = float(balances.get(bucket) or 0.0) + (amount if entry_type == "income" else -amount)
+
+
+def _dedupe_prepared_finance_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for item in items:
+        amount = float(item.get("amount") or 0)
+        if amount <= 0:
+            continue
+
+        if str(item.get("kind") or "") == "transfer":
+            key = (
+                "transfer",
+                round(amount, 2),
+                _normalize_fin_bucket(item.get("from_bucket")),
+                _normalize_fin_bucket(item.get("to_bucket")),
+                str(item.get("note") or "").strip().lower(),
+            )
+        else:
+            key = (
+                "entry",
+                str(item.get("type") or "expense"),
+                round(amount, 2),
+                _normalize_fin_bucket(item.get("bucket")),
+                str(item.get("category") or "").strip().lower(),
+                str(item.get("note") or "").strip().lower(),
+            )
+
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _finance_account_balances(telegram_id: int) -> dict[str, float]:
@@ -990,46 +878,51 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
     return balances
 
 
-def _finance_today_totals(telegram_id: int, tz_name: str | None = None) -> tuple[float, float]:
-    entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
-    income = 0.0
-    expense = 0.0
+def _finance_balances_with_base(telegram_id: int) -> dict[str, float]:
+    settings_fin = db.get_finance_settings(telegram_id)
+    balances_live = _finance_account_balances(telegram_id)
+    return {
+        "card": float(settings_fin.get("card_base") or 0.0) + float(balances_live["card"]),
+        "cash": float(settings_fin.get("cash_base") or 0.0) + float(balances_live["cash"]),
+        "lent": float(settings_fin.get("lent_base") or 0.0) + float(balances_live["lent"]),
+        "debt": float(settings_fin.get("debt_base") or 0.0) + float(balances_live["debt"]),
+    }
 
-    for row in entries:
-        note = str(row.get("note") or "").strip().lower()
-        if note.startswith("[x:"):
-            continue
-        amount = float(row.get("amount") or 0.0)
-        if amount <= 0:
-            continue
-        if str(row.get("entry_type") or "expense") == "income":
-            income += amount
-        else:
-            expense += amount
 
-    return income, expense
+def _finance_settings_view(telegram_id: int) -> dict[str, float]:
+    settings_fin = db.get_finance_settings(telegram_id)
+    current = _finance_balances_with_base(telegram_id)
+    return {
+        "card_base": float(current["card"]),
+        "cash_base": float(current["cash"]),
+        "lent_base": float(current["lent"]),
+        "debt_base": float(current["debt"]),
+        "monthly_credit_payment": float(settings_fin.get("monthly_credit_payment") or 0.0),
+    }
+
+
+def _finance_current_targets_to_base(telegram_id: int, targets: dict[str, float]) -> dict[str, float]:
+    live = _finance_account_balances(telegram_id)
+    return {
+        "card_base": float(targets.get("card") or 0.0) - float(live["card"]),
+        "cash_base": float(targets.get("cash") or 0.0) - float(live["cash"]),
+        "lent_base": float(targets.get("lent") or 0.0) - float(live["lent"]),
+        "debt_base": float(targets.get("debt") or 0.0) - float(live["debt"]),
+    }
 
 
 def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
-    today_income, today_expense = _finance_today_totals(telegram_id, tz_name)
     settings_fin = db.get_finance_settings(telegram_id)
-    balances_live = _finance_account_balances(telegram_id)
-    balances = {
-        "card": float(settings_fin.get("card_base") or 0.0) + float(balances_live["card"]),
-        "cash": float(settings_fin.get("cash_base") or 0.0) + float(balances_live["cash"]),
-        "lent": float(settings_fin.get("lent_base") or 0.0) + float(balances_live["lent"]),
-        "debt": float(settings_fin.get("debt_base") or 0.0) + float(balances_live["debt"]),
-    }
+    balances = _finance_balances_with_base(telegram_id)
     monthly_credit = float(settings_fin.get("monthly_credit_payment") or 0.0)
     wallet_total = float(balances["card"]) + float(balances["cash"])
     if lang == "uz":
         lines = [
             "💰 <b>Moliya / Professional nazorat</b>",
             "",
-            f"• Bugun: +<b>{_fmt_money(today_income)} {currency}</b> / -<b>{_fmt_money(today_expense)} {currency}</b>",
             f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Joriy hisoblar</b>",
@@ -1047,7 +940,6 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         lines = [
             "💰 <b>Финансы / Профессиональный контроль</b>",
             "",
-            f"• Сегодня: +<b>{_fmt_money(today_income)} {currency}</b> / -<b>{_fmt_money(today_expense)} {currency}</b>",
             f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
             "",
             "<b>Текущие счета</b>",
@@ -1210,34 +1102,111 @@ def build_calorie_meals_panel(telegram_id: int, period: str = "day") -> tuple[st
     return "\n".join(lines), entries
 
 
+_FINANCE_SETTING_STORAGE_KEYS = {
+    "card": "card_base",
+    "cash": "cash_base",
+    "lent": "lent_base",
+    "debt": "debt_base",
+    "credit": "monthly_credit_payment",
+}
+
+
+def _normalize_finance_setting_field(field: str | None) -> str | None:
+    value = str(field or "").strip().lower()
+    if value in _FINANCE_SETTING_STORAGE_KEYS:
+        return value
+    return None
+
+
+def _finance_setting_storage_key(field: str) -> str:
+    return _FINANCE_SETTING_STORAGE_KEYS[_normalize_finance_setting_field(field) or "card"]
+
+
+def _finance_setting_label(field: str, lang: str = "ru") -> str:
+    labels_ru = {
+        "card": "Карта",
+        "cash": "Наличные",
+        "lent": "Дал в долг",
+        "debt": "Мои долги",
+        "credit": "Ежемесячный кредит",
+    }
+    labels_uz = {
+        "card": "Karta",
+        "cash": "Naqd",
+        "lent": "Qarzga berilgan",
+        "debt": "Mening qarzim",
+        "credit": "Oylik kredit",
+    }
+    labels = labels_uz if lang == "uz" else labels_ru
+    normalized = _normalize_finance_setting_field(field) or "card"
+    return labels.get(normalized, labels["card"])
+
+
+def _parse_non_negative_amount(text: str) -> float | None:
+    cleaned = re.sub(r"[^\d,.\-]", "", str(text or "").strip())
+    if not cleaned:
+        return None
+    try:
+        value = float(cleaned.replace(" ", "").replace(",", "."))
+    except Exception:
+        return None
+    if value < 0:
+        return None
+    return value
+
+
 def build_finance_settings_text(telegram_id: int) -> str:
     user, _, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
-    s = db.get_finance_settings(telegram_id)
+    s = _finance_settings_view(telegram_id)
 
     if lang == "uz":
         return (
             "⚙️ <b>Moliya / Sozlamalar</b>\n\n"
-            f"Karta (boshlang'ich): {_fmt_money(s['card_base'])} {currency}\n"
-            f"Naqd (boshlang'ich): {_fmt_money(s['cash_base'])} {currency}\n"
-            f"Qarzga berilgan (boshlang'ich): {_fmt_money(s['lent_base'])} {currency}\n"
-            f"Mening qarzim (boshlang'ich): {_fmt_money(s['debt_base'])} {currency}\n"
+            f"Karta (joriy): {_fmt_money(s['card_base'])} {currency}\n"
+            f"Naqd (joriy): {_fmt_money(s['cash_base'])} {currency}\n"
+            f"Qarzga berilgan (joriy): {_fmt_money(s['lent_base'])} {currency}\n"
+            f"Mening qarzim (joriy): {_fmt_money(s['debt_base'])} {currency}\n"
             f"Oylik kredit to'lovi: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
-            "Format:\n<i>karta;naqd;qarzga_berilgan;mening_qarzim;oylik_kredit</i>\n"
-            "Misol: <code>500000;200000;150000;300000;250000</code>\n\n"
-            "<i>Masalan: «qarzga 100000 kartadan berdim» yozsangiz, karta kamayadi va qarzga berilgan summa oshadi.</i>"
+            "Pastdagi tugmalar orqali kerakli parametrni tanlang va yangi summani yuboring.\n"
+            "<i>Ixtiyoriy: barchasini bir qatorda ham berish mumkin:</i>\n"
+            "<code>500000;200000;150000;300000;250000</code>"
         )
 
     return (
         "⚙️ <b>Финансы / Настройки</b>\n\n"
-        f"Карта (база): {_fmt_money(s['card_base'])} {currency}\n"
-        f"Наличные (база): {_fmt_money(s['cash_base'])} {currency}\n"
-        f"Дал в долг (база): {_fmt_money(s['lent_base'])} {currency}\n"
-        f"Мои долги (база): {_fmt_money(s['debt_base'])} {currency}\n"
+        f"Карта (текущий): {_fmt_money(s['card_base'])} {currency}\n"
+        f"Наличные (текущий): {_fmt_money(s['cash_base'])} {currency}\n"
+        f"Дал в долг (текущий): {_fmt_money(s['lent_base'])} {currency}\n"
+        f"Мои долги (текущий): {_fmt_money(s['debt_base'])} {currency}\n"
         f"Ежемесячный кредит: {_fmt_money(s['monthly_credit_payment'])} {currency}\n\n"
-        "Формат:\n<i>карта;наличные;дал_в_долг;мои_долги;кредит_в_месяц</i>\n"
-        "Пример: <code>500000;200000;150000;300000;250000</code>\n\n"
-        "<i>Пример перевода: «дал в долг 100000 с карты» уменьшит карту и увеличит «дал в долг».</i>"
+        "Нажми кнопку нужного параметра ниже и отправь новую сумму.\n"
+        "<i>Также можно ввести всё одной строкой:</i>\n"
+        "<code>500000;200000;150000;300000;250000</code>"
+    )
+
+
+def build_finance_setting_prompt_text(telegram_id: int, field: str) -> str:
+    user, _, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    field_norm = _normalize_finance_setting_field(field) or "card"
+    key = _finance_setting_storage_key(field_norm)
+    value = float(_finance_settings_view(telegram_id).get(key) or 0.0)
+    label = _finance_setting_label(field_norm, lang)
+
+    if lang == "uz":
+        return (
+            f"⚙️ <b>{label}</b>\n\n"
+            f"Joriy qiymat: <b>{_fmt_money(value)} {currency}</b>\n"
+            "Yangi summani yuboring (faqat son).\n"
+            "Misol: <code>250000</code>"
+        )
+
+    return (
+        f"⚙️ <b>{label}</b>\n\n"
+        f"Текущее значение: <b>{_fmt_money(value)} {currency}</b>\n"
+        "Отправь новую сумму (только число).\n"
+        "Пример: <code>250000</code>"
     )
 
 
@@ -1329,7 +1298,12 @@ def format_finance_detail(entry: dict[str, Any], currency: str, lang: str = "ru"
     )
 
 
-def format_finance_pending(items: list[dict[str, Any]], currency: str, lang: str = "ru") -> str:
+def format_finance_pending(
+    items: list[dict[str, Any]],
+    currency: str,
+    lang: str = "ru",
+    balances_before: dict[str, float] | None = None,
+) -> str:
     lines = (
         ["💰 <b>Moliya / Saqlashdan oldin tekshiruv</b>", ""]
         if lang == "uz"
@@ -1352,6 +1326,52 @@ def format_finance_pending(items: list[dict[str, Any]], currency: str, lang: str
             lines.append(
                 f"- {sign}{_fmt_money(amount)} {currency} | {category} | {_finance_bucket_label(bucket, lang)}{note_part}"
             )
+
+    if balances_before is not None:
+        before = {key: float(balances_before.get(key) or 0.0) for key in ("card", "cash", "lent", "debt")}
+        after = dict(before)
+        for item in items:
+            _apply_finance_item_to_balances(after, item)
+
+        wallet_before = before["card"] + before["cash"]
+        wallet_after = after["card"] + after["cash"]
+
+        if lang == "uz":
+            lines.extend(
+                [
+                    "",
+                    "<b>Saqlangandan keyin</b>",
+                    f"• Balans: <b>{_fmt_money(wallet_before)} → {_fmt_money(wallet_after)} {currency}</b>",
+                    f"• Karta: {_fmt_money(before['card'])} → {_fmt_money(after['card'])} {currency}",
+                    f"• Naqd: {_fmt_money(before['cash'])} → {_fmt_money(after['cash'])} {currency}",
+                    f"• Qarzga berilgan: {_fmt_money(before['lent'])} → {_fmt_money(after['lent'])} {currency}",
+                    f"• Mening qarzim: {_fmt_money(before['debt'])} → {_fmt_money(after['debt'])} {currency}",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "<b>После сохранения</b>",
+                    f"• Баланс: <b>{_fmt_money(wallet_before)} → {_fmt_money(wallet_after)} {currency}</b>",
+                    f"• Карта: {_fmt_money(before['card'])} → {_fmt_money(after['card'])} {currency}",
+                    f"• Наличные: {_fmt_money(before['cash'])} → {_fmt_money(after['cash'])} {currency}",
+                    f"• Дал в долг: {_fmt_money(before['lent'])} → {_fmt_money(after['lent'])} {currency}",
+                    f"• Мои долги: {_fmt_money(before['debt'])} → {_fmt_money(after['debt'])} {currency}",
+                ]
+            )
+
+        negative_wallets = [bucket for bucket in ("card", "cash") if after[bucket] < 0]
+        if negative_wallets:
+            bucket_labels = ", ".join(_finance_bucket_label(bucket, lang) for bucket in negative_wallets)
+            lines.append(
+                _tr(
+                    lang,
+                    f"⚠️ Уходят в минус: {bucket_labels}.",
+                    f"⚠️ Minusga tushayotgan hisoblar: {bucket_labels}.",
+                )
+            )
+
     lines.append("")
     lines.append("Ushbu operatsiyalarni saqlaymizmi?" if lang == "uz" else "Сохранить эти операции?")
     return "\n".join(lines)
@@ -1574,7 +1594,7 @@ async def safe_delete_message(message: Message | None) -> None:
         pass
 
 
-async def send_main_menu(message: Message, telegram_id: int) -> Message:
+async def send_main_menu(message: Message, telegram_id: int) -> None:
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
     try:
@@ -1582,12 +1602,12 @@ async def send_main_menu(message: Message, telegram_id: int) -> Message:
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    return await message.answer(text, reply_markup=main_menu_keyboard(lang), disable_web_page_preview=True)
+    await message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
-async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> int | None:
+async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
     if callback.message is None:
-        return None
+        return
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
 
@@ -1597,31 +1617,11 @@ async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> int | Non
         logger.exception('build_dashboard_text failed in edit_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=main_menu_keyboard(lang),
-            disable_web_page_preview=True,
-        )
-        return callback.message.message_id
+        await callback.message.edit_text(text, reply_markup=main_menu_keyboard(lang))
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
-            return callback.message.message_id
-        try:
-            await callback.message.edit_caption(
-                caption=text,
-                reply_markup=main_menu_keyboard(lang),
-            )
-            return callback.message.message_id
-        except Exception as cap_exc:
-            if "message is not modified" in str(cap_exc).lower():
-                return callback.message.message_id
-        sent = await callback.message.answer(
-            text,
-            reply_markup=main_menu_keyboard(lang),
-            disable_web_page_preview=True,
-        )
-        await safe_delete_message(callback.message)
-        return sent.message_id
+            return
+        await callback.message.answer(text, reply_markup=main_menu_keyboard(lang))
 
 
 async def safe_edit_message(
@@ -1632,25 +1632,11 @@ async def safe_edit_message(
     if callback.message is None:
         return
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        await callback.message.edit_text(text, reply_markup=reply_markup)
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
             return
-        try:
-            await callback.message.edit_caption(
-                caption=text,
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception as cap_exc:
-            if "message is not modified" in str(cap_exc).lower():
-                return
-        await callback.message.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
-        await safe_delete_message(callback.message)
+        await callback.message.answer(text, reply_markup=reply_markup)
 
 
 async def _remember_panel(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1673,7 +1659,6 @@ async def _edit_panel_from_state(
                 message_id=int(panel_message_id),
                 text=text,
                 reply_markup=reply_markup,
-                disable_web_page_preview=True,
             )
             return
         except Exception as exc:
@@ -1681,19 +1666,8 @@ async def _edit_panel_from_state(
                 return
             pass
 
-    sent = await message.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
+    sent = await message.answer(text, reply_markup=reply_markup)
     await state.update_data(panel_message_id=sent.message_id)
-
-
-async def _delete_panel_from_state(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    panel_message_id = data.get("panel_message_id")
-    if panel_message_id is None:
-        return
-    try:
-        await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
-    except Exception:
-        pass
 
 
 async def force_remove_reply_keyboard(message: Message) -> None:
@@ -1735,248 +1709,31 @@ async def _download_voice_to_temp(message: Message) -> Path:
         return Path(tmp.name)
 
 
-def _message_text_payload(message: Message) -> str:
-    return str(message.text or message.caption or "").strip()
-
-
-def _command_argument(text: str | None) -> str:
-    raw = str(text or "").strip()
-    if not raw.startswith("/"):
-        return raw
-    parts = raw.split(maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return parts[1].strip()
-
-
-def _looks_like_finance_text(text: str) -> bool:
-    lower = (text or "").strip().lower()
-    if not lower:
-        return False
-
-    has_amount = bool(re.search(r"\d[\d\s]{1,}", lower))
-    if not has_amount:
-        return False
-
-    direct = (
-        "доход",
-        "расход",
-        "трата",
-        "income",
-        "expense",
-        "daromad",
-        "xarajat",
-        "потрат",
-        "заработ",
-        "оплатил",
-    )
-    transfer = (
-        "в долг",
-        "долг",
-        "qarz",
-        "карта",
-        "налич",
-        "naqd",
-        "kartaga",
-        "kartadan",
-    )
-    return any(token in lower for token in direct) or any(token in lower for token in transfer)
-
-
-async def _edit_panel_from_state_with_fallback(
-    message: Message,
-    state: FSMContext,
-    premium_text: str,
-    fallback_text: str,
-    reply_markup: InlineKeyboardMarkup,
-) -> str:
-    data = await state.get_data()
-    panel_message_id = data.get("panel_message_id")
-    text_variants = [premium_text] if premium_text == fallback_text else [premium_text, fallback_text]
-
-    for index, text in enumerate(text_variants):
-        try:
-            if panel_message_id is not None:
-                await message.bot.edit_message_text(
-                    chat_id=message.chat.id,
-                    message_id=int(panel_message_id),
-                    text=text,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True,
-                )
-                return text
-
-            sent = await message.answer(
-                text,
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-            if panel_message_id is not None:
-                try:
-                    await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
-                except Exception:
-                    pass
-            await state.update_data(panel_message_id=sent.message_id)
-            return text
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                return text
-            if index == len(text_variants) - 1:
-                raise
-
-
-async def _process_vacancy_message(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    lang = _lang_for_user_id(message.from_user.id)
-    raw_text = _message_text_payload(message)
-
-    if not raw_text:
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
-            _tr(
-                lang,
-                "Нужен текст вакансии или подпись к пересланному посту.",
-                "Vakansiya matni yoki forward post caption kerak.",
-            ),
-            vacancy_panel_keyboard(lang),
-        )
-        return
-
-    try:
-        payload = await asyncio.to_thread(
-            ai_service.extract_vacancy_template_data,
-            raw_text,
-            default_region_tag=VACANCY_DEFAULT_REGION_TAG,
-        )
-        premium_text = format_vacancy_post(payload, premium=True)
-        fallback_text = format_vacancy_post(payload, premium=False)
-        contact_url = build_contact_url(payload.telegram)
-    except Exception as exc:
-        logger.exception("Vacancy template build failed")
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
-            f"{_tr(lang, 'Ошибка шаблона вакансии', 'Vakansiya shabloni xatosi')}: {_h(exc)}",
-            vacancy_panel_keyboard(lang),
-        )
-        return
-
-    await safe_delete_message(message)
-    await state.set_state(BotStates.waiting_vacancy_input)
-    try:
-        rendered = await _edit_panel_from_state_with_fallback(
-            message,
-            state,
-            premium_text,
-            fallback_text,
-            vacancy_result_keyboard(lang, contact_url, show_publish=False),
-        )
-        await state.update_data(
-            last_vacancy_text=rendered,
-            last_vacancy_text_premium=premium_text,
-            last_vacancy_text_fallback=fallback_text,
-            last_vacancy_contact_url=contact_url,
-            last_vacancy_photo_file_id=None,
-        )
-    except Exception as exc:
-        logger.exception("Vacancy result send failed")
-        error_label = _tr(
-            lang,
-            "Не удалось отправить шаблон вакансии",
-            "Vakansiya shablonini yuborib bo'lmadi",
-        )
-        await _edit_panel_from_state(
-            message,
-            state,
-            f"{error_label}: {_h(exc)}",
-            vacancy_panel_keyboard(lang),
-        )
-
-
-async def _attach_vacancy_preview_photo(message: Message, state: FSMContext) -> bool:
-    if not message.photo:
-        return False
-
-    data = await state.get_data()
-    premium_text = str(data.get("last_vacancy_text_premium") or "").strip()
-    fallback_text = str(data.get("last_vacancy_text_fallback") or "").strip()
-    rendered_text = str(data.get("last_vacancy_text") or "").strip()
-    text_variants = [text for text in [premium_text, rendered_text, fallback_text] if text]
-    if not text_variants:
-        return False
-
-    lang = _lang_for_user_id(message.from_user.id)
-    contact_url = str(data.get("last_vacancy_contact_url") or "").strip() or None
-    panel_message_id = data.get("panel_message_id")
-
-    await safe_delete_message(message)
-
-    if panel_message_id is not None:
-        try:
-            await message.bot.delete_message(chat_id=message.chat.id, message_id=int(panel_message_id))
-        except Exception:
-            pass
-
-    sent: Message | None = None
-    used_text: str | None = None
-    for text in text_variants:
-        try:
-            sent = await message.answer_photo(
-                photo=message.photo[-1].file_id,
-                caption=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=vacancy_result_keyboard(lang, contact_url, show_publish=True),
-            )
-            used_text = text
-            break
-        except Exception:
-            continue
-
-    if sent is None or used_text is None:
-        return False
-
-    await state.update_data(
-        panel_message_id=sent.message_id,
-        last_vacancy_text=used_text,
-        last_vacancy_photo_file_id=message.photo[-1].file_id,
-    )
-    return True
-
-
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    sent = await send_main_menu(message, message.from_user.id)
-    await state.update_data(panel_message_id=sent.message_id)
+    await send_main_menu(message, message.from_user.id)
 
 
 @router.message(Command('menu'))
 async def cmd_menu(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    sent = await send_main_menu(message, message.from_user.id)
-    await state.update_data(panel_message_id=sent.message_id)
+    await send_main_menu(message, message.from_user.id)
 
 
 @router.message(Command('help'))
 async def cmd_help(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    await _delete_panel_from_state(message, state)
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    sent = await send_main_menu(message, message.from_user.id)
-    await state.update_data(panel_message_id=sent.message_id)
+    await send_main_menu(message, message.from_user.id)
 
 
 @router.callback_query(F.data == 'noop')
@@ -1988,9 +1745,7 @@ async def cb_noop(callback: CallbackQuery) -> None:
 async def cb_menu_open(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    panel_id = await edit_main_menu(callback, callback.from_user.id)
-    if panel_id is not None:
-        await state.update_data(panel_message_id=panel_id)
+    await edit_main_menu(callback, callback.from_user.id)
     await callback.answer()
 
 
@@ -2201,18 +1956,6 @@ async def msg_nutri_custom_invalid(message: Message) -> None:
 async def msg_calorie_input_photo(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
-    raw_text = _message_text_payload(message)
-
-    if raw_text and looks_like_vacancy(raw_text):
-        await state.set_state(BotStates.waiting_vacancy_input)
-        await _process_vacancy_message(message, state)
-        return
-
-    if raw_text and _looks_like_finance_text(raw_text):
-        await state.set_state(BotStates.waiting_finance_input)
-        await msg_finance_input(message, state)
-        return
-
     try:
         image_bytes, mime_type, file_id = await _get_photo_bytes(message)
         estimate = await asyncio.to_thread(ai_service.estimate_calories_by_photo, image_bytes, mime_type)
@@ -2251,16 +1994,6 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         text, entries = build_calorie_panel(message.from_user.id)
         text += "\n\n" + _tr(lang, "Нужен текст блюда или фото.", "Taom matni yoki rasmi kerak.")
         await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
-        return
-
-    if looks_like_vacancy(raw_text):
-        await state.set_state(BotStates.waiting_vacancy_input)
-        await _process_vacancy_message(message, state)
-        return
-
-    if _looks_like_finance_text(raw_text):
-        await state.set_state(BotStates.waiting_finance_input)
-        await msg_finance_input(message, state)
         return
 
     try:
@@ -2428,17 +2161,35 @@ async def cb_finance_ops_period(callback: CallbackQuery, state: FSMContext) -> N
 async def cb_finance_settings(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_finance_input)
-    text, entries = build_finance_panel(callback.from_user.id)
+    _, _, currency = _user_profile(callback.from_user.id)
+    settings_fin = _finance_settings_view(callback.from_user.id)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await state.update_data(finance_setting_field=None)
     await _remember_panel(callback, state)
     await safe_edit_message(
         callback,
-        text + "\n\n" + _tr(
-            lang,
-            "Ручные настройки скрыты. Напиши фразу вроде: «теперь долг у меня 450000».",
-            "Qo'lda sozlama yashirilgan. Masalan: «hozir qarzim 450000» deb yozing.",
-        ),
-        reply_markup=finance_panel_keyboard(entries, lang),
+        build_finance_settings_text(callback.from_user.id),
+        reply_markup=finance_settings_keyboard(settings_fin, currency, lang),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("finance:set:"))
+async def cb_finance_setting_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    field = _normalize_finance_setting_field(callback.data.split("finance:set:", 1)[1])
+    if not field:
+        await callback.answer(_tr(lang, "Неизвестный параметр", "Noma'lum parametr"), show_alert=True)
+        return
+
+    await state.set_state(BotStates.waiting_finance_settings_value)
+    await state.update_data(finance_setting_field=field)
+    await _remember_panel(callback, state)
+    await safe_edit_message(
+        callback,
+        build_finance_setting_prompt_text(callback.from_user.id, field),
+        reply_markup=finance_setting_input_keyboard(lang),
     )
     await callback.answer()
 
@@ -2450,32 +2201,54 @@ async def msg_finance_settings(message: Message, state: FSMContext) -> None:
     parsed = _parse_finance_settings_input(message.text or "")
     if parsed is None:
         await safe_delete_message(message)
+        _, _, currency = _user_profile(message.from_user.id)
+        settings_fin = _finance_settings_view(message.from_user.id)
         await _edit_panel_from_state(
             message,
             state,
-            _tr(
+            build_finance_settings_text(message.from_user.id)
+            + "\n\n"
+            + _tr(
                 lang,
-                "Неверный формат.\nПример: <code>500000;200000;150000;300000;250000</code>",
-                "Noto'g'ri format.\nMisol: <code>500000;200000;150000;300000;250000</code>",
+                "Неверный формат. Нажми кнопку параметра ниже или введи строку вида: "
+                "<code>500000;200000;150000;300000;250000</code>",
+                "Format noto'g'ri. Pastdagi parametr tugmasini bosing yoki quyidagicha kiriting: "
+                "<code>500000;200000;150000;300000;250000</code>",
             ),
-            back_to_menu_keyboard(lang),
+            finance_settings_keyboard(settings_fin, currency, lang),
         )
         return
 
     card, cash, lent, debt, monthly_credit = parsed
+    converted = _finance_current_targets_to_base(
+        message.from_user.id,
+        {
+            "card": card,
+            "cash": cash,
+            "lent": lent,
+            "debt": debt,
+        },
+    )
     db.save_finance_settings(
         message.from_user.id,
-        card_base=card,
-        cash_base=cash,
-        lent_base=lent,
-        debt_base=debt,
+        card_base=converted["card_base"],
+        cash_base=converted["cash_base"],
+        lent_base=converted["lent_base"],
+        debt_base=converted["debt_base"],
         monthly_credit_payment=monthly_credit,
     )
 
     await safe_delete_message(message)
-    await state.set_state(BotStates.waiting_finance_input)
-    text, entries = build_finance_panel(message.from_user.id)
-    await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
+    await state.set_state(BotStates.waiting_finance_settings)
+    await state.update_data(finance_setting_field=None)
+    _, _, currency = _user_profile(message.from_user.id)
+    settings_fin = _finance_settings_view(message.from_user.id)
+    await _edit_panel_from_state(
+        message,
+        state,
+        build_finance_settings_text(message.from_user.id) + "\n\n" + _tr(lang, "Сохранено.", "Saqlandi."),
+        finance_settings_keyboard(settings_fin, currency, lang),
+    )
 
 
 @router.message(BotStates.waiting_finance_settings)
@@ -2483,23 +2256,93 @@ async def msg_finance_settings_invalid(message: Message) -> None:
     await safe_delete_message(message)
 
 
+@router.message(BotStates.waiting_finance_settings_value, F.text)
+async def msg_finance_settings_value(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    data = await state.get_data()
+    field = _normalize_finance_setting_field(data.get("finance_setting_field"))
+
+    if not field:
+        await safe_delete_message(message)
+        _, _, currency = _user_profile(message.from_user.id)
+        settings_fin = _finance_settings_view(message.from_user.id)
+        await state.set_state(BotStates.waiting_finance_settings)
+        await _edit_panel_from_state(
+            message,
+            state,
+            build_finance_settings_text(message.from_user.id),
+            finance_settings_keyboard(settings_fin, currency, lang),
+        )
+        return
+
+    value = _parse_non_negative_amount(message.text or "")
+    if value is None:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            build_finance_setting_prompt_text(message.from_user.id, field)
+            + "\n\n"
+            + _tr(lang, "Нужна сумма >= 0.", "Summa 0 yoki undan katta bo'lishi kerak."),
+            finance_setting_input_keyboard(lang),
+        )
+        return
+
+    current = db.get_finance_settings(message.from_user.id)
+    live = _finance_account_balances(message.from_user.id)
+    payload = {
+        "card_base": float(current.get("card_base") or 0.0),
+        "cash_base": float(current.get("cash_base") or 0.0),
+        "lent_base": float(current.get("lent_base") or 0.0),
+        "debt_base": float(current.get("debt_base") or 0.0),
+        "monthly_credit_payment": float(current.get("monthly_credit_payment") or 0.0),
+    }
+    if field == "credit":
+        payload["monthly_credit_payment"] = value
+    else:
+        payload[_finance_setting_storage_key(field)] = value - float(live.get(field) or 0.0)
+
+    db.save_finance_settings(
+        message.from_user.id,
+        card_base=payload["card_base"],
+        cash_base=payload["cash_base"],
+        lent_base=payload["lent_base"],
+        debt_base=payload["debt_base"],
+        monthly_credit_payment=payload["monthly_credit_payment"],
+    )
+
+    await safe_delete_message(message)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await state.update_data(finance_setting_field=None)
+    _, _, currency = _user_profile(message.from_user.id)
+    settings_fin = _finance_settings_view(message.from_user.id)
+    label = _finance_setting_label(field, lang)
+    await _edit_panel_from_state(
+        message,
+        state,
+        build_finance_settings_text(message.from_user.id)
+        + "\n\n"
+        + _tr(
+            lang,
+            f"Сохранено: <b>{label}</b> = {_fmt_money(value)} {currency}",
+            f"Saqlandi: <b>{label}</b> = {_fmt_money(value)} {currency}",
+        ),
+        finance_settings_keyboard(settings_fin, currency, lang),
+    )
+
+
+@router.message(BotStates.waiting_finance_settings_value)
+async def msg_finance_settings_value_invalid(message: Message) -> None:
+    await safe_delete_message(message)
+
+
 @router.message(BotStates.waiting_finance_input)
 async def msg_finance_input(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
-    raw_text = _message_text_payload(message)
 
-    if raw_text and looks_like_vacancy(raw_text):
-        await state.set_state(BotStates.waiting_vacancy_input)
-        await _process_vacancy_message(message, state)
-        return
-
-    if message.photo and not raw_text:
-        await state.set_state(BotStates.waiting_calorie_input)
-        await msg_calorie_input_photo(message, state)
-        return
-
-    if not raw_text and not message.voice and not message.audio:
+    if not message.text and not message.voice and not message.audio:
         await safe_delete_message(message)
         text, entries = build_finance_panel(message.from_user.id)
         text += "\n\n" + _tr(lang, "Нужен текст или голос.", "Matn yoki ovoz kerak.")
@@ -2507,6 +2350,7 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         return
 
     source = 'text_ai'
+    raw_text = (message.text or '').strip()
 
     if message.voice or message.audio:
         source = 'voice_ai'
@@ -2525,30 +2369,6 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             if temp_path and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
-    default_wallet_bucket = _finance_default_wallet_bucket(message.from_user.id)
-
-    balance_override = _finance_balance_update_from_text(raw_text)
-    if balance_override is not None:
-        bucket, amount = balance_override
-        _apply_finance_balance_override(message.from_user.id, bucket, amount)
-        await safe_delete_message(message)
-        text, entries = build_finance_panel(message.from_user.id)
-        bucket_labels = {
-            "card": _tr(lang, "Карта", "Karta"),
-            "cash": _tr(lang, "Наличные", "Naqd"),
-            "lent": _tr(lang, "Дал в долг", "Qarzga berilgan"),
-            "debt": _tr(lang, "Мои долги", "Mening qarzim"),
-        }
-        text += "\n\n" + _tr(
-            lang,
-            f"Обновил текущий баланс: {bucket_labels.get(bucket, bucket)} = {_fmt_money(amount)}.",
-            f"Joriy balans yangilandi: {bucket_labels.get(bucket, bucket)} = {_fmt_money(amount)}.",
-        )
-        await state.set_state(BotStates.waiting_finance_input)
-        await state.update_data(pending_finance_items=None, pending_finance_source=None)
-        await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
-        return
-
     parse_error: Exception | None = None
     try:
         items = await asyncio.to_thread(ai_service.parse_finance_items, raw_text)
@@ -2557,14 +2377,18 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         parse_error = exc
         items = []
 
-    transfers = _extract_finance_transfers(raw_text, lang, default_wallet_bucket)
+    transfers = _extract_finance_transfers(raw_text, lang)
 
     prepared: list[dict[str, Any]] = []
-    transfer_amounts = [float(item.get("amount") or 0) for item in transfers]
-
-    safe_default_wallet = _normalize_fin_bucket(default_wallet_bucket)
-    if safe_default_wallet not in {"card", "cash"}:
-        safe_default_wallet = "card"
+    transfer_keys = {
+        _transfer_key(
+            float(item.get("amount") or 0),
+            str(item.get("from_bucket") or ""),
+            str(item.get("to_bucket") or ""),
+        )
+        for item in transfers
+    }
+    transfer_amounts = [transfer_key[0] for transfer_key in transfer_keys]
 
     for item in items:
         entry_type = str(item.get("type") or "expense")
@@ -2572,28 +2396,30 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         if amount <= 0:
             continue
 
+        if _is_transfer_like_item(item):
+            transfer_candidate = _finance_transfer_from_ai_item(item, raw_text, lang)
+            if transfer_candidate:
+                candidate_key = _transfer_key(
+                    float(transfer_candidate.get("amount") or 0),
+                    str(transfer_candidate.get("from_bucket") or ""),
+                    str(transfer_candidate.get("to_bucket") or ""),
+                )
+                if candidate_key in transfer_keys:
+                    continue
+                transfer_keys.add(candidate_key)
+                transfer_amounts.append(candidate_key[0])
+                prepared.append(transfer_candidate)
+                continue
+
         if transfer_amounts and _is_transfer_like_item(item):
             if any(abs(amount - transfer_amount) < 0.01 for transfer_amount in transfer_amounts):
                 continue
 
         category = str(item.get("category") or "прочее").strip() or "прочее"
         note = item.get("note")
-        raw_bucket = str(item.get("bucket") or "").strip().lower()
-        bucket = _normalize_fin_bucket(raw_bucket)
-        inferred_bucket = _infer_fin_bucket(
-            f"{category} {note or ''}",
-            entry_type,
-            default_wallet_bucket=default_wallet_bucket,
-        )
-        has_wallet_hint = _has_explicit_wallet_hint(f"{category} {note or ''}")
-        if raw_bucket not in {"card", "cash", "lent", "debt"}:
-            bucket = inferred_bucket
-        elif inferred_bucket in {"lent", "debt"} and bucket in {"card", "cash"}:
-            bucket = inferred_bucket
-        elif bucket == "card" and inferred_bucket == "cash":
-            bucket = inferred_bucket
-        if bucket in {"card", "cash"} and not has_wallet_hint:
-            bucket = safe_default_wallet
+        bucket = _normalize_fin_bucket(item.get("bucket"))
+        if bucket == "card":
+            bucket = _infer_fin_bucket(f"{category} {note or ''} {raw_text}", entry_type)
 
         prepared.append(
             {
@@ -2606,6 +2432,7 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
         )
 
     prepared.extend(transfers)
+    prepared = _dedupe_prepared_finance_items(prepared)
 
     if not prepared:
         await safe_delete_message(message)
@@ -2625,7 +2452,12 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
     await state.set_state(BotStates.waiting_finance_confirm)
     await state.update_data(pending_finance_items=prepared, pending_finance_source=source)
     _, _, currency = _user_profile(message.from_user.id)
-    confirm_text = format_finance_pending(prepared, currency, lang)
+    confirm_text = format_finance_pending(
+        prepared,
+        currency,
+        lang,
+        balances_before=_finance_balances_with_base(message.from_user.id),
+    )
     await _edit_panel_from_state(message, state, confirm_text, finance_add_confirm_keyboard(lang))
 
 
@@ -2922,97 +2754,35 @@ def _report_prefs_label(lang: str, enabled: bool, frequency: str) -> str:
     return _tr(lang, "Раз в неделю", "Haftada bir marta") if frequency == "weekly" else _tr(lang, "Раз в месяц", "Oyda bir marta")
 
 
-def _report_period_days(period: str) -> int:
-    safe = str(period or "week").strip().lower()
-    if safe == "month":
-        return 30
-    if safe == "all":
-        return 36500
-    return 7
+def _report_days(enabled: bool, frequency: str) -> int:
+    if not enabled:
+        return 7
+    return 30 if frequency == "monthly" else 7
 
 
-def _report_period_label(lang: str, period: str) -> str:
-    safe = str(period or "week").strip().lower()
-    if safe == "month":
-        return _tr(lang, "Месяц", "Oy")
-    if safe == "all":
-        return _tr(lang, "Всё время", "Barcha vaqt")
-    return _tr(lang, "Неделя", "Hafta")
+def _report_summary_for_user(telegram_id: int, *, days: int) -> str:
+    user, _, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    payload = db.get_period_payload(telegram_id, days=days)
+    summary = build_weekly_summary(payload, currency=currency)
+    title = _tr(lang, "Недельный срез" if days == 7 else "Месячный срез", "Haftalik kesim" if days == 7 else "Oylik kesim")
+    return f"<b>{title}</b>\n{_h(summary)}"
 
 
-def _report_panel_text(telegram_id: int, period: str = "week") -> tuple[str, dict[str, Any], str]:
-    user, tz_name, currency = _user_profile(telegram_id)
+def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
+    user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
     prefs = db.get_report_preferences(telegram_id)
     enabled = bool(prefs.get("enabled", True))
     frequency = str(prefs.get("frequency") or "weekly")
-    safe_period = str(period or "week").strip().lower()
-    if safe_period not in {"week", "month", "all"}:
-        safe_period = "week"
-    days = _report_period_days(safe_period)
-
-    payload = db.get_period_payload(telegram_id, days=days)
-    finance_entries = payload.get("finance_entries", [])
-    clean_finance_entries = [
-        entry
-        for entry in finance_entries
-        if not str(entry.get("note") or "").strip().lower().startswith("[x:")
-    ]
-    income = sum(float(entry.get("amount") or 0) for entry in clean_finance_entries if entry.get("entry_type") == "income")
-    expense = sum(float(entry.get("amount") or 0) for entry in clean_finance_entries if entry.get("entry_type") == "expense")
-    net = income - expense
-
-    calorie_logs = payload.get("calorie_logs", [])
-    meal_count = len(calorie_logs)
-    total_kcal = sum(float(item.get("calories") or 0) for item in calorie_logs)
-    total_p = sum(float(item.get("protein") or 0) for item in calorie_logs)
-    total_f = sum(float(item.get("fat") or 0) for item in calorie_logs)
-    total_c = sum(float(item.get("carbs") or 0) for item in calorie_logs)
-    avg_kcal = (total_kcal / meal_count) if meal_count else 0.0
-
-    habits = payload.get("habits", [])
-    habit_logs = payload.get("habit_logs", [])
-    habits_total = len(habits)
-    done_habit_logs = len([log for log in habit_logs if bool(log.get("completed", True))])
-    habit_days = len({str(log.get("log_date") or "") for log in habit_logs if log.get("log_date")})
-    checkins = payload.get("checkins", [])
-    checkin_streak = db.get_checkin_streak(telegram_id, tz_name=tz_name)
-    goals_count = len(payload.get("goals", []))
-
-    nutrition_profile = db.get_nutrition_profile(telegram_id) or {}
-    target_kcal = float(nutrition_profile.get("daily_calories") or 0)
-    period_label = _report_period_label(lang, safe_period)
-    start_date = payload.get("start_date")
-    end_date = payload.get("end_date")
-
+    days = _report_days(enabled, frequency)
+    summary = _report_summary_for_user(telegram_id, days=days)
     status = _report_prefs_label(lang, enabled, frequency)
     text = (
         f"📊 <b>{_tr(lang, 'Отчет / Аналитика', 'Hisobot / Analitika')}</b>\n"
-        f"<i>{_tr(lang, 'Период', 'Davr')}: {period_label} ({start_date} — {end_date})</i>\n"
         f"<i>{_tr(lang, 'Авто-уведомления', 'Avto-xabarnomalar')}: {status}</i>\n\n"
-        f"💰 <b>{_tr(lang, 'Финансы', 'Moliya')}</b>\n"
-        f"• {_tr(lang, 'Доход', 'Daromad')}: <b>{_fmt_money(income)} {currency}</b>\n"
-        f"• {_tr(lang, 'Расход', 'Xarajat')}: <b>{_fmt_money(expense)} {currency}</b>\n"
-        f"• {_tr(lang, 'Баланс', 'Balans')}: <b>{_fmt_money(net)} {currency}</b>\n"
-        f"• {_tr(lang, 'Операций', 'Operatsiyalar')}: {len(clean_finance_entries)}\n\n"
-        f"🍽️ <b>{_tr(lang, 'Питание', 'Oziqlanish')}</b>\n"
-        f"• {_tr(lang, 'Приемов', 'Qabullar')}: {meal_count}\n"
-        f"• {_tr(lang, 'Калории (среднее)', 'Kaloriya (o‘rtacha)')}: {int(total_kcal)} / {int(avg_kcal)}\n"
-        f"• {_tr(lang, 'Б/Ж/У всего', 'O/Y/U jami')}: {int(total_p)} / {int(total_f)} / {int(total_c)}\n"
-        + (
-            f"• {_tr(lang, 'Цель ккал/день', 'Kunlik maqsad kkal')}: {int(target_kcal)}\n\n"
-            if target_kcal > 0
-            else "\n"
-        )
-        + (
-            f"✅ <b>{_tr(lang, 'Привычки и прогресс', 'Odatlar va progress')}</b>\n"
-            f"• {_tr(lang, 'Активных привычек', 'Faol odatlar')}: {habits_total}\n"
-            f"• {_tr(lang, 'Выполнений', 'Bajarilgan')}: {done_habit_logs} ({_tr(lang, 'дней с отметкой', 'belgili kunlar')}: {habit_days})\n"
-            f"• {_tr(lang, 'Дневные отметки', 'Kunlik belgilashlar')}: {len(checkins)}\n"
-            f"• {_tr(lang, 'Серия дней', 'Ketma-ket kunlar')}: {checkin_streak}\n"
-            f"• {_tr(lang, 'Целей', 'Maqsadlar')}: {goals_count}\n\n"
-            f"{_tr(lang, 'Выбери период и настройки ниже.', 'Quyida davr va sozlamani tanlang.')}"
-        )
+        f"{summary}\n\n"
+        f"{_tr(lang, 'Выбери режим уведомлений ниже.', 'Quyida xabarnoma rejimini tanlang.')}"
     )
     return text, prefs, lang
 
@@ -3022,8 +2792,7 @@ def _report_panel_text(telegram_id: int, period: str = "week") -> tuple[str, dic
 async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    period = "week"
-    text, prefs, lang = _report_panel_text(callback.from_user.id, period=period)
+    text, prefs, lang = _report_panel_text(callback.from_user.id)
     await safe_edit_message(
         callback,
         text,
@@ -3031,43 +2800,14 @@ async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
-            period=period,
         ),
     )
-    await _remember_panel(callback, state)
-    await state.update_data(report_view_period=period)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("report:view:"))
-async def cb_report_view_period(callback: CallbackQuery, state: FSMContext) -> None:
-    await ensure_user_callback(callback)
-    period = callback.data.split("report:view:", 1)[1].strip().lower()
-    if period not in {"week", "month", "all"}:
-        period = "week"
-    text, prefs, lang = _report_panel_text(callback.from_user.id, period=period)
-    await safe_edit_message(
-        callback,
-        text,
-        reply_markup=report_settings_keyboard(
-            lang,
-            frequency=str(prefs.get("frequency") or "weekly"),
-            enabled=bool(prefs.get("enabled", True)),
-            period=period,
-        ),
-    )
-    await _remember_panel(callback, state)
-    await state.update_data(report_view_period=period)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("report:set:"))
 async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    data = await state.get_data()
-    period = str(data.get("report_view_period") or "week").strip().lower()
-    if period not in {"week", "month", "all"}:
-        period = "week"
     await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
     mode = callback.data.split("report:set:", 1)[1].strip().lower()
@@ -3090,7 +2830,7 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             last_sent_key=last_key,
         )
 
-    text, prefs, _ = _report_panel_text(callback.from_user.id, period=period)
+    text, prefs, _ = _report_panel_text(callback.from_user.id)
     await safe_edit_message(
         callback,
         text,
@@ -3098,11 +2838,8 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
-            period=period,
         ),
     )
-    await _remember_panel(callback, state)
-    await state.update_data(report_view_period=period)
     await callback.answer(_tr(lang, "Настройки обновлены", "Sozlamalar yangilandi"))
 
 
@@ -3112,141 +2849,15 @@ async def cmd_report(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     await safe_delete_message(message)
     await state.clear()
-    period = "week"
-    text, prefs, lang = _report_panel_text(message.from_user.id, period=period)
-    sent = await message.answer(
+    text, prefs, lang = _report_panel_text(message.from_user.id)
+    await message.answer(
         text,
         reply_markup=report_settings_keyboard(
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
-            period=period,
         ),
-        disable_web_page_preview=True,
     )
-    await state.update_data(panel_message_id=sent.message_id, report_view_period=period)
-
-
-@router.callback_query(F.data == "menu:vacancy")
-@router.callback_query(F.data == "vacancy:again")
-async def cb_menu_vacancy(callback: CallbackQuery, state: FSMContext) -> None:
-    await ensure_user_callback(callback)
-    lang = _lang_for_user_id(callback.from_user.id)
-    await state.set_state(BotStates.waiting_vacancy_input)
-    await _remember_panel(callback, state)
-    await safe_edit_message(
-        callback,
-        build_vacancy_panel_text(lang),
-        reply_markup=vacancy_panel_keyboard(lang),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "vacancy:publish")
-async def cb_vacancy_publish(callback: CallbackQuery, state: FSMContext) -> None:
-    await ensure_user_callback(callback)
-    lang = _lang_for_user_id(callback.from_user.id)
-    data = await state.get_data()
-
-    photo_file_id = str(data.get("last_vacancy_photo_file_id") or "").strip()
-    caption_premium = str(data.get("last_vacancy_text_premium") or "").strip()
-    caption_rendered = str(data.get("last_vacancy_text") or "").strip()
-    caption_fallback = str(data.get("last_vacancy_text_fallback") or "").strip()
-    caption_variants = [text for text in [caption_premium, caption_rendered, caption_fallback] if text]
-    contact_url = str(data.get("last_vacancy_contact_url") or "").strip() or None
-
-    if not photo_file_id or not caption_variants:
-        await callback.answer(
-            _tr(
-                lang,
-                "Сначала отправь фото превью вакансии.",
-                "Avval vakansiya preview rasmini yuboring.",
-            ),
-            show_alert=True,
-        )
-        return
-
-    publish_ok = False
-    for caption in caption_variants:
-        try:
-            await callback.bot.send_photo(
-                chat_id="@ishdasiz",
-                photo=photo_file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=vacancy_channel_keyboard(lang, contact_url),
-            )
-            publish_ok = True
-            await state.update_data(last_vacancy_text=caption)
-            break
-        except Exception:
-            continue
-
-    if not publish_ok:
-        logger.exception("Vacancy publish to channel failed")
-        await callback.answer(
-            _tr(
-                lang,
-                "Не удалось опубликовать. Дай боту права админа в @ishdasiz.",
-                "E'lon qilib bo'lmadi. Botni @ishdasiz kanaliga admin qiling.",
-            ),
-            show_alert=True,
-        )
-        return
-
-    await callback.answer(_tr(lang, "Опубликовано в @ishdasiz", "@ishdasiz kanaliga yuborildi"))
-
-
-@router.message(Command("vacancy"))
-async def cmd_vacancy(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    lang = _lang_for_user_id(message.from_user.id)
-    await safe_delete_message(message)
-    await state.set_state(BotStates.waiting_vacancy_input)
-    await _edit_panel_from_state(
-        message,
-        state,
-        build_vacancy_panel_text(lang),
-        vacancy_panel_keyboard(lang),
-    )
-
-
-@router.message(BotStates.waiting_vacancy_input)
-async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
-    await ensure_user_message(message)
-    data = await state.get_data()
-    raw_text = _message_text_payload(message)
-    has_ready_vacancy = bool(str(data.get("last_vacancy_text") or "").strip())
-
-    if message.photo and has_ready_vacancy and (not raw_text or (not looks_like_vacancy(raw_text) and not _looks_like_finance_text(raw_text))):
-        attached = await _attach_vacancy_preview_photo(message, state)
-        if attached:
-            return
-
-    if message.photo and not raw_text:
-        attached = await _attach_vacancy_preview_photo(message, state)
-        if attached:
-            return
-        lang = _lang_for_user_id(message.from_user.id)
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
-            _tr(
-                lang,
-                "Сначала отправь текст вакансии, потом фото превью.",
-                "Avval vakansiya matnini yuboring, keyin preview rasmni yuboring.",
-            ),
-            vacancy_panel_keyboard(lang),
-        )
-        return
-
-    if raw_text and _looks_like_finance_text(raw_text):
-        await state.set_state(BotStates.waiting_finance_input)
-        await msg_finance_input(message, state)
-        return
-
-    await _process_vacancy_message(message, state)
 
 
 @router.callback_query(F.data == "menu:language")
@@ -3269,9 +2880,7 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     selected = callback.data.split("lang:set:", 1)[1].strip().lower()
     selected = "uz" if selected == "uz" else "ru"
     db.update_user_language(callback.from_user.id, selected)
-    panel_id = await edit_main_menu(callback, callback.from_user.id)
-    if panel_id is not None:
-        await state.update_data(panel_message_id=panel_id)
+    await edit_main_menu(callback, callback.from_user.id)
     await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
 
 
@@ -3384,18 +2993,45 @@ async def cb_menu_trainer(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
-    panel_id = await edit_main_menu(callback, callback.from_user.id)
-    if panel_id is not None:
-        await state.update_data(panel_message_id=panel_id)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "🏋️ <b>Тренер / Персональный модуль</b>\n\n"
+            "Выбери цель. Далее бот запросит <b>вес;рост;возраст</b> и соберёт недельный план.\n"
+            "<i>План включает нагрузку, отдых и ссылки на технику упражнений.</i>",
+            "🏋️ <b>Trener / Shaxsiy modul</b>\n\n"
+            "Maqsadni tanlang. Keyin bot <b>vazn;bo'y;yosh</b> so'rab haftalik reja tuzadi.\n"
+            "<i>Rejada yuklama, dam olish va mashqlar texnikasi havolalari bo'ladi.</i>",
+        ),
+        reply_markup=trainer_keyboard(lang),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("trainer:plan:"))
 async def cb_trainer_plan(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
+    mode = callback.data.split("trainer:plan:", 1)[1].strip().lower()
+    goal = "muscle" if mode == "muscle" else "fat"
+    await state.set_state(BotStates.waiting_trainer_profile)
+    await _remember_panel(callback, state)
+    await state.update_data(trainer_goal=goal)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "Введите профиль: <b>вес;рост;возраст</b>\n"
+            "Пример: <code>82;178;27</code>\n"
+            "<i>На основе профиля рассчитаю безопасный недельный план.</i>",
+            "Profilni kiriting: <b>vazn;bo'y;yosh</b>\n"
+            "Misol: <code>82;178;27</code>\n"
+            "<i>Profil asosida xavfsiz haftalik reja hisoblayman.</i>",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
+    await callback.answer()
 
 
 @router.message(BotStates.waiting_trainer_profile, F.text)
@@ -3435,9 +3071,19 @@ async def msg_trainer_profile_invalid(message: Message) -> None:
 @router.callback_query(F.data == "trainer:ask")
 async def cb_trainer_ask(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
-    await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
+    await state.set_state(BotStates.waiting_trainer_question)
+    await _remember_panel(callback, state)
+    await safe_edit_message(
+        callback,
+        _tr(
+            lang,
+            "✍️ Напиши запрос тренеру.\nПример: «Составь план на 3 дня для дома без инвентаря».",
+            "✍️ Trenerga so'rov yozing.\nMisol: «Uy sharoitida 3 kunlik mashg'ulot rejasini tuzib bering».",
+        ),
+        reply_markup=back_to_menu_keyboard(lang),
+    )
+    await callback.answer()
 
 
 @router.message(BotStates.waiting_trainer_question, F.text)
@@ -3496,62 +3142,31 @@ async def cb_menu_ai(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
     lang = _lang_for_user_id(callback.from_user.id)
-    await callback.answer(_tr(lang, "Раздел отключен", "Bo'lim o'chirilgan"), show_alert=True)
+    await callback.answer(_tr(lang, "AI-помощник отключен", "AI yordamchi o'chirilgan"), show_alert=True)
 
 
 @router.message(Command('ai'))
 async def cmd_ai(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    lang = _lang_for_user_id(message.from_user.id)
     await safe_delete_message(message)
     await state.clear()
-    await _edit_panel_from_state(
-        message,
-        state,
-        _tr(lang, "Раздел AI отключен.", "AI bo'limi o'chirilgan."),
-        back_to_menu_keyboard(lang),
-    )
+    lang = _lang_for_user_id(message.from_user.id)
+    await message.answer(_tr(lang, "AI-помощник отключен в этой версии.", "AI yordamchi bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
 
 
 @router.message(BotStates.waiting_ai_question, F.text)
 async def msg_ai_question(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.clear()
-    lang = _lang_for_user_id(message.from_user.id)
-    await _edit_panel_from_state(
-        message,
-        state,
-        _tr(lang, "Раздел AI отключен.", "AI bo'limi o'chirilgan."),
-        back_to_menu_keyboard(lang),
-    )
 
 
 @router.message()
-async def fallback_message(message: Message, state: FSMContext) -> None:
+async def fallback_message(message: Message) -> None:
     await ensure_user_message(message)
-    raw_text = _message_text_payload(message)
-    text = raw_text.lower()
+    text = (message.text or '').strip().lower()
     if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
-        await _delete_panel_from_state(message, state)
         await safe_delete_message(message)
-        sent = await send_main_menu(message, message.from_user.id)
-        await state.update_data(panel_message_id=sent.message_id)
-        return
-    if raw_text and looks_like_vacancy(raw_text):
-        await state.set_state(BotStates.waiting_vacancy_input)
-        await _process_vacancy_message(message, state)
-        return
-    if raw_text and _looks_like_finance_text(raw_text):
-        await state.set_state(BotStates.waiting_finance_input)
-        await msg_finance_input(message, state)
-        return
-    if message.photo:
-        await state.set_state(BotStates.waiting_calorie_input)
-        await msg_calorie_input_photo(message, state)
-        return
-    if raw_text:
-        await state.set_state(BotStates.waiting_calorie_input)
-        await msg_calorie_input_text(message, state)
+        await send_main_menu(message, message.from_user.id)
         return
     await safe_delete_message(message)
 

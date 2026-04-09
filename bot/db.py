@@ -208,7 +208,7 @@ class Database:
 
     def get_finance_settings(self, telegram_id: int) -> dict[str, float]:
         rows = self._list_goal_rows(telegram_id, only_active=False)
-        for row in rows:
+        for row in reversed(rows):
             title = str(row.get("title") or "")
             if not title.startswith(self._finance_pref_prefix):
                 continue
@@ -263,8 +263,9 @@ class Database:
                     "active": True,
                 }
             ).eq("telegram_id", telegram_id).eq("id", current["goal_id"]).execute()
+            payload["goal_id"] = current.get("goal_id")
         else:
-            self.client.table(self._table("goals")).insert(
+            inserted = self.client.table(self._table("goals")).insert(
                 {
                     "telegram_id": telegram_id,
                     "goal_type": "budget",
@@ -273,8 +274,8 @@ class Database:
                     "active": True,
                 }
             ).execute()
-
-        payload["goal_id"] = current.get("goal_id")
+            rows = getattr(inserted, "data", None) or []
+            payload["goal_id"] = rows[0].get("id") if rows else None
         return payload
 
     def add_habit(self, telegram_id: int, name: str, target_per_week: int = 7) -> None:
