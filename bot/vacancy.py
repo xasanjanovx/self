@@ -31,10 +31,12 @@ _VACANCY_KEYWORDS = (
     "требует",
     "требуется",
     "работа",
+    "должность",
     "зарплат",
     "оклад",
     "контакт",
     "телеграм",
+    "вакансии",
     "ish kerak",
     "ishga kerak",
     "ishga olamiz",
@@ -52,6 +54,13 @@ _VACANCY_KEYWORDS = (
     "ish vaqti",
     "talablar",
     "vazifalar",
+    "vacancy",
+    "hiring",
+    "job",
+    "position",
+    "salary",
+    "requirements",
+    "responsibilities",
 )
 _VACANCY_SECTION_TOKENS = (
     "hudud",
@@ -70,6 +79,12 @@ _VACANCY_SECTION_TOKENS = (
     "услов",
     "обязан",
     "контакт",
+    "location",
+    "salary",
+    "requirement",
+    "benefit",
+    "dutie",
+    "contact",
 )
 _VACANCY_DISCLAIMER_LINES = (
     "❗️E'lonlardagi ma'lumotlar uchun kanal ma'muriyati javobgar emas. "
@@ -186,6 +201,17 @@ def _remove_cross_duplicates(items: list[str], blocked: set[str]) -> list[str]:
     return cleaned
 
 
+def _trim_items(items: list[str], *, max_items: int, max_len: int) -> list[str]:
+    trimmed: list[str] = []
+    for item in items[:max_items]:
+        text = item.strip()
+        if len(text) > max_len:
+            text = text[: max_len - 1].rstrip() + "…"
+        if text:
+            trimmed.append(text)
+    return trimmed
+
+
 def _build_headline(
     data: VacancyTemplateData,
     titles: list[str],
@@ -208,7 +234,7 @@ def _build_headline(
 
 
 def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> str:
-    titles = _clean_list(data.titles)[:50]
+    titles = _trim_items(_clean_list(data.titles), max_items=8, max_len=72)
     titles = [
         title
         for title in titles
@@ -227,10 +253,26 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
     for direct_value in (region or "", address or "", salary or "", schedule or "", company or "", headline):
         if direct_value.strip():
             blocked_keys.add(direct_value.casefold().strip())
-    requirements = _remove_cross_duplicates(_clean_list(data.requirements), blocked_keys)
-    benefits = _remove_cross_duplicates(_clean_list(data.benefits), blocked_keys)
-    duties = _remove_cross_duplicates(_clean_list(data.duties), blocked_keys)
-    details = _remove_cross_duplicates(_clean_list(data.details), blocked_keys)
+    requirements = _trim_items(
+        _remove_cross_duplicates(_clean_list(data.requirements), blocked_keys),
+        max_items=5,
+        max_len=120,
+    )
+    benefits = _trim_items(
+        _remove_cross_duplicates(_clean_list(data.benefits), blocked_keys),
+        max_items=4,
+        max_len=120,
+    )
+    duties = _trim_items(
+        _remove_cross_duplicates(_clean_list(data.duties), blocked_keys),
+        max_items=5,
+        max_len=120,
+    )
+    details = _trim_items(
+        _remove_cross_duplicates(_clean_list(data.details), blocked_keys),
+        max_items=6,
+        max_len=120,
+    )
     details = [
         item
         for item in details
@@ -314,6 +356,8 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
 def looks_like_vacancy(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", text or "").strip().lower()
     if not normalized:
+        return False
+    if len(normalized) < 16:
         return False
 
     hits = sum(1 for token in _VACANCY_KEYWORDS if token in normalized)

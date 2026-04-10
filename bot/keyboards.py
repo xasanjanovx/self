@@ -17,6 +17,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_vacancy": "📣 Вакансии",
         "menu_ai": "🤖 AI",
         "menu_language": "🌐 Язык",
+        "menu_refresh": "🔄 Обновить",
         "back": "⬅️ Назад",
         "to_menu": "🏠 В меню",
         "save": "✅ Сохранить",
@@ -64,7 +65,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "trainer_mobility": "🧘 Мобилити",
         "trainer_ask": "✍️ Спросить тренера",
         "vacancy_again": "📣 Еще вакансия",
-        "vacancy_contact": "📩 Bog'lanish",
+        "vacancy_contact": "📩 Связаться",
         "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
         "delete_reminder": "Удалить • {time} {text}",
     },
@@ -78,6 +79,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_vacancy": "📣 Vakansiya",
         "menu_ai": "🤖 AI",
         "menu_language": "🌐 Til",
+        "menu_refresh": "🔄 Yangilash",
         "back": "⬅️ Ortga",
         "to_menu": "🏠 Menyu",
         "save": "✅ Saqlash",
@@ -154,12 +156,14 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=_t(lang, "menu_goals"), callback_data="menu:goals"),
             ],
             [
+                InlineKeyboardButton(text=_t(lang, "menu_trainer"), callback_data="menu:trainer"),
                 InlineKeyboardButton(text=_t(lang, "menu_report"), callback_data="menu:report"),
-                InlineKeyboardButton(text=_t(lang, "menu_vacancy"), callback_data="menu:vacancy"),
             ],
             [
+                InlineKeyboardButton(text=_t(lang, "menu_vacancy"), callback_data="menu:vacancy"),
                 InlineKeyboardButton(text=_t(lang, "menu_language"), callback_data="menu:language"),
             ],
+            [InlineKeyboardButton(text=_t(lang, "menu_refresh"), callback_data="menu:open")],
         ]
     )
 

@@ -47,9 +47,19 @@ from .keyboards import (
     nutrition_goal_keyboard,
     report_settings_keyboard,
     trainer_keyboard,
+    vacancy_channel_keyboard,
+    vacancy_panel_keyboard,
+    vacancy_result_keyboard,
 )
 from .reports import build_weekly_summary
 from .states import BotStates
+from .vacancy import (
+    VACANCY_DEFAULT_REGION_TAG,
+    build_contact_url,
+    build_vacancy_panel_text,
+    format_vacancy_post,
+    looks_like_vacancy,
+)
 
 settings = load_settings()
 db = Database(settings)
@@ -383,7 +393,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"• Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
             f"• Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
             "",
-            "<i>Taom rasmi yoki tavsifini yuboring.</i>",
+            "<i>Taom rasmi, matni yoki ovozli xabar yuboring.</i>",
             "",
         ]
     else:
@@ -397,7 +407,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"• Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
             f"• Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
             "",
-            "<i>Отправь фото или описание блюда.</i>",
+            "<i>Отправь фото, текст или голосовое сообщение с описанием блюда.</i>",
             "",
         ]
     if profile_line:
@@ -1709,6 +1719,10 @@ async def _download_voice_to_temp(message: Message) -> Path:
         return Path(tmp.name)
 
 
+def _message_text_or_caption(message: Message) -> str:
+    return str(message.text or message.caption or "").strip()
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -2023,13 +2037,63 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
     await _edit_panel_from_state(message, state, format_calorie_estimate(estimate, lang), calorie_confirm_keyboard(lang))
 
 
+@router.message(BotStates.waiting_calorie_input, F.voice)
+@router.message(BotStates.waiting_calorie_input, F.audio)
+async def msg_calorie_input_voice(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    temp_path: Path | None = None
+    transcript = ""
+
+    try:
+        temp_path = await _download_voice_to_temp(message)
+        transcript = (await asyncio.to_thread(ai_service.transcribe_voice, temp_path)).strip()
+        if not transcript:
+            raise ValueError(_tr(lang, "Пустая расшифровка аудио", "Ovozli xabar bo'sh dekod qilindi"))
+        estimate = await asyncio.to_thread(ai_service.estimate_calories_by_text, transcript)
+    except Exception as exc:
+        logger.exception('Calorie voice analyze failed')
+        await safe_delete_message(message)
+        text, entries = build_calorie_panel(message.from_user.id)
+        text += f"\n\n{_tr(lang, 'Ошибка голосового анализа', 'Ovozli tahlil xatosi')}: {_h(exc)}"
+        await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
+        return
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+    await safe_delete_message(message)
+    await state.update_data(
+        pending_calorie={
+            'photo_url': None,
+            'meal_desc': estimate.meal_desc,
+            'calories': estimate.calories,
+            'protein': estimate.protein,
+            'fat': estimate.fat,
+            'carbs': estimate.carbs,
+            'confidence': estimate.confidence,
+            'advice': None,
+            'source': 'voice_ai',
+            'transcript': transcript,
+        }
+    )
+    await state.set_state(BotStates.waiting_calorie_confirm)
+    confirm_text = (
+        format_calorie_estimate(estimate, lang)
+        + "\n\n"
+        + _tr(lang, "<b>Распознано:</b> ", "<b>Aniqlandi:</b> ")
+        + f"<code>{_h(transcript[:240])}</code>"
+    )
+    await _edit_panel_from_state(message, state, confirm_text, calorie_confirm_keyboard(lang))
+
+
 @router.message(BotStates.waiting_calorie_input)
 async def msg_calorie_input_invalid(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
     await safe_delete_message(message)
     text, entries = build_calorie_panel(message.from_user.id)
-    text += "\n\n" + _tr(lang, "Отправь фото или текст.", "Rasm yoki matn yuboring.")
+    text += "\n\n" + _tr(lang, "Отправь фото, текст или голос.", "Rasm, matn yoki ovoz yuboring.")
     await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
 
 
@@ -2760,6 +2824,23 @@ def _report_days(enabled: bool, frequency: str) -> int:
     return 30 if frequency == "monthly" else 7
 
 
+def _normalize_report_view_period(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"week", "month", "all"}:
+        return value
+    return "week"
+
+
+def _report_days_for_view(period: str, *, enabled: bool, frequency: str) -> int:
+    if period == "all":
+        return 365
+    if period == "month":
+        return 30
+    if period == "week":
+        return 7
+    return _report_days(enabled, frequency)
+
+
 def _report_summary_for_user(telegram_id: int, *, days: int) -> str:
     user, _, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
@@ -2769,22 +2850,29 @@ def _report_summary_for_user(telegram_id: int, *, days: int) -> str:
     return f"<b>{title}</b>\n{_h(summary)}"
 
 
-def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
+def _report_panel_text(telegram_id: int, period: str | None = None) -> tuple[str, dict[str, Any], str, str]:
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
     prefs = db.get_report_preferences(telegram_id)
     enabled = bool(prefs.get("enabled", True))
     frequency = str(prefs.get("frequency") or "weekly")
-    days = _report_days(enabled, frequency)
+    period_value = _normalize_report_view_period(period)
+    days = _report_days_for_view(period_value, enabled=enabled, frequency=frequency)
     summary = _report_summary_for_user(telegram_id, days=days)
     status = _report_prefs_label(lang, enabled, frequency)
+    view_label = {
+        "week": _tr(lang, "Неделя", "Hafta"),
+        "month": _tr(lang, "Месяц", "Oy"),
+        "all": _tr(lang, "Весь период", "Butun davr"),
+    }.get(period_value, _tr(lang, "Неделя", "Hafta"))
     text = (
         f"📊 <b>{_tr(lang, 'Отчет / Аналитика', 'Hisobot / Analitika')}</b>\n"
         f"<i>{_tr(lang, 'Авто-уведомления', 'Avto-xabarnomalar')}: {status}</i>\n\n"
+        f"{_tr(lang, 'Срез', 'Kesim')}: <b>{view_label}</b>\n\n"
         f"{summary}\n\n"
         f"{_tr(lang, 'Выбери режим уведомлений ниже.', 'Quyida xabarnoma rejimini tanlang.')}"
     )
-    return text, prefs, lang
+    return text, prefs, lang, period_value
 
 
 @router.callback_query(F.data == "menu:report")
@@ -2792,7 +2880,7 @@ def _report_panel_text(telegram_id: int) -> tuple[str, dict[str, Any], str]:
 async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     await state.clear()
-    text, prefs, lang = _report_panel_text(callback.from_user.id)
+    text, prefs, lang, period = _report_panel_text(callback.from_user.id, period="week")
     await safe_edit_message(
         callback,
         text,
@@ -2800,6 +2888,27 @@ async def cb_menu_report(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report:view:"))
+async def cb_report_view(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    lang = _lang_for_user_id(callback.from_user.id)
+    period = _normalize_report_view_period(callback.data.split("report:view:", 1)[1])
+    text, prefs, _, period_value = _report_panel_text(callback.from_user.id, period=period)
+    await safe_edit_message(
+        callback,
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+            period=period_value,
         ),
     )
     await callback.answer()
@@ -2830,7 +2939,7 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             last_sent_key=last_key,
         )
 
-    text, prefs, _ = _report_panel_text(callback.from_user.id)
+    text, prefs, _, period = _report_panel_text(callback.from_user.id, period="week")
     await safe_edit_message(
         callback,
         text,
@@ -2838,6 +2947,7 @@ async def cb_report_set(callback: CallbackQuery, state: FSMContext) -> None:
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
         ),
     )
     await callback.answer(_tr(lang, "Настройки обновлены", "Sozlamalar yangilandi"))
@@ -2849,13 +2959,14 @@ async def cmd_report(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     await safe_delete_message(message)
     await state.clear()
-    text, prefs, lang = _report_panel_text(message.from_user.id)
+    text, prefs, lang, period = _report_panel_text(message.from_user.id, period="week")
     await message.answer(
         text,
         reply_markup=report_settings_keyboard(
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
+            period=period,
         ),
     )
 
@@ -2882,6 +2993,191 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     db.update_user_language(callback.from_user.id, selected)
     await edit_main_menu(callback, callback.from_user.id)
     await callback.answer("Til yangilandi" if selected == "uz" else "Язык обновлен")
+
+
+@router.callback_query(F.data == "menu:vacancy")
+async def cb_menu_vacancy(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await _remember_panel(callback, state)
+    await state.update_data(
+        pending_vacancy_post=None,
+        pending_vacancy_contact_url=None,
+        pending_vacancy_preview_photo_id=None,
+    )
+    await safe_edit_message(
+        callback,
+        build_vacancy_panel_text(lang),
+        reply_markup=vacancy_panel_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.message(Command("vacancy"))
+async def cmd_vacancy(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    await safe_delete_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await state.update_data(
+        pending_vacancy_post=None,
+        pending_vacancy_contact_url=None,
+        pending_vacancy_preview_photo_id=None,
+        panel_message_id=None,
+    )
+    await message.answer(
+        build_vacancy_panel_text(lang),
+        reply_markup=vacancy_panel_keyboard(lang),
+    )
+
+
+@router.message(BotStates.waiting_vacancy_input)
+async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    lang = _lang_for_user_id(message.from_user.id)
+    raw_text = _message_text_or_caption(message)
+    temp_path: Path | None = None
+
+    if not raw_text and (message.voice or message.audio):
+        try:
+            temp_path = await _download_voice_to_temp(message)
+            raw_text = (await asyncio.to_thread(ai_service.transcribe_voice, temp_path)).strip()
+        except Exception as exc:
+            logger.exception("Vacancy voice transcribe failed")
+            await safe_delete_message(message)
+            await _edit_panel_from_state(
+                message,
+                state,
+                build_vacancy_panel_text(lang)
+                + "\n\n"
+                + _tr(lang, "Ошибка распознавания голоса", "Ovozni aniqlash xatosi")
+                + f": {_h(exc)}",
+                vacancy_panel_keyboard(lang),
+            )
+            return
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    if not raw_text:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            build_vacancy_panel_text(lang)
+            + "\n\n"
+            + _tr(
+                lang,
+                "Нужен текст вакансии, пересланный пост или голосовое сообщение.",
+                "Vakansiya matni, forward post yoki ovozli xabar kerak.",
+            ),
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
+    if not looks_like_vacancy(raw_text) and len(raw_text) < 80:
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            build_vacancy_panel_text(lang)
+            + "\n\n"
+            + _tr(
+                lang,
+                "Похоже на неполную вакансию. Добавь должность, зарплату/график и контакты.",
+                "Bu to'liq vakansiyaga o'xshamaydi. Lavozim, maosh/grafik va aloqani qo'shing.",
+            ),
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
+    try:
+        parsed = await asyncio.to_thread(
+            ai_service.extract_vacancy_template_data,
+            raw_text,
+            default_region_tag=VACANCY_DEFAULT_REGION_TAG,
+        )
+        post_text = format_vacancy_post(parsed, premium=bool(getattr(message.from_user, "is_premium", False)))
+        contact_url = build_contact_url(parsed.telegram)
+    except Exception as exc:
+        logger.exception("Vacancy parse failed")
+        await safe_delete_message(message)
+        await _edit_panel_from_state(
+            message,
+            state,
+            build_vacancy_panel_text(lang)
+            + "\n\n"
+            + _tr(lang, "Ошибка обработки вакансии", "Vakansiya tahlil xatosi")
+            + f": {_h(exc)}",
+            vacancy_panel_keyboard(lang),
+        )
+        return
+
+    await safe_delete_message(message)
+    await state.update_data(
+        pending_vacancy_post=post_text,
+        pending_vacancy_contact_url=contact_url,
+        pending_vacancy_preview_photo_id=(message.photo[-1].file_id if message.photo else None),
+    )
+    await _edit_panel_from_state(
+        message,
+        state,
+        post_text,
+        vacancy_result_keyboard(lang, contact_url, show_publish=True),
+    )
+
+
+@router.callback_query(F.data == "vacancy:again")
+async def cb_vacancy_again(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await _remember_panel(callback, state)
+    await state.update_data(
+        pending_vacancy_post=None,
+        pending_vacancy_contact_url=None,
+        pending_vacancy_preview_photo_id=None,
+    )
+    await safe_edit_message(
+        callback,
+        build_vacancy_panel_text(lang),
+        reply_markup=vacancy_panel_keyboard(lang),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "vacancy:publish")
+async def cb_vacancy_publish(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    data = await state.get_data()
+    post_text = str(data.get("pending_vacancy_post") or "").strip()
+    contact_url = data.get("pending_vacancy_contact_url")
+    preview_photo_id = data.get("pending_vacancy_preview_photo_id")
+    if not post_text:
+        await callback.answer(_tr(lang, "Нет данных для публикации", "E'lon uchun ma'lumot yo'q"), show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer(_tr(lang, "Сообщение недоступно", "Xabar mavjud emas"), show_alert=True)
+        return
+
+    try:
+        followup_markup = vacancy_channel_keyboard(lang, contact_url)
+        if preview_photo_id and len(post_text) <= 1000:
+            await callback.message.answer_photo(
+                photo=preview_photo_id,
+                caption=post_text,
+                reply_markup=followup_markup,
+            )
+        else:
+            await callback.message.answer(post_text, reply_markup=followup_markup)
+    except Exception as exc:
+        logger.exception("Vacancy publish preview failed")
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
+        return
+
+    await callback.answer(_tr(lang, "Черновик отправлен. Можно публиковать.", "Qoralama yuborildi. Endi e'lon qilsa bo'ladi."))
 
 
 EXERCISE_GIF_LINKS = {
