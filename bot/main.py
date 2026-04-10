@@ -1723,6 +1723,138 @@ def _message_text_or_caption(message: Message) -> str:
     return str(message.text or message.caption or "").strip()
 
 
+def _looks_like_finance_operation(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not normalized:
+        return False
+
+    has_amount = bool(re.search(r"\d[\d\s]{1,}", normalized))
+    finance_markers = (
+        "доход",
+        "расход",
+        "трата",
+        "income",
+        "expense",
+        "kirim",
+        "chiqim",
+        "naqd",
+        "нал",
+        "карта",
+        "karta",
+        "долг",
+        "qarz",
+        "перевод",
+        "o'tkaz",
+        "otkaz",
+    )
+    transfer_markers = ("с карты", "на карту", "karta dan", "kartaga", "из наличных", "naqd dan")
+    has_finance_marker = any(token in normalized for token in finance_markers)
+    has_transfer = any(token in normalized for token in transfer_markers)
+    return (has_amount and has_finance_marker) or (has_amount and has_transfer)
+
+
+def _looks_like_nutrition_input(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not normalized:
+        return False
+    nutrition_markers = (
+        "еда",
+        "поел",
+        "ел ",
+        "ем ",
+        "завтрак",
+        "обед",
+        "ужин",
+        "перекус",
+        "калор",
+        "ккал",
+        "питани",
+        "ovqat",
+        "taom",
+        "nonushta",
+        "tushlik",
+        "kechki ovqat",
+        "kkal",
+        "oziql",
+        "yedim",
+    )
+    return any(token in normalized for token in nutrition_markers)
+
+
+def _main_menu_intent(text: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not normalized:
+        return None
+
+    vacancy_tokens = (
+        "ваканс",
+        "работа",
+        "ish kerak",
+        "vakans",
+        "bo'sh ish",
+        "lavozim",
+    )
+    finance_tokens = (
+        "финанс",
+        "доход",
+        "расход",
+        "деньги",
+        "молия",
+        "kirim",
+        "chiqim",
+        "qarz",
+        "долг",
+    )
+    nutrition_tokens = (
+        "питание",
+        "калори",
+        "еда",
+        "oziqlanish",
+        "taom",
+        "ovqat",
+    )
+
+    if any(token in normalized for token in vacancy_tokens):
+        return "vacancy"
+    if any(token in normalized for token in finance_tokens):
+        return "finance"
+    if any(token in normalized for token in nutrition_tokens):
+        return "calorie"
+    return None
+
+
+async def _open_calorie_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    profile = db.get_nutrition_profile(message.from_user.id)
+    if not profile:
+        await state.set_state(BotStates.waiting_nutrition_goal)
+        sent = await message.answer(build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
+        await state.update_data(panel_message_id=sent.message_id, pending_nutri_goal=None)
+        return
+
+    text, entries = build_calorie_panel(message.from_user.id)
+    sent = await message.answer(text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await state.set_state(BotStates.waiting_calorie_input)
+    await state.update_data(panel_message_id=sent.message_id, pending_calorie=None, pending_nutri_goal=None)
+
+
+async def _open_finance_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    text, entries = build_finance_panel(message.from_user.id)
+    sent = await message.answer(text, reply_markup=finance_panel_keyboard(entries, lang))
+    await state.set_state(BotStates.waiting_finance_input)
+    await state.update_data(panel_message_id=sent.message_id, pending_finance_items=None, pending_finance_source=None)
+
+
+async def _open_vacancy_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    sent = await message.answer(build_vacancy_panel_text(lang), reply_markup=vacancy_panel_keyboard(lang))
+    await state.set_state(BotStates.waiting_vacancy_input)
+    await state.update_data(
+        panel_message_id=sent.message_id,
+        pending_vacancy_post=None,
+        pending_vacancy_contact_url=None,
+        pending_vacancy_preview_photo_id=None,
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -3457,13 +3589,66 @@ async def msg_ai_question(message: Message, state: FSMContext) -> None:
 
 
 @router.message()
-async def fallback_message(message: Message) -> None:
+async def fallback_message(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
-    text = (message.text or '').strip().lower()
+    raw_text = _message_text_or_caption(message)
+    text = raw_text.lower()
     if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
         await safe_delete_message(message)
         await send_main_menu(message, message.from_user.id)
         return
+
+    current_state = await state.get_state()
+    if current_state:
+        await safe_delete_message(message)
+        return
+
+    lang = _lang_for_user_id(message.from_user.id)
+
+    if message.photo:
+        if raw_text and looks_like_vacancy(raw_text):
+            await state.set_state(BotStates.waiting_vacancy_input)
+            await msg_vacancy_input(message, state)
+            return
+        await state.set_state(BotStates.waiting_calorie_input)
+        await msg_calorie_input_photo(message, state)
+        return
+
+    if raw_text:
+        if looks_like_vacancy(raw_text):
+            await state.set_state(BotStates.waiting_vacancy_input)
+            await msg_vacancy_input(message, state)
+            return
+
+        if _looks_like_finance_operation(raw_text):
+            await state.set_state(BotStates.waiting_finance_input)
+            await msg_finance_input(message, state)
+            return
+
+        if _looks_like_nutrition_input(raw_text):
+            await state.set_state(BotStates.waiting_calorie_input)
+            await msg_calorie_input_text(message, state)
+            return
+
+        intent = _main_menu_intent(raw_text)
+        if intent == "vacancy":
+            await safe_delete_message(message)
+            await _open_vacancy_from_message(message, state, lang)
+            return
+        if intent == "finance":
+            await safe_delete_message(message)
+            await _open_finance_from_message(message, state, lang)
+            return
+        if intent == "calorie":
+            await safe_delete_message(message)
+            await _open_calorie_from_message(message, state, lang)
+            return
+
+    if message.voice or message.audio:
+        await state.set_state(BotStates.waiting_calorie_input)
+        await msg_calorie_input_voice(message, state)
+        return
+
     await safe_delete_message(message)
 
 
