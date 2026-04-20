@@ -356,6 +356,36 @@ class Database:
             }
         ).execute()
 
+    def add_finance_entries(
+        self,
+        telegram_id: int,
+        entries: list[dict[str, Any]],
+        *,
+        entry_date: date | None = None,
+        source: str = "manual",
+    ) -> None:
+        if not entries:
+            return
+        if entry_date is None:
+            entry_date = date.today()
+
+        payload = [
+            {
+                "telegram_id": telegram_id,
+                "entry_type": str(entry.get("entry_type") or "expense"),
+                "amount": float(entry.get("amount") or 0),
+                "category": str(entry.get("category") or "прочее"),
+                "note": entry.get("note"),
+                "entry_date": entry_date.isoformat(),
+                "source": str(entry.get("source") or source),
+            }
+            for entry in entries
+            if float(entry.get("amount") or 0) > 0
+        ]
+        if not payload:
+            return
+        self.client.table(self._table("finance_entries")).insert(payload).execute()
+
     def list_finance_entries(self, telegram_id: int, days: int = 7) -> list[dict[str, Any]]:
         start = (date.today() - timedelta(days=days - 1)).isoformat()
         return (
@@ -531,6 +561,28 @@ class Database:
                 "advice": advice,
             }
         ).execute()
+
+    def add_calorie_logs(self, telegram_id: int, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+        payload = [
+            {
+                "telegram_id": telegram_id,
+                "photo_url": item.get("photo_url"),
+                "meal_desc": str(item.get("meal_desc") or "").strip(),
+                "calories": item.get("calories"),
+                "protein": item.get("protein"),
+                "fat": item.get("fat"),
+                "carbs": item.get("carbs"),
+                "confidence": item.get("confidence"),
+                "advice": item.get("advice"),
+            }
+            for item in items
+            if str(item.get("meal_desc") or "").strip()
+        ]
+        if not payload:
+            return
+        self.client.table(self._table("calorie_logs")).insert(payload).execute()
 
     def list_calorie_logs(self, telegram_id: int, days: int = 7) -> list[dict[str, Any]]:
         start = datetime.now(timezone.utc) - timedelta(days=days)

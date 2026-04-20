@@ -210,6 +210,100 @@ def format_calorie_estimate(estimate: CalorieEstimate, lang: str = "ru") -> str:
     )
 
 
+def _pending_calorie_item(
+    estimate: CalorieEstimate,
+    *,
+    photo_url: str | None = None,
+    advice: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "photo_url": photo_url,
+        "meal_desc": estimate.meal_desc,
+        "calories": estimate.calories,
+        "protein": estimate.protein,
+        "fat": estimate.fat,
+        "carbs": estimate.carbs,
+        "confidence": estimate.confidence,
+        "advice": advice,
+    }
+
+
+def format_calorie_pending(items: list[dict[str, Any]], lang: str = "ru", transcript: str | None = None) -> str:
+    if not items:
+        return _tr(lang, "Нет данных для сохранения.", "Saqlash uchun ma'lumot yo'q.")
+
+    if len(items) == 1:
+        estimate = CalorieEstimate(
+            meal_desc=str(items[0].get("meal_desc") or "Блюдо"),
+            calories=int(items[0]["calories"]) if items[0].get("calories") is not None else None,
+            protein=float(items[0]["protein"]) if items[0].get("protein") is not None else None,
+            fat=float(items[0]["fat"]) if items[0].get("fat") is not None else None,
+            carbs=float(items[0]["carbs"]) if items[0].get("carbs") is not None else None,
+            confidence=float(items[0]["confidence"]) if items[0].get("confidence") is not None else None,
+            advice=items[0].get("advice"),
+        )
+        text = format_calorie_estimate(estimate, lang)
+    else:
+        total_calories = sum(float(item.get("calories") or 0) for item in items)
+        total_protein = sum(float(item.get("protein") or 0) for item in items)
+        total_fat = sum(float(item.get("fat") or 0) for item in items)
+        total_carbs = sum(float(item.get("carbs") or 0) for item in items)
+        if lang == "uz":
+            lines = [
+                "🍽️ <b>Oziqlanish / Paket tekshiruv</b>",
+                "",
+                f"AI <b>{len(items)}</b> ta taomni aniqladi:",
+                "",
+            ]
+            for index, item in enumerate(items[:8], start=1):
+                lines.append(
+                    f"{index}. <b>{_h(item.get('meal_desc') or 'Taom')}</b> — "
+                    f"{int(float(item.get('calories') or 0))} kkal"
+                )
+            lines.extend(
+                [
+                    "",
+                    "<b>Jami</b>",
+                    f"• Kkal: <b>{int(total_calories)}</b>",
+                    f"• Oqsil: {int(total_protein)}",
+                    f"• Yog': {int(total_fat)}",
+                    f"• Uglevod: {int(total_carbs)}",
+                    "",
+                    "Bularning barchasini kunlik jurnalga saqlaymizmi?",
+                ]
+            )
+            text = "\n".join(lines)
+        else:
+            lines = [
+                "🍽️ <b>Питание / Пакетная проверка</b>",
+                "",
+                f"AI распознал <b>{len(items)}</b> позиций:",
+                "",
+            ]
+            for index, item in enumerate(items[:8], start=1):
+                lines.append(
+                    f"{index}. <b>{_h(item.get('meal_desc') or 'Блюдо')}</b> — "
+                    f"{int(float(item.get('calories') or 0))} ккал"
+                )
+            lines.extend(
+                [
+                    "",
+                    "<b>Итого</b>",
+                    f"• Ккал: <b>{int(total_calories)}</b>",
+                    f"• Белки: {int(total_protein)}",
+                    f"• Жиры: {int(total_fat)}",
+                    f"• Углеводы: {int(total_carbs)}",
+                    "",
+                    "Сохранить все записи в дневник?",
+                ]
+            )
+            text = "\n".join(lines)
+
+    if transcript:
+        text += "\n\n" + _tr(lang, "<b>Распознано:</b> ", "<b>Aniqlandi:</b> ") + f"<code>{_h(transcript[:280])}</code>"
+    return text
+
+
 def goals_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     add_text = "➕ Qo'shish" if lang == "uz" else "➕ Добавить цель"
     back_text = "⬅️ Ortga" if lang == "uz" else "⬅️ Назад"
@@ -1719,6 +1813,16 @@ async def _download_voice_to_temp(message: Message) -> Path:
         return Path(tmp.name)
 
 
+async def _transcribe_message_audio(message: Message) -> str:
+    temp_path: Path | None = None
+    try:
+        temp_path = await _download_voice_to_temp(message)
+        return (await asyncio.to_thread(ai_service.transcribe_voice, temp_path)).strip()
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
 def _message_text_or_caption(message: Message) -> str:
     return str(message.text or message.caption or "").strip()
 
@@ -1834,7 +1938,12 @@ async def _open_calorie_from_message(message: Message, state: FSMContext, lang: 
     text, entries = build_calorie_panel(message.from_user.id)
     sent = await message.answer(text, reply_markup=calorie_panel_keyboard(entries, lang))
     await state.set_state(BotStates.waiting_calorie_input)
-    await state.update_data(panel_message_id=sent.message_id, pending_calorie=None, pending_nutri_goal=None)
+    await state.update_data(
+        panel_message_id=sent.message_id,
+        pending_calorie=None,
+        pending_calorie_items=None,
+        pending_nutri_goal=None,
+    )
 
 
 async def _open_finance_from_message(message: Message, state: FSMContext, lang: str) -> None:
@@ -1853,6 +1962,193 @@ async def _open_vacancy_from_message(message: Message, state: FSMContext, lang: 
         pending_vacancy_contact_url=None,
         pending_vacancy_preview_photo_id=None,
     )
+
+
+async def _open_habits_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    _, tz_name, _ = _user_profile(message.from_user.id)
+    habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
+    await state.clear()
+    await message.answer(_habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+
+
+async def _open_goals_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    goals = db.list_goals(message.from_user.id, only_active=True)
+    await state.clear()
+    await message.answer(_goals_text(goals, lang), reply_markup=goals_keyboard(lang))
+
+
+async def _open_report_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    await state.clear()
+    text, prefs, _, period = _report_panel_text(message.from_user.id, period="week")
+    await message.answer(
+        text,
+        reply_markup=report_settings_keyboard(
+            lang,
+            frequency=str(prefs.get("frequency") or "weekly"),
+            enabled=bool(prefs.get("enabled", True)),
+            period=period,
+        ),
+    )
+
+
+async def _open_trainer_from_message(message: Message, state: FSMContext, lang: str) -> None:
+    await state.clear()
+    await message.answer(
+        _tr(
+            lang,
+            "🏋️ <b>Тренер / Персональный модуль</b>\n\n"
+            "Выбери цель. Далее бот запросит <b>вес;рост;возраст</b> и соберёт недельный план.\n"
+            "<i>План включает нагрузку, отдых и ссылки на технику упражнений.</i>",
+            "🏋️ <b>Trener / Shaxsiy modul</b>\n\n"
+            "Maqsadni tanlang. Keyin bot <b>vazn;bo'y;yosh</b> so'rab haftalik reja tuzadi.\n"
+            "<i>Rejada yuklama, dam olish va mashqlar texnikasi havolalari bo'ladi.</i>",
+        ),
+        reply_markup=trainer_keyboard(lang),
+    )
+
+
+def _extract_habit_name_from_text(text: str) -> str | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+
+    lowered = raw.casefold()
+    prefixes = (
+        "добавь привычку ",
+        "создай привычку ",
+        "новая привычка ",
+        "add habit ",
+        "new habit ",
+        "qo'sh odat ",
+        "yangi odat ",
+    )
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            name = raw[len(prefix) :].strip(" .:-")
+            return name[:120] if name else None
+    return None
+
+
+async def _handle_ai_inbox_route(
+    message: Message,
+    state: FSMContext,
+    raw_text: str,
+    lang: str,
+    *,
+    has_photo: bool = False,
+    has_voice: bool = False,
+) -> bool:
+    try:
+        intent = await asyncio.to_thread(
+            ai_service.classify_inbox_intent,
+            raw_text,
+            has_photo=has_photo,
+            has_voice=has_voice,
+        )
+    except Exception:
+        return False
+
+    if intent.confidence < 0.55 or intent.module == "unknown":
+        return False
+
+    cleaned_text = str(intent.cleaned_text or raw_text).strip() or raw_text
+
+    if intent.module == "menu":
+        await safe_delete_message(message)
+        await send_main_menu(message, message.from_user.id)
+        return True
+
+    if intent.module == "vacancy":
+        if intent.mode == "process" and raw_text:
+            await state.set_state(BotStates.waiting_vacancy_input)
+            await msg_vacancy_input(message, state)
+            return True
+        await safe_delete_message(message)
+        await _open_vacancy_from_message(message, state, lang)
+        return True
+
+    if intent.module == "finance":
+        if intent.mode == "process" and raw_text:
+            await state.set_state(BotStates.waiting_finance_input)
+            await msg_finance_input(message, state)
+            return True
+        await safe_delete_message(message)
+        await _open_finance_from_message(message, state, lang)
+        return True
+
+    if intent.module == "calorie":
+        if has_photo:
+            await state.set_state(BotStates.waiting_calorie_input)
+            await msg_calorie_input_photo(message, state)
+            return True
+        if intent.mode == "process" and raw_text and has_voice:
+            await state.set_state(BotStates.waiting_calorie_input)
+            await msg_calorie_input_voice(message, state)
+            return True
+        if intent.mode == "process" and raw_text:
+            await state.set_state(BotStates.waiting_calorie_input)
+            await msg_calorie_input_text(message, state)
+            return True
+        await safe_delete_message(message)
+        await _open_calorie_from_message(message, state, lang)
+        return True
+
+    if intent.module == "trainer":
+        await safe_delete_message(message)
+        if intent.mode == "answer" and cleaned_text:
+            try:
+                context = db.get_ai_context(message.from_user.id)
+                answer = await asyncio.to_thread(ai_service.trainer_reply, cleaned_text, context, lang)
+            except Exception as exc:
+                await message.answer(
+                    f"{_tr(lang, 'Ошибка тренера', 'Trener xatosi')}: {_h(exc)}",
+                    reply_markup=back_to_menu_keyboard(lang),
+                )
+                return True
+            await state.clear()
+            await message.answer(answer, reply_markup=trainer_keyboard(lang))
+            return True
+        await _open_trainer_from_message(message, state, lang)
+        return True
+
+    if intent.module == "report":
+        await safe_delete_message(message)
+        await _open_report_from_message(message, state, lang)
+        return True
+
+    if intent.module == "habits":
+        habit_name = _extract_habit_name_from_text(cleaned_text)
+        await safe_delete_message(message)
+        if intent.mode == "process" and habit_name:
+            db.add_habit(message.from_user.id, name=habit_name, target_per_week=7)
+            _, tz_name, _ = _user_profile(message.from_user.id)
+            habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
+            await state.clear()
+            await message.answer(
+                _tr(lang, "Привычка добавлена.\n", "Odat qo'shildi.\n") + _habits_text(habits, lang),
+                reply_markup=habits_keyboard(habits, lang),
+            )
+            return True
+        await _open_habits_from_message(message, state, lang)
+        return True
+
+    if intent.module == "goals":
+        parsed_goal = _parse_goal_input(cleaned_text)
+        await safe_delete_message(message)
+        if intent.mode == "process" and parsed_goal is not None:
+            goal_type, title, target_value = parsed_goal
+            db.add_goal(message.from_user.id, goal_type=goal_type, title=title, target_value=target_value)
+            goals = db.list_goals(message.from_user.id, only_active=True)
+            await state.clear()
+            await message.answer(
+                _tr(lang, "Цель добавлена.\n", "Maqsad qo'shildi.\n") + _goals_text(goals, lang),
+                reply_markup=goals_keyboard(lang),
+            )
+            return True
+        await _open_goals_from_message(message, state, lang)
+        return True
+
+    return False
 
 
 @router.message(CommandStart())
@@ -1912,7 +2208,7 @@ async def cb_menu_calorie(callback: CallbackQuery, state: FSMContext) -> None:
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await state.update_data(pending_calorie=None, pending_nutri_goal=None)
+    await state.update_data(pending_calorie=None, pending_calorie_items=None, pending_nutri_goal=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
     await callback.answer()
 
@@ -2114,17 +2410,10 @@ async def msg_calorie_input_photo(message: Message, state: FSMContext) -> None:
         return
 
     await safe_delete_message(message)
+    pending_item = _pending_calorie_item(estimate, photo_url=f'tg_file:{file_id}')
     await state.update_data(
-        pending_calorie={
-            'photo_url': f'tg_file:{file_id}',
-            'meal_desc': estimate.meal_desc,
-            'calories': estimate.calories,
-            'protein': estimate.protein,
-            'fat': estimate.fat,
-            'carbs': estimate.carbs,
-            'confidence': estimate.confidence,
-            'advice': None,
-        }
+        pending_calorie=pending_item,
+        pending_calorie_items=[pending_item],
     )
     await state.set_state(BotStates.waiting_calorie_confirm)
     await _edit_panel_from_state(message, state, format_calorie_estimate(estimate, lang), calorie_confirm_keyboard(lang))
@@ -2143,7 +2432,7 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        estimate = await asyncio.to_thread(ai_service.estimate_calories_by_text, raw_text)
+        estimates = await asyncio.to_thread(ai_service.parse_nutrition_items, raw_text)
     except Exception as exc:
         logger.exception('Calorie text analyze failed')
         await safe_delete_message(message)
@@ -2152,21 +2441,14 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
         await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
 
+    pending_items = [_pending_calorie_item(estimate) for estimate in estimates]
     await safe_delete_message(message)
     await state.update_data(
-        pending_calorie={
-            'photo_url': None,
-            'meal_desc': estimate.meal_desc,
-            'calories': estimate.calories,
-            'protein': estimate.protein,
-            'fat': estimate.fat,
-            'carbs': estimate.carbs,
-            'confidence': estimate.confidence,
-            'advice': None,
-        }
+        pending_calorie=(pending_items[0] if len(pending_items) == 1 else None),
+        pending_calorie_items=pending_items,
     )
     await state.set_state(BotStates.waiting_calorie_confirm)
-    await _edit_panel_from_state(message, state, format_calorie_estimate(estimate, lang), calorie_confirm_keyboard(lang))
+    await _edit_panel_from_state(message, state, format_calorie_pending(pending_items, lang), calorie_confirm_keyboard(lang))
 
 
 @router.message(BotStates.waiting_calorie_input, F.voice)
@@ -2174,15 +2456,13 @@ async def msg_calorie_input_text(message: Message, state: FSMContext) -> None:
 async def msg_calorie_input_voice(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
-    temp_path: Path | None = None
     transcript = ""
 
     try:
-        temp_path = await _download_voice_to_temp(message)
-        transcript = (await asyncio.to_thread(ai_service.transcribe_voice, temp_path)).strip()
+        transcript = await _transcribe_message_audio(message)
         if not transcript:
             raise ValueError(_tr(lang, "Пустая расшифровка аудио", "Ovozli xabar bo'sh dekod qilindi"))
-        estimate = await asyncio.to_thread(ai_service.estimate_calories_by_text, transcript)
+        estimates = await asyncio.to_thread(ai_service.parse_nutrition_items, transcript)
     except Exception as exc:
         logger.exception('Calorie voice analyze failed')
         await safe_delete_message(message)
@@ -2190,32 +2470,15 @@ async def msg_calorie_input_voice(message: Message, state: FSMContext) -> None:
         text += f"\n\n{_tr(lang, 'Ошибка голосового анализа', 'Ovozli tahlil xatosi')}: {_h(exc)}"
         await _edit_panel_from_state(message, state, text, calorie_panel_keyboard(entries, lang))
         return
-    finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
 
+    pending_items = [_pending_calorie_item(estimate) for estimate in estimates]
     await safe_delete_message(message)
     await state.update_data(
-        pending_calorie={
-            'photo_url': None,
-            'meal_desc': estimate.meal_desc,
-            'calories': estimate.calories,
-            'protein': estimate.protein,
-            'fat': estimate.fat,
-            'carbs': estimate.carbs,
-            'confidence': estimate.confidence,
-            'advice': None,
-            'source': 'voice_ai',
-            'transcript': transcript,
-        }
+        pending_calorie=(pending_items[0] if len(pending_items) == 1 else None),
+        pending_calorie_items=pending_items,
     )
     await state.set_state(BotStates.waiting_calorie_confirm)
-    confirm_text = (
-        format_calorie_estimate(estimate, lang)
-        + "\n\n"
-        + _tr(lang, "<b>Распознано:</b> ", "<b>Aniqlandi:</b> ")
-        + f"<code>{_h(transcript[:240])}</code>"
-    )
+    confirm_text = format_calorie_pending(pending_items, lang, transcript=transcript)
     await _edit_panel_from_state(message, state, confirm_text, calorie_confirm_keyboard(lang))
 
 
@@ -2239,23 +2502,16 @@ async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
     data = await state.get_data()
+    pending_items = data.get('pending_calorie_items') or []
     pending = data.get('pending_calorie')
-    if not pending:
+    if not pending_items and pending:
+        pending_items = [pending]
+    if not pending_items:
         await callback.answer(_tr(lang, 'Нет данных для сохранения', "Saqlash uchun ma'lumot yo'q"), show_alert=True)
         return
 
     try:
-        db.add_calorie_log(
-            telegram_id=callback.from_user.id,
-            photo_url=pending.get('photo_url'),
-            meal_desc=str(pending.get('meal_desc') or ''),
-            calories=pending.get('calories'),
-            protein=pending.get('protein'),
-            fat=pending.get('fat'),
-            carbs=pending.get('carbs'),
-            confidence=pending.get('confidence'),
-            advice=None,
-        )
+        db.add_calorie_logs(callback.from_user.id, pending_items)
     except Exception as exc:
         logger.exception('Calorie save failed')
         await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
@@ -2264,9 +2520,11 @@ async def cb_calorie_confirm(callback: CallbackQuery, state: FSMContext) -> None
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await state.update_data(pending_calorie=None)
+    await state.update_data(pending_calorie=None, pending_calorie_items=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
-    await callback.answer(_tr(lang, 'Запись сохранена', 'Yozuv saqlandi'))
+    await callback.answer(
+        _tr(lang, 'Записи сохранены' if len(pending_items) > 1 else 'Запись сохранена', 'Yozuvlar saqlandi' if len(pending_items) > 1 else 'Yozuv saqlandi')
+    )
 
 
 @router.callback_query(F.data == 'calorie:cancel')
@@ -2276,7 +2534,7 @@ async def cb_calorie_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     text, entries = build_calorie_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_calorie_input)
     await _remember_panel(callback, state)
-    await state.update_data(pending_calorie=None)
+    await state.update_data(pending_calorie=None, pending_calorie_items=None)
     await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
     await callback.answer(_tr(lang, 'Действие отменено', 'Amal bekor qilindi'))
 
@@ -2550,10 +2808,8 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
 
     if message.voice or message.audio:
         source = 'voice_ai'
-        temp_path: Path | None = None
         try:
-            temp_path = await _download_voice_to_temp(message)
-            raw_text = await asyncio.to_thread(ai_service.transcribe_voice, temp_path)
+            raw_text = await _transcribe_message_audio(message)
         except Exception as exc:
             logger.exception('Voice transcribe failed')
             await safe_delete_message(message)
@@ -2561,9 +2817,6 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             text += f"\n\n{_tr(lang, 'Ошибка распознавания', 'Ovozni aniqlash xatosi')}: {_h(exc)}"
             await _edit_panel_from_state(message, state, text, finance_panel_keyboard(entries, lang))
             return
-        finally:
-            if temp_path and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
 
     parse_error: Exception | None = None
     try:
@@ -2673,6 +2926,7 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
         await callback.answer(_tr(lang, "Нет данных для сохранения", "Saqlash uchun ma'lumot yo'q"), show_alert=True)
         return
 
+    db_payload: list[dict[str, Any]] = []
     for item in items:
         if str(item.get("kind") or "") == "transfer":
             from_bucket = _normalize_fin_bucket(item.get("from_bucket"))
@@ -2685,14 +2939,17 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
             note = _finance_note_with_bucket(item.get("note"), _normalize_fin_bucket(item.get("bucket")))
             entry_type = str(item.get("type") or "expense")
 
-        db.add_finance_entry(
-            telegram_id=callback.from_user.id,
-            entry_type=entry_type,
-            amount=item["amount"],
-            category=item["category"],
-            note=note,
-            source=source,
+        db_payload.append(
+            {
+                "entry_type": entry_type,
+                "amount": item["amount"],
+                "category": item["category"],
+                "note": note,
+                "source": source,
+            }
         )
+
+    db.add_finance_entries(callback.from_user.id, db_payload, source=source)
 
     text, entries = build_finance_panel(callback.from_user.id)
     await state.set_state(BotStates.waiting_finance_input)
@@ -3169,12 +3426,10 @@ async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     lang = _lang_for_user_id(message.from_user.id)
     raw_text = _message_text_or_caption(message)
-    temp_path: Path | None = None
 
     if not raw_text and (message.voice or message.audio):
         try:
-            temp_path = await _download_voice_to_temp(message)
-            raw_text = (await asyncio.to_thread(ai_service.transcribe_voice, temp_path)).strip()
+            raw_text = await _transcribe_message_audio(message)
         except Exception as exc:
             logger.exception("Vacancy voice transcribe failed")
             await safe_delete_message(message)
@@ -3188,9 +3443,6 @@ async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
                 vacancy_panel_keyboard(lang),
             )
             return
-        finally:
-            if temp_path and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
 
     if not raw_text:
         await safe_delete_message(message)
@@ -3610,6 +3862,8 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
             await state.set_state(BotStates.waiting_vacancy_input)
             await msg_vacancy_input(message, state)
             return
+        if raw_text and await _handle_ai_inbox_route(message, state, raw_text, lang, has_photo=True):
+            return
         await state.set_state(BotStates.waiting_calorie_input)
         await msg_calorie_input_photo(message, state)
         return
@@ -3644,7 +3898,31 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
             await _open_calorie_from_message(message, state, lang)
             return
 
+        if await _handle_ai_inbox_route(message, state, raw_text, lang):
+            return
+
     if message.voice or message.audio:
+        try:
+            transcript = await _transcribe_message_audio(message)
+        except Exception:
+            transcript = ""
+
+        if transcript:
+            if looks_like_vacancy(transcript):
+                await state.set_state(BotStates.waiting_vacancy_input)
+                await msg_vacancy_input(message, state)
+                return
+            if _looks_like_finance_operation(transcript):
+                await state.set_state(BotStates.waiting_finance_input)
+                await msg_finance_input(message, state)
+                return
+            if _looks_like_nutrition_input(transcript):
+                await state.set_state(BotStates.waiting_calorie_input)
+                await msg_calorie_input_voice(message, state)
+                return
+            if await _handle_ai_inbox_route(message, state, transcript, lang, has_voice=True):
+                return
+
         await state.set_state(BotStates.waiting_calorie_input)
         await msg_calorie_input_voice(message, state)
         return
@@ -3736,6 +4014,7 @@ async def on_shutdown() -> None:
         except Exception:
             logger.exception('Worker stop error')
     background_tasks.clear()
+    ai_service.close()
 
 
 async def main() -> None:

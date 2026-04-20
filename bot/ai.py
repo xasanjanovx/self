@@ -40,6 +40,14 @@ class VacancyTemplateData:
     company: str | None = None
 
 
+@dataclass
+class InboxIntent:
+    module: str
+    mode: str
+    confidence: float
+    cleaned_text: str | None = None
+
+
 _VACANCY_REGION_MAP = {
     "tashkent": "#TOSHKENT",
     "toshkent": "#TOSHKENT",
@@ -635,6 +643,27 @@ class AIService:
         self.vision_model = settings.gemini_vision_model
         self.transcribe_model = settings.gemini_transcribe_model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(120.0, connect=20.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
+    def _estimate_from_payload(self, data: dict[str, Any], fallback_desc: str = "Блюдо") -> CalorieEstimate:
+        return CalorieEstimate(
+            meal_desc=str(data.get("meal_desc") or fallback_desc).strip() or fallback_desc,
+            calories=int(data["calories"]) if data.get("calories") is not None else None,
+            protein=float(data["protein"]) if data.get("protein") is not None else None,
+            fat=float(data["fat"]) if data.get("fat") is not None else None,
+            carbs=float(data["carbs"]) if data.get("carbs") is not None else None,
+            confidence=float(data["confidence"]) if data.get("confidence") is not None else None,
+            advice=None,
+        )
 
     def _generate_content(self, model: str, parts: list[dict[str, Any]], temperature: float = 0.2) -> str:
         url = f"{self.base_url}/{model}:generateContent"
@@ -648,10 +677,19 @@ class AIService:
             "Content-Type": "application/json",
         }
 
-        with httpx.Client(timeout=120) as client:
-            response = client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = self._client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 1:
+                    raise
+        else:
+            raise ValueError(f"Gemini request failed: {last_error}")
 
         candidates = data.get("candidates") or []
         if not candidates:
@@ -683,15 +721,7 @@ class AIService:
         )
         data = _extract_json(text)
 
-        return CalorieEstimate(
-            meal_desc=str(data.get("meal_desc") or "Блюдо"),
-            calories=int(data["calories"]) if data.get("calories") is not None else None,
-            protein=float(data["protein"]) if data.get("protein") is not None else None,
-            fat=float(data["fat"]) if data.get("fat") is not None else None,
-            carbs=float(data["carbs"]) if data.get("carbs") is not None else None,
-            confidence=float(data["confidence"]) if data.get("confidence") is not None else None,
-            advice=None,
-        )
+        return self._estimate_from_payload(data, fallback_desc="Блюдо")
 
     def estimate_calories_by_text(self, food_text: str) -> CalorieEstimate:
         prompt = (
@@ -707,15 +737,57 @@ class AIService:
         )
         data = _extract_json(text)
 
-        return CalorieEstimate(
-            meal_desc=str(data.get("meal_desc") or food_text.strip() or "Блюдо"),
-            calories=int(data["calories"]) if data.get("calories") is not None else None,
-            protein=float(data["protein"]) if data.get("protein") is not None else None,
-            fat=float(data["fat"]) if data.get("fat") is not None else None,
-            carbs=float(data["carbs"]) if data.get("carbs") is not None else None,
-            confidence=float(data["confidence"]) if data.get("confidence") is not None else None,
-            advice=None,
+        return self._estimate_from_payload(data, fallback_desc=food_text.strip() or "Блюдо")
+
+    def parse_nutrition_items(self, raw_text: str) -> list[CalorieEstimate]:
+        prompt = (
+            "Ты разбираешь сообщение о еде на отдельные приемы пищи и оцениваешь КБЖУ. "
+            "Если в тексте несколько блюд или приемов пищи, верни массив объектов по каждому элементу. "
+            "Если один прием пищи, верни массив из одного объекта. "
+            "Ответ только JSON-массив без пояснений. "
+            'Формат каждого элемента: {"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}.'
         )
+
+        parsed_items: list[CalorieEstimate] = []
+        try:
+            text = self._generate_content(
+                model=self.text_model,
+                parts=[{"text": f"{prompt}\n\nТекст: {raw_text}"}],
+                temperature=0.1,
+            )
+            parsed = _extract_json(text)
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            if isinstance(parsed, list):
+                for item in parsed[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    estimate = self._estimate_from_payload(item, fallback_desc=str(item.get("meal_desc") or "Блюдо"))
+                    if estimate.calories is None and estimate.protein is None and estimate.fat is None and estimate.carbs is None:
+                        continue
+                    parsed_items.append(estimate)
+        except Exception:
+            parsed_items = []
+
+        if parsed_items:
+            return parsed_items
+
+        fallback_parts = [
+            chunk.strip(" .")
+            for chunk in re.split(r"[\n,;]+", raw_text)
+            if chunk and chunk.strip()
+        ]
+        if 1 < len(fallback_parts) <= 5:
+            estimates: list[CalorieEstimate] = []
+            for part in fallback_parts:
+                try:
+                    estimates.append(self.estimate_calories_by_text(part))
+                except Exception:
+                    continue
+            if estimates:
+                return estimates
+
+        return [self.estimate_calories_by_text(raw_text)]
 
     def transcribe_voice(self, file_path: str | Path) -> str:
         file_path = Path(file_path)
@@ -747,6 +819,50 @@ class AIService:
             temperature=0.0,
         )
         return text.strip()
+
+    def classify_inbox_intent(self, raw_text: str, *, has_photo: bool = False, has_voice: bool = False) -> InboxIntent:
+        prompt = (
+            "Определи, к какому модулю Telegram-бота относится входящее сообщение пользователя. "
+            "Допустимые module: finance, calorie, vacancy, trainer, report, goals, habits, menu, unknown. "
+            "Допустимые mode: process, open, answer, unknown. "
+            "process = сообщение уже содержит данные для обработки, "
+            "open = пользователь просит открыть/показать раздел, "
+            "answer = пользователь задает содержательный вопрос тренеру/аналитике. "
+            "Ответ только JSON: "
+            '{"module":"unknown","mode":"unknown","confidence":0.0,"cleaned_text":"..."}'
+        )
+
+        try:
+            text = self._generate_content(
+                model=self.text_model,
+                parts=[
+                    {
+                        "text": (
+                            f"{prompt}\n\n"
+                            f"has_photo={str(has_photo).lower()}, has_voice={str(has_voice).lower()}\n"
+                            f"message={raw_text}"
+                        )
+                    }
+                ],
+                temperature=0.0,
+            )
+            data = _extract_json(text)
+            module = str(data.get("module") or "unknown").strip().lower()
+            mode = str(data.get("mode") or "unknown").strip().lower()
+            confidence = float(data.get("confidence") or 0.0)
+            cleaned_text = _normalize_optional_text(data.get("cleaned_text"), max_len=1200)
+        except Exception:
+            module = "unknown"
+            mode = "unknown"
+            confidence = 0.0
+            cleaned_text = None
+
+        if module not in {"finance", "calorie", "vacancy", "trainer", "report", "goals", "habits", "menu", "unknown"}:
+            module = "unknown"
+        if mode not in {"process", "open", "answer", "unknown"}:
+            mode = "unknown"
+        confidence = max(0.0, min(1.0, confidence))
+        return InboxIntent(module=module, mode=mode, confidence=confidence, cleaned_text=cleaned_text)
 
     def parse_finance_items(self, raw_text: str) -> list[dict[str, Any]]:
         prompt = (
