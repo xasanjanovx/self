@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import csv
+import logging
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from statistics import mean
@@ -8,6 +10,11 @@ from typing import Any
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+
+from . import charts, insights
+from .ai import AIService
+
+logger = logging.getLogger(__name__)
 
 
 def _to_float(value: Any) -> float:
@@ -21,7 +28,69 @@ def _ascii(text: str) -> str:
     return text.encode("ascii", "ignore").decode("ascii")
 
 
-def build_weekly_summary(payload: dict[str, Any], currency: str = "UZS") -> str:
+@dataclass
+class ReportBundle:
+    """Связка готового отчёта: текст для Telegram + опциональный PNG-график."""
+    text: str
+    chart: bytes | None = None
+    insight: str | None = None
+
+
+def build_report_bundle(
+    payload: dict[str, Any],
+    *,
+    currency: str = "UZS",
+    lang: str = "ru",
+    ai: AIService | None = None,
+    title_prefix: str | None = None,
+    full_finance_history: list[dict[str, Any]] | None = None,
+) -> ReportBundle:
+    """Готовит расширенный отчёт: цифры + AI-инсайт + bar-chart расходов/доходов.
+
+    `full_finance_history` — если передан, по нему считаются week-over-week изменения
+    (т.е. история должна включать предыдущий период). Если не передан — берём только
+    данные за текущий период из payload['finance_entries'].
+    """
+    summary_text = build_weekly_summary(payload, currency=currency, lang=lang)
+    if title_prefix:
+        summary_text = f"{title_prefix}\n\n{summary_text}"
+
+    # AI-инсайт (опционально)
+    insight: str | None = None
+    if ai is not None:
+        end_date = payload.get("end_date")
+        start_date = payload.get("start_date")
+        if isinstance(end_date, date) and isinstance(start_date, date):
+            days = (end_date - start_date).days + 1
+            trend = insights.compute_trend(
+                full_finance_history or payload.get("finance_entries", []),
+                payload.get("checkins", []),
+                payload.get("habit_logs", []),
+                end_date=end_date,
+                days=days,
+            )
+            insight = insights.generate_insight(ai, trend, currency=currency, lang=lang)
+
+    # График — bar расходов/доходов по дням
+    chart_bytes: bytes | None = None
+    try:
+        start_date = payload.get("start_date")
+        end_date = payload.get("end_date")
+        if isinstance(start_date, date) and isinstance(end_date, date):
+            chart_bytes = charts.finance_daily_chart(
+                payload.get("finance_entries", []),
+                start_date=start_date,
+                end_date=end_date,
+                currency=currency,
+                lang=lang,
+            )
+    except Exception as exc:
+        logger.warning("finance_daily_chart failed: %s", exc)
+
+    return ReportBundle(text=summary_text, chart=chart_bytes, insight=insight)
+
+
+def build_weekly_summary(payload: dict[str, Any], currency: str = "UZS", lang: str = "ru") -> str:
     finance_entries = payload.get("finance_entries", [])
     checkins = payload.get("checkins", [])
     habit_logs = payload.get("habit_logs", [])
@@ -51,22 +120,41 @@ def build_weekly_summary(payload: dict[str, Any], currency: str = "UZS") -> str:
 
     period = f"{payload['start_date']} - {payload['end_date']}"
 
-    lines = [
-        f"Период: {period}",
-        f"Доход: {income:,.0f} {currency}",
-        f"Расход: {expense:,.0f} {currency}",
-        f"Баланс: {net:,.0f} {currency}",
-        f"Дневных отметок: {len(checkins)}",
-        f"Привычек: {total_habits}, выполнений: {completed_logs}",
-        f"Приемов пищи в дневнике: {len(calorie_logs)}",
-    ]
+    def _money(v: float) -> str:
+        return f"{int(v):,}".replace(",", " ")
 
-    if avg_mood is not None:
-        lines.append(f"Среднее настроение: {avg_mood}/10")
-    if avg_energy is not None:
-        lines.append(f"Средняя энергия: {avg_energy}/10")
-    if avg_calories is not None:
-        lines.append(f"Средние калории по фото: {avg_calories:.0f} ккал")
+    if lang == "uz":
+        lines = [
+            f"Davr: {period}",
+            f"Daromad: {_money(income)} {currency}",
+            f"Xarajat: {_money(expense)} {currency}",
+            f"Balans: {_money(net)} {currency}",
+            f"Belgilangan kunlar: {len(checkins)}",
+            f"Odatlar: {total_habits}, bajarilgan: {completed_logs}",
+            f"Yozilgan ovqatlanish: {len(calorie_logs)}",
+        ]
+        if avg_mood is not None:
+            lines.append(f"Oʻrtacha kayfiyat: {avg_mood}/10")
+        if avg_energy is not None:
+            lines.append(f"Oʻrtacha energiya: {avg_energy}/10")
+        if avg_calories is not None:
+            lines.append(f"Oʻrtacha kaloriya (foto): {avg_calories:.0f} kkal")
+    else:
+        lines = [
+            f"Период: {period}",
+            f"Доход: {_money(income)} {currency}",
+            f"Расход: {_money(expense)} {currency}",
+            f"Баланс: {_money(net)} {currency}",
+            f"Дневных отметок: {len(checkins)}",
+            f"Привычек: {total_habits}, выполнений: {completed_logs}",
+            f"Приемов пищи в дневнике: {len(calorie_logs)}",
+        ]
+        if avg_mood is not None:
+            lines.append(f"Среднее настроение: {avg_mood}/10")
+        if avg_energy is not None:
+            lines.append(f"Средняя энергия: {avg_energy}/10")
+        if avg_calories is not None:
+            lines.append(f"Средние калории по фото: {avg_calories:.0f} ккал")
 
     return "\n".join(lines)
 

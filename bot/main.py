@@ -17,6 +17,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -53,7 +54,9 @@ from .keyboards import (
     vacancy_panel_keyboard,
     vacancy_result_keyboard,
 )
-from .reports import build_weekly_summary
+from .reports import build_report_bundle, build_weekly_summary
+from . import charts as charts_mod
+from . import streaks as streaks_mod
 from .states import BotStates
 from .vacancy import (
     VACANCY_DEFAULT_REGION_TAG,
@@ -1610,7 +1613,46 @@ def _goals_text(goals: list[dict[str, Any]], lang: str = "ru") -> str:
     return '\n'.join(rows)
 
 
-def _habits_text(habits: list[dict[str, Any]], lang: str = "ru") -> str:
+def _compute_habit_streaks(habits: list[dict[str, Any]], today: date) -> dict[str, streaks_mod.StreakInfo]:
+    """Вычисляет StreakInfo для каждой привычки. По одному запросу на привычку — для UI ок."""
+    out: dict[str, streaks_mod.StreakInfo] = {}
+    for h in habits:
+        hid = str(h.get('id') or '')
+        if not hid:
+            continue
+        try:
+            logs = db.list_habit_logs_for_habit(hid, days=180)
+            out[hid] = streaks_mod.compute_streak(logs, today=today)
+        except Exception:
+            logger.exception('streak compute failed for habit %s', hid)
+            out[hid] = streaks_mod.StreakInfo(current=0, best=0, today_done=False, yesterday_done=False)
+    return out
+
+
+def _habits_streaks_block(habits: list[dict[str, Any]], streaks: dict[str, streaks_mod.StreakInfo], lang: str) -> str:
+    """Топ-3 текущих серий — добавляется к выводу _habits_text."""
+    items: list[tuple[str, streaks_mod.StreakInfo]] = []
+    for h in habits:
+        hid = str(h.get('id') or '')
+        info = streaks.get(hid)
+        if info is None or info.current <= 0:
+            continue
+        items.append((str(h.get('name') or ''), info))
+    if not items:
+        return ""
+    items.sort(key=lambda x: (x[1].current, x[1].best), reverse=True)
+    title = "🔥 <b>Top seriyalar</b>" if lang == "uz" else "🔥 <b>Топ серий</b>"
+    lines = [title]
+    for name, info in items[:3]:
+        lines.append("• " + streaks_mod.format_streak_line(name, info, lang=lang))
+    return "\n".join(lines)
+
+
+def _habits_text(
+    habits: list[dict[str, Any]],
+    lang: str = "ru",
+    streaks: dict[str, streaks_mod.StreakInfo] | None = None,
+) -> str:
     if not habits:
         return (
             "✅ <b>Odatlar / Intizom</b>\n\n"
@@ -1624,18 +1666,24 @@ def _habits_text(habits: list[dict[str, Any]], lang: str = "ru") -> str:
     done = len([h for h in habits if h.get('completed_today')])
     total = len(habits)
     if lang == "uz":
-        return (
+        text = (
             "✅ <b>Odatlar / Bugungi holat</b>\n"
             f"• Bajarildi: <b>{done}/{total}</b>\n"
             f"• Qoldi: <b>{max(0, total - done)}</b>\n\n"
             "<i>Bajarilganini belgilash uchun odat tugmasini bosing.</i>"
         )
-    return (
-        "✅ <b>Привычки / Статус дня</b>\n"
-        f"• Выполнено: <b>{done}/{total}</b>\n"
-        f"• Осталось: <b>{max(0, total - done)}</b>\n\n"
-        "<i>Нажми на привычку ниже, чтобы отметить выполнение.</i>"
-    )
+    else:
+        text = (
+            "✅ <b>Привычки / Статус дня</b>\n"
+            f"• Выполнено: <b>{done}/{total}</b>\n"
+            f"• Осталось: <b>{max(0, total - done)}</b>\n\n"
+            "<i>Нажми на привычку ниже, чтобы отметить выполнение.</i>"
+        )
+    if streaks:
+        block = _habits_streaks_block(habits, streaks, lang)
+        if block:
+            text = f"{text}\n\n{block}"
+    return text
 
 
 def _reminders_text(reminders: list[dict[str, Any]], lang: str = "ru") -> str:
@@ -3034,7 +3082,12 @@ async def cb_menu_habits(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     _, tz_name, _ = _user_profile(callback.from_user.id)
     habits = db.list_today_habits(callback.from_user.id, tz_name=tz_name)
-    await safe_edit_message(callback, _habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+    streaks = _compute_habit_streaks(habits, _today_local(tz_name))
+    await safe_edit_message(
+        callback,
+        _habits_text(habits, lang, streaks=streaks),
+        reply_markup=habits_keyboard(habits, lang),
+    )
     await callback.answer()
 
 
@@ -3073,7 +3126,11 @@ async def msg_habit_add(message: Message, state: FSMContext) -> None:
 
     _, tz_name, _ = _user_profile(message.from_user.id)
     habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
-    await message.answer(_habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+    streaks = _compute_habit_streaks(habits, _today_local(tz_name))
+    await message.answer(
+        _habits_text(habits, lang, streaks=streaks),
+        reply_markup=habits_keyboard(habits, lang),
+    )
 
 
 @router.callback_query(F.data.startswith('habit:done:'))
@@ -3081,6 +3138,17 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
     habit_id = callback.data.split('habit:done:', 1)[1]
+    _, tz_name, _ = _user_profile(callback.from_user.id)
+    today = _today_local(tz_name)
+
+    # 1) серия ДО отметки — чтобы понять преодолели ли порог бейджа
+    try:
+        before_logs = db.list_habit_logs_for_habit(habit_id, days=180)
+        streak_before = streaks_mod.compute_streak(before_logs, today=today).current
+    except Exception:
+        logger.exception('streak before failed')
+        streak_before = 0
+
     try:
         db.mark_habit_done(callback.from_user.id, habit_id=habit_id)
     except Exception as exc:
@@ -3088,9 +3156,43 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
         await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
         return
 
-    _, tz_name, _ = _user_profile(callback.from_user.id)
+    # 2) серия ПОСЛЕ + выдача бейджей
+    try:
+        after_logs = db.list_habit_logs_for_habit(habit_id, days=180)
+        streak_after = streaks_mod.compute_streak(after_logs, today=today).current
+    except Exception:
+        logger.exception('streak after failed')
+        streak_after = streak_before
+
+    crossed = streaks_mod.newly_crossed_thresholds(streak_before, streak_after)
+    for threshold in crossed:
+        badge_key = streaks_mod.habit_badge_key(habit_id, threshold)
+        unlocked = db.unlock_badge(
+            callback.from_user.id,
+            badge_key,
+            category='habit',
+            threshold=threshold,
+            ref_id=habit_id,
+        )
+        if unlocked:
+            try:
+                await callback.message.answer(
+                    _tr(
+                        lang,
+                        f"🎉 <b>Новый бейдж!</b>\n\n{_h(streaks_mod.badge_label(threshold, 'ru'))}\n\nТы держишь серию {streak_after} дней подряд!",
+                        f"🎉 <b>Yangi nishon!</b>\n\n{_h(streaks_mod.badge_label(threshold, 'uz'))}\n\nSiz {streak_after} kun ketma-ket seriyani saqlab turibsiz!",
+                    )
+                )
+            except Exception:
+                logger.exception('Badge notify failed')
+
     habits = db.list_today_habits(callback.from_user.id, tz_name=tz_name)
-    await safe_edit_message(callback, _habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+    streaks = _compute_habit_streaks(habits, today)
+    await safe_edit_message(
+        callback,
+        _habits_text(habits, lang, streaks=streaks),
+        reply_markup=habits_keyboard(habits, lang),
+    )
     await callback.answer(_tr(lang, 'Отмечено', 'Belgilandi'))
 
 
@@ -3842,6 +3944,181 @@ async def msg_ai_question(message: Message, state: FSMContext) -> None:
     await state.clear()
 
 
+# ============================================================
+# /dashboard — расширенная аналитика с периодами и графиками
+# ============================================================
+
+_DASHBOARD_PERIODS = {
+    "7d": 7,
+    "30d": 30,
+    "90d": 90,
+}
+
+
+def _dashboard_keyboard(active: str, lang: str) -> InlineKeyboardMarkup:
+    def _label(code: str) -> str:
+        ru_map = {"7d": "7 дней", "30d": "30 дней", "90d": "90 дней"}
+        uz_map = {"7d": "7 kun", "30d": "30 kun", "90d": "90 kun"}
+        base = (uz_map if lang == "uz" else ru_map)[code]
+        return f"✅ {base}" if code == active else base
+
+    rows = [
+        [
+            InlineKeyboardButton(text=_label("7d"), callback_data="dash:7d"),
+            InlineKeyboardButton(text=_label("30d"), callback_data="dash:30d"),
+            InlineKeyboardButton(text=_label("90d"), callback_data="dash:90d"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=_tr(lang, "🍱 Калории", "🍱 Kaloriya"),
+                callback_data=f"dash:kcal:{active}",
+            ),
+            InlineKeyboardButton(
+                text=_tr(lang, "🔥 Привычки", "🔥 Odatlar"),
+                callback_data=f"dash:habits:{active}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=_tr(lang, "🏷 Категории", "🏷 Toifalar"),
+                callback_data=f"dash:cats:{active}",
+            ),
+            InlineKeyboardButton(
+                text=_tr(lang, "😊 Самочувствие", "😊 Kayfiyat"),
+                callback_data=f"dash:mood:{active}",
+            ),
+        ],
+        [InlineKeyboardButton(text="⬅️", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_dashboard(target: Message, telegram_id: int, period_code: str) -> None:
+    user, tz_name, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    days = _DASHBOARD_PERIODS.get(period_code, 7)
+    today = _today_local(tz_name)
+    payload = db.get_period_payload(telegram_id, days=days, end_date=today)
+    full_history = db.get_period_payload(telegram_id, days=days * 2, end_date=today)
+
+    bundle = build_report_bundle(
+        payload,
+        currency=currency,
+        lang=lang,
+        ai=ai_service,
+        title_prefix=_tr(lang, f"📊 Дашборд — {days} дн.", f"📊 Boshqaruv paneli — {days} kun"),
+        full_finance_history=full_history.get("finance_entries", []),
+    )
+
+    text = _h(bundle.text)
+    if bundle.insight:
+        text += f"\n\n💡 <i>{_h(bundle.insight)}</i>"
+
+    kb = _dashboard_keyboard(period_code, lang)
+    if bundle.chart:
+        await target.answer_photo(
+            BufferedInputFile(bundle.chart, filename="dashboard.png"),
+            caption=text[:1024],
+            reply_markup=kb,
+        )
+        if len(text) > 1024:
+            await target.answer(text[1024:])
+    else:
+        await target.answer(text, reply_markup=kb)
+
+
+@router.message(Command("dashboard"))
+async def cmd_dashboard(message: Message, state: FSMContext) -> None:
+    await ensure_user_message(message)
+    await state.clear()
+    await _send_dashboard(message, message.from_user.id, "7d")
+
+
+@router.callback_query(F.data.in_({"dash:7d", "dash:30d", "dash:90d"}))
+async def cb_dashboard_period(callback: CallbackQuery) -> None:
+    await ensure_user_callback(callback)
+    period_code = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if callback.message is not None:
+        await _send_dashboard(callback.message, callback.from_user.id, period_code)
+
+
+async def _send_dashboard_chart(target: Message, telegram_id: int, kind: str, period_code: str) -> None:
+    user, tz_name, currency = _user_profile(telegram_id)
+    lang = _lang_from_user(user)
+    days = _DASHBOARD_PERIODS.get(period_code, 7)
+    today = _today_local(tz_name)
+    payload = db.get_period_payload(telegram_id, days=days, end_date=today)
+
+    chart_bytes: bytes | None = None
+    caption: str = ""
+    try:
+        if kind == "kcal":
+            nutri = db.get_nutrition_profile(telegram_id) or {}
+            target_kcal = int(nutri.get("daily_calories") or 0) or None
+            chart_bytes = charts_mod.calorie_trend_chart(
+                payload.get("calorie_logs", []),
+                end_date=today,
+                days=days,
+                target=target_kcal,
+                lang=lang,
+            )
+            caption = _tr(lang, "🍱 Калории по дням", "🍱 Kunlik kaloriya")
+        elif kind == "habits":
+            chart_bytes = charts_mod.habits_heatmap(
+                payload.get("habit_logs", []),
+                payload.get("habits", []),
+                end_date=today,
+                days=days,
+                lang=lang,
+            )
+            caption = _tr(lang, "🔥 Карта привычек", "🔥 Odatlar xaritasi")
+        elif kind == "cats":
+            chart_bytes = charts_mod.expense_categories_chart(
+                payload.get("finance_entries", []),
+                currency=currency,
+                lang=lang,
+            )
+            caption = _tr(lang, "🏷 Топ категорий расходов", "🏷 Asosiy xarajat toifalari")
+        elif kind == "mood":
+            chart_bytes = charts_mod.mood_energy_chart(
+                payload.get("checkins", []),
+                end_date=today,
+                days=days,
+                lang=lang,
+            )
+            caption = _tr(lang, "😊 Настроение и энергия", "😊 Kayfiyat va energiya")
+    except Exception:
+        logger.exception("dashboard chart %s failed", kind)
+
+    kb = _dashboard_keyboard(period_code, lang)
+    if chart_bytes:
+        await target.answer_photo(
+            BufferedInputFile(chart_bytes, filename=f"{kind}.png"),
+            caption=caption,
+            reply_markup=kb,
+        )
+    else:
+        await target.answer(
+            _tr(lang, "Недостаточно данных для графика.", "Grafik uchun maʼlumot yetarli emas."),
+            reply_markup=kb,
+        )
+
+
+@router.callback_query(F.data.startswith("dash:kcal:") | F.data.startswith("dash:habits:") | F.data.startswith("dash:cats:") | F.data.startswith("dash:mood:"))
+async def cb_dashboard_chart(callback: CallbackQuery) -> None:
+    await ensure_user_callback(callback)
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+    kind = parts[1]
+    period_code = parts[2]
+    await callback.answer()
+    if callback.message is not None:
+        await _send_dashboard_chart(callback.message, callback.from_user.id, kind, period_code)
+
+
 @router.message()
 async def fallback_message(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -3974,17 +4251,43 @@ async def weekly_report_worker(bot: Bot) -> None:
 
                 days = 30 if frequency == "monthly" else 7
                 payload = db.get_period_payload(telegram_id, days=days, end_date=local_now.date())
-                summary = build_weekly_summary(payload, currency=currency)
+                # Тянем удвоенный период для week-over-week сравнения в инсайтах
+                full_history_payload = db.get_period_payload(
+                    telegram_id, days=days * 2, end_date=local_now.date()
+                )
                 title = _tr(
                     lang,
                     "📊 Месячный отчет" if frequency == "monthly" else "📊 Недельный отчет",
                     "📊 Oylik hisobot" if frequency == "monthly" else "📊 Haftalik hisobot",
                 )
-                await bot.send_message(
-                    telegram_id,
-                    f"{title}\n\n{_h(summary)}",
-                    reply_markup=back_to_menu_keyboard(lang),
+                bundle = build_report_bundle(
+                    payload,
+                    currency=currency,
+                    lang=lang,
+                    ai=ai_service,
+                    title_prefix=title,
+                    full_finance_history=full_history_payload.get("finance_entries", []),
                 )
+                caption = _h(bundle.text)
+                if bundle.insight:
+                    caption += f"\n\n💡 <i>{_h(bundle.insight)}</i>"
+
+                if bundle.chart:
+                    await bot.send_photo(
+                        telegram_id,
+                        BufferedInputFile(bundle.chart, filename="report.png"),
+                        caption=caption[:1024],  # лимит caption
+                        reply_markup=back_to_menu_keyboard(lang),
+                    )
+                    # Если caption обрезан — отправим остаток отдельным сообщением
+                    if len(caption) > 1024:
+                        await bot.send_message(telegram_id, caption[1024:])
+                else:
+                    await bot.send_message(
+                        telegram_id,
+                        caption,
+                        reply_markup=back_to_menu_keyboard(lang),
+                    )
 
                 db.save_report_preferences(
                     telegram_id,

@@ -779,6 +779,72 @@ class Database:
     def list_users(self) -> list[dict[str, Any]]:
         return self.client.table(self._table("users")).select("telegram_id,timezone,currency,language").execute().data or []
 
+    # ---------- habit logs per single habit (для streaks) ----------
+    def list_habit_logs_for_habit(self, habit_id: str, *, days: int = 365) -> list[dict[str, Any]]:
+        start = (date.today() - timedelta(days=days - 1)).isoformat()
+        return (
+            self.client.table(self._table("habit_logs"))
+            .select("log_date,completed")
+            .eq("habit_id", habit_id)
+            .gte("log_date", start)
+            .order("log_date", desc=False)
+            .execute()
+            .data
+            or []
+        )
+
+    # ---------- badges ----------
+    def list_badges(self, telegram_id: int, category: str | None = None) -> list[dict[str, Any]]:
+        try:
+            query = (
+                self.client.table(self._table("badges"))
+                .select("*")
+                .eq("telegram_id", telegram_id)
+                .order("unlocked_at", desc=False)
+            )
+            if category:
+                query = query.eq("category", category)
+            return query.execute().data or []
+        except Exception:
+            # Таблица badges может отсутствовать на этапе миграции — не падаем
+            return []
+
+    def unlock_badge(
+        self,
+        telegram_id: int,
+        badge_key: str,
+        *,
+        category: str,
+        threshold: int,
+        ref_id: str | None = None,
+    ) -> bool:
+        """Возвращает True, если бейдж только что выдан (его раньше не было)."""
+        try:
+            existing = (
+                self.client.table(self._table("badges"))
+                .select("id")
+                .eq("telegram_id", telegram_id)
+                .eq("badge_key", badge_key)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if existing:
+                return False
+            self.client.table(self._table("badges")).insert(
+                {
+                    "telegram_id": telegram_id,
+                    "badge_key": badge_key,
+                    "category": category,
+                    "ref_id": ref_id,
+                    "threshold": int(threshold),
+                }
+            ).execute()
+            return True
+        except Exception:
+            return False
+
     def get_period_payload(
         self,
         telegram_id: int,
