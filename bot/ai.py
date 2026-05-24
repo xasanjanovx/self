@@ -2,7 +2,10 @@
 
 import base64
 import json
+import logging
+import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,21 @@ from typing import Any
 import httpx
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
+
+
+# ---- Retry config for Gemini API ----
+_GEMINI_RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+_GEMINI_MAX_ATTEMPTS = 4
+_GEMINI_BASE_DELAY = 1.0   # секунды для экспоненциального backoff
+_GEMINI_MAX_DELAY = 16.0
+
+
+def _gemini_backoff_delay(attempt: int) -> float:
+    """Экспоненциальный backoff с лёгким jitter, чтобы не синхронизировать retry."""
+    delay = min(_GEMINI_BASE_DELAY * (2 ** (attempt - 1)), _GEMINI_MAX_DELAY)
+    return delay + random.uniform(0, delay * 0.25)
 
 
 @dataclass
@@ -677,19 +695,32 @@ class AIService:
             "Content-Type": "application/json",
         }
 
-        last_error: Exception | None = None
-        for attempt in range(2):
+        last_exc: Exception | None = None
+        for attempt in range(1, _GEMINI_MAX_ATTEMPTS + 1):
             try:
                 response = self._client.post(url, headers=headers, json=payload)
+                if response.status_code in _GEMINI_RETRY_STATUSES:
+                    raise httpx.HTTPStatusError(
+                        f"Gemini transient {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
                 response.raise_for_status()
                 data = response.json()
                 break
-            except Exception as exc:
-                last_error = exc
-                if attempt >= 1:
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
+                last_exc = exc
+                if attempt >= _GEMINI_MAX_ATTEMPTS:
+                    logger.error("Gemini call failed after %d attempts (%s): %s", attempt, model, exc)
                     raise
-        else:
-            raise ValueError(f"Gemini request failed: {last_error}")
+                delay = _gemini_backoff_delay(attempt)
+                logger.warning(
+                    "Gemini transient error on attempt %d/%d (%s): %s — retrying in %.2fs",
+                    attempt, _GEMINI_MAX_ATTEMPTS, model, exc, delay,
+                )
+                time.sleep(delay)
+        else:  # pragma: no cover — break без присвоения data
+            raise last_exc or RuntimeError("Gemini failed without exception")
 
         candidates = data.get("candidates") or []
         if not candidates:

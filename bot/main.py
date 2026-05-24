@@ -27,6 +27,8 @@ from aiogram.types import (
 from .ai import AIService, CalorieEstimate
 from .config import load_settings
 from .db import Database
+from .middlewares import ThrottleMiddleware, global_error_handler
+from .workers import reminder_worker
 from .keyboards import (
     back_to_menu_keyboard,
     calorie_confirm_keyboard,
@@ -4000,6 +4002,12 @@ async def weekly_report_worker(bot: Bot) -> None:
 async def on_startup(bot: Bot) -> None:
     logger.info('Starting background workers...')
     background_tasks.append(asyncio.create_task(weekly_report_worker(bot), name='weekly-report-worker'))
+    background_tasks.append(
+        asyncio.create_task(
+            reminder_worker(bot, db, check_seconds=settings.reminder_check_seconds),
+            name='reminder-worker',
+        )
+    )
 
 
 async def on_shutdown() -> None:
@@ -4028,6 +4036,20 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    # Throttling — мягкий лимит, чтобы спам не валил Supabase/Gemini.
+    # Hot prefixes — чаще нажимаемые callback'и (финансы, привычки, питание).
+    throttle = ThrottleMiddleware(
+        rate=0.5,
+        hot_rate=0.25,
+        hot_callback_prefixes=("fin:", "habit:", "kcal:", "calorie:", "menu:"),
+    )
+    dp.message.middleware(throttle)
+    dp.callback_query.middleware(throttle)
+
+    # Глобальный error handler — ловит всё, что упало в любом хендлере.
+    dp.errors.register(global_error_handler)
+
     dp.include_router(router)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
