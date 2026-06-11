@@ -27,6 +27,41 @@ _chart: dict[int, int] = {}
 # chat_id -> last reminder message id; keep at most one alive
 _reminder: dict[int, int] = {}
 
+# Optional persistence so the single screen survives restarts.
+# load(chat_id) -> int | None ; save(chat_id, message_id) -> None
+_load_screen = None
+_save_screen = None
+
+
+def configure_persistence(load=None, save=None) -> None:
+    global _load_screen, _save_screen
+    _load_screen = load
+    _save_screen = save
+
+
+def _get_screen(chat_id: int) -> int | None:
+    if chat_id in _screen:
+        return _screen[chat_id]
+    if _load_screen is not None:
+        try:
+            mid = _load_screen(chat_id)
+        except Exception:
+            mid = None
+        if mid:
+            _screen[chat_id] = int(mid)
+            return int(mid)
+    return None
+
+
+def _set_screen(chat_id: int, message_id: int) -> None:
+    prev = _screen.get(chat_id)
+    _screen[chat_id] = message_id
+    if message_id != prev and _save_screen is not None:
+        try:
+            _save_screen(chat_id, message_id)
+        except Exception:
+            pass
+
 
 async def _safe_delete(bot: Bot, chat_id: int, message_id: int | None) -> None:
     if not message_id:
@@ -45,7 +80,7 @@ def track_screen(chat_id: int, message_id: int | None) -> None:
     """
     if not message_id:
         return
-    _screen[chat_id] = message_id
+    _set_screen(chat_id, message_id)
     pending = _ephemerals.get(chat_id)
     if pending and message_id in pending:
         pending.remove(message_id)
@@ -66,7 +101,7 @@ async def show_screen(
     otherwise replace it. Clears any transient messages first."""
     await clear_ephemerals(bot, chat_id)
 
-    old = _screen.get(chat_id)
+    old = _get_screen(chat_id)
     if old:
         try:
             await bot.edit_message_text(
@@ -80,7 +115,7 @@ async def show_screen(
             await _safe_delete(bot, chat_id, old)
 
     msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
-    _screen[chat_id] = msg.message_id
+    _set_screen(chat_id, msg.message_id)
     return msg.message_id
 
 

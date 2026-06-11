@@ -88,6 +88,47 @@ class Database:
             lang = "ru"
         self.client.table(self._table("users")).update({"language": lang}).eq("telegram_id", telegram_id).execute()
 
+    def _users_has_screen_col(self) -> bool:
+        cached = self._table_cache.get("__users_screen_col")
+        if cached is not None:
+            return cached
+        try:
+            self.client.table(self._table("users")).select("screen_message_id").limit(1).execute()
+            ok = True
+        except Exception:
+            ok = False
+        self._table_cache["__users_screen_col"] = ok
+        return ok
+
+    def get_screen_message_id(self, telegram_id: int) -> int | None:
+        if not self._users_has_screen_col():
+            return None
+        try:
+            rows = (
+                self.client.table(self._table("users"))
+                .select("screen_message_id")
+                .eq("telegram_id", telegram_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if rows and rows[0].get("screen_message_id") is not None:
+                return int(rows[0]["screen_message_id"])
+        except Exception:
+            logger.exception("get_screen_message_id failed")
+        return None
+
+    def set_screen_message_id(self, telegram_id: int, message_id: int | None) -> None:
+        if not self._users_has_screen_col():
+            return
+        try:
+            self.client.table(self._table("users")).update(
+                {"screen_message_id": message_id}
+            ).eq("telegram_id", telegram_id).execute()
+        except Exception:
+            logger.exception("set_screen_message_id failed")
+
     def _is_internal_goal_title(self, title: str) -> bool:
         return (
             title.startswith(self._nutri_prefix)

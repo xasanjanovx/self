@@ -73,6 +73,12 @@ ai_service = AIService(settings)
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Persist the single "live screen" id so the menu survives restarts (no dupes).
+screen_mod.configure_persistence(
+    load=db.get_screen_message_id,
+    save=db.set_screen_message_id,
+)
+
 background_tasks: list[asyncio.Task[Any]] = []
 
 GOAL_TYPE_ALIASES = {
@@ -2348,7 +2354,7 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
         "📊 <b>/dashboard</b> — grafikli tahlil\n\n"
         "Buyruqlar: /menu · /dashboard · /help",
     )
-    await message.answer(help_text, reply_markup=back_to_menu_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, help_text, back_to_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == 'noop')
@@ -3250,9 +3256,11 @@ async def msg_habit_add(message: Message, state: FSMContext) -> None:
     _, tz_name, _ = _user_profile(message.from_user.id)
     habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
     streaks = _compute_habit_streaks(habits, _today_local(tz_name))
-    await message.answer(
+    await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         _habits_text(habits, lang, streaks=streaks),
-        reply_markup=habits_keyboard(habits, lang),
+        habits_keyboard(habits, lang),
     )
 
 
@@ -3288,6 +3296,7 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
         streak_after = streak_before
 
     crossed = streaks_mod.newly_crossed_thresholds(streak_before, streak_after)
+    unlocked_badges: list[str] = []
     for threshold in crossed:
         badge_key = streaks_mod.habit_badge_key(habit_id, threshold)
         unlocked = db.unlock_badge(
@@ -3298,16 +3307,7 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
             ref_id=habit_id,
         )
         if unlocked:
-            try:
-                await callback.message.answer(
-                    _tr(
-                        lang,
-                        f"🎉 <b>Новый бейдж!</b>\n\n{_h(streaks_mod.badge_label(threshold, 'ru'))}\n\nТы держишь серию {streak_after} дней подряд!",
-                        f"🎉 <b>Yangi nishon!</b>\n\n{_h(streaks_mod.badge_label(threshold, 'uz'))}\n\nSiz {streak_after} kun ketma-ket seriyani saqlab turibsiz!",
-                    )
-                )
-            except Exception:
-                logger.exception('Badge notify failed')
+            unlocked_badges.append(streaks_mod.badge_label(threshold, lang))
 
     habits = db.list_today_habits(callback.from_user.id, tz_name=tz_name)
     streaks = _compute_habit_streaks(habits, today)
@@ -3316,7 +3316,17 @@ async def cb_habit_done(callback: CallbackQuery) -> None:
         _habits_text(habits, lang, streaks=streaks),
         reply_markup=habits_keyboard(habits, lang),
     )
-    await callback.answer(_tr(lang, 'Отмечено', 'Belgilandi'))
+    if unlocked_badges:
+        await callback.answer(
+            _tr(
+                lang,
+                f"🎉 Новый бейдж: {', '.join(unlocked_badges)}! Серия {streak_after} дн.",
+                f"🎉 Yangi nishon: {', '.join(unlocked_badges)}! Seriya {streak_after} kun.",
+            ),
+            show_alert=True,
+        )
+    else:
+        await callback.answer(_tr(lang, 'Отмечено', 'Belgilandi'))
 
 
 @router.callback_query(F.data == 'menu:checkin')
@@ -3391,9 +3401,11 @@ async def msg_goal_add(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     goals = db.list_goals(message.from_user.id, only_active=True)
-    await message.answer(
+    await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         _tr(lang, "Цель добавлена.\n", "Maqsad qo'shildi.\n") + _goals_text(goals, lang),
-        reply_markup=goals_keyboard(lang),
+        goals_keyboard(lang),
     )
 
 
@@ -3576,9 +3588,11 @@ async def cmd_report(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.clear()
     text, prefs, lang, period = _report_panel_text(message.from_user.id, period="week")
-    await message.answer(
+    await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         text,
-        reply_markup=report_settings_keyboard(
+        report_settings_keyboard(
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
@@ -3642,10 +3656,13 @@ async def cmd_vacancy(message: Message, state: FSMContext) -> None:
         pending_vacancy_preview_photo_id=None,
         panel_message_id=None,
     )
-    await message.answer(
+    mid = await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         build_vacancy_panel_text(lang),
-        reply_markup=vacancy_panel_keyboard(lang),
+        vacancy_panel_keyboard(lang),
     )
+    await state.update_data(panel_message_id=mid)
 
 
 @router.message(BotStates.waiting_vacancy_input)
@@ -3967,7 +3984,7 @@ async def msg_trainer_profile(message: Message, state: FSMContext) -> None:
 
     await safe_delete_message(message)
     await state.clear()
-    await message.answer(plan, reply_markup=trainer_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, plan, trainer_keyboard(lang))
 
 
 @router.message(BotStates.waiting_trainer_profile)
@@ -4261,30 +4278,21 @@ async def _send_not_understood(
     *,
     transcript: str | None = None,
 ) -> None:
-    """Reply with a helpful hint and the main menu.
-
-    We never silently delete a user's message: if the bot cannot route the
-    input, it must tell the user what to do instead of staying quiet.
-    """
-    hint = _tr(
-        lang,
-        "Не понял сообщение 🤔 Выбери раздел в меню ниже 👇\n\n"
-        "Подсказки:\n"
-        "• 🍽️ Питание: пришли фото еды, текст «омлет и кофе» или голосовое\n"
-        "• 💰 Финансы: «расход 25000 еда» или «доход 300000 зарплата»\n"
-        "• 📣 Вакансия: пришли текст вакансии\n"
-        "• 🤖 AI: открой раздел «Тренер», чтобы задать вопрос",
-        "Xabarni tushunmadim 🤔 Quyidagi menyudan bo'lim tanlang 👇\n\n"
-        "Maslahatlar:\n"
-        "• 🍽️ Oziqlanish: ovqat rasmi, «omlet va kofe» matni yoki ovozli xabar\n"
-        "• 💰 Moliya: «chiqim 25000 ovqat» yoki «kirim 300000 oylik»\n"
-        "• 📣 Vakansiya: vakansiya matnini yuboring\n"
-        "• 🤖 AI: savol berish uchun «Trener» bo'limini oching",
-    )
+    """Short transient notice. The user's message is already deleted by the
+    caller; we only show a brief, self-clearing hint without spawning a menu."""
     if transcript:
-        prefix = _tr(lang, "🎙️ Распознано: ", "🎙️ Aniqlandi: ")
-        hint = f"{prefix}<i>{_h(transcript[:200])}</i>\n\n{hint}"
-    await screen_mod.send_ephemeral(message.bot, message.chat.id, hint, main_menu_keyboard(lang))
+        notice = _tr(
+            lang,
+            f"❌ Не понял: «{_h(transcript[:80])}». Открой меню — /menu",
+            f"❌ Tushunmadim: «{_h(transcript[:80])}». Menyu — /menu",
+        )
+    else:
+        notice = _tr(
+            lang,
+            "❌ Непонятное сообщение. Открой меню — /menu",
+            "❌ Tushunarsiz xabar. Menyu — /menu",
+        )
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, notice)
 
 
 @router.message()
