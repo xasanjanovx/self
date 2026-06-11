@@ -57,6 +57,7 @@ from .keyboards import (
 from .reports import build_report_bundle, build_weekly_summary
 from . import charts as charts_mod
 from . import streaks as streaks_mod
+from . import screen as screen_mod
 from .states import BotStates
 from .vacancy import (
     VACANCY_DEFAULT_REGION_TAG,
@@ -1815,7 +1816,7 @@ async def send_main_menu(message: Message, telegram_id: int) -> None:
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    await message.answer(text, reply_markup=main_menu_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, text, main_menu_keyboard(lang))
 
 
 async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
@@ -1829,12 +1830,15 @@ async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
     except Exception:
         logger.exception('build_dashboard_text failed in edit_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
+    chat_id = callback.message.chat.id
+    screen_mod.track_screen(chat_id, callback.message.message_id)
+    await screen_mod.clear_ephemerals(callback.bot, chat_id)
     try:
         await callback.message.edit_text(text, reply_markup=main_menu_keyboard(lang))
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
             return
-        await callback.message.answer(text, reply_markup=main_menu_keyboard(lang))
+        await screen_mod.show_screen(callback.bot, chat_id, text, main_menu_keyboard(lang))
 
 
 async def safe_edit_message(
@@ -1844,17 +1848,21 @@ async def safe_edit_message(
 ) -> None:
     if callback.message is None:
         return
+    chat_id = callback.message.chat.id
+    screen_mod.track_screen(chat_id, callback.message.message_id)
+    await screen_mod.clear_ephemerals(callback.bot, chat_id)
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup)
     except Exception as exc:
         if "message is not modified" in str(exc).lower():
             return
-        await callback.message.answer(text, reply_markup=reply_markup)
+        await screen_mod.show_screen(callback.bot, chat_id, text, reply_markup)
 
 
 async def _remember_panel(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message:
         await state.update_data(panel_message_id=callback.message.message_id)
+        screen_mod.track_screen(callback.message.chat.id, callback.message.message_id)
 
 
 async def _edit_panel_from_state(
@@ -1863,24 +1871,8 @@ async def _edit_panel_from_state(
     text: str,
     reply_markup: InlineKeyboardMarkup,
 ) -> None:
-    data = await state.get_data()
-    panel_message_id = data.get('panel_message_id')
-    if panel_message_id is not None:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=int(panel_message_id),
-                text=text,
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception as exc:
-            if "message is not modified" in str(exc).lower():
-                return
-            pass
-
-    sent = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(panel_message_id=sent.message_id)
+    message_id = await screen_mod.show_screen(message.bot, message.chat.id, text, reply_markup)
+    await state.update_data(panel_message_id=message_id)
 
 
 async def force_remove_reply_keyboard(message: Message) -> None:
@@ -2040,15 +2032,17 @@ async def _open_calorie_from_message(message: Message, state: FSMContext, lang: 
     profile = db.get_nutrition_profile(message.from_user.id)
     if not profile:
         await state.set_state(BotStates.waiting_nutrition_goal)
-        sent = await message.answer(build_nutrition_setup_text(lang), reply_markup=nutrition_goal_keyboard(lang))
-        await state.update_data(panel_message_id=sent.message_id, pending_nutri_goal=None)
+        mid = await screen_mod.show_screen(
+            message.bot, message.chat.id, build_nutrition_setup_text(lang), nutrition_goal_keyboard(lang)
+        )
+        await state.update_data(panel_message_id=mid, pending_nutri_goal=None)
         return
 
     text, entries = build_calorie_panel(message.from_user.id)
-    sent = await message.answer(text, reply_markup=calorie_panel_keyboard(entries, lang))
+    mid = await screen_mod.show_screen(message.bot, message.chat.id, text, calorie_panel_keyboard(entries, lang))
     await state.set_state(BotStates.waiting_calorie_input)
     await state.update_data(
-        panel_message_id=sent.message_id,
+        panel_message_id=mid,
         pending_calorie=None,
         pending_calorie_items=None,
         pending_nutri_goal=None,
@@ -2057,16 +2051,18 @@ async def _open_calorie_from_message(message: Message, state: FSMContext, lang: 
 
 async def _open_finance_from_message(message: Message, state: FSMContext, lang: str) -> None:
     text, entries = build_finance_panel(message.from_user.id)
-    sent = await message.answer(text, reply_markup=finance_panel_keyboard(entries, lang))
+    mid = await screen_mod.show_screen(message.bot, message.chat.id, text, finance_panel_keyboard(entries, lang))
     await state.set_state(BotStates.waiting_finance_input)
-    await state.update_data(panel_message_id=sent.message_id, pending_finance_items=None, pending_finance_source=None)
+    await state.update_data(panel_message_id=mid, pending_finance_items=None, pending_finance_source=None)
 
 
 async def _open_vacancy_from_message(message: Message, state: FSMContext, lang: str) -> None:
-    sent = await message.answer(build_vacancy_panel_text(lang), reply_markup=vacancy_panel_keyboard(lang))
+    mid = await screen_mod.show_screen(
+        message.bot, message.chat.id, build_vacancy_panel_text(lang), vacancy_panel_keyboard(lang)
+    )
     await state.set_state(BotStates.waiting_vacancy_input)
     await state.update_data(
-        panel_message_id=sent.message_id,
+        panel_message_id=mid,
         pending_vacancy_post=None,
         pending_vacancy_contact_url=None,
         pending_vacancy_preview_photo_id=None,
@@ -2077,21 +2073,23 @@ async def _open_habits_from_message(message: Message, state: FSMContext, lang: s
     _, tz_name, _ = _user_profile(message.from_user.id)
     habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
     await state.clear()
-    await message.answer(_habits_text(habits, lang), reply_markup=habits_keyboard(habits, lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, _habits_text(habits, lang), habits_keyboard(habits, lang))
 
 
 async def _open_goals_from_message(message: Message, state: FSMContext, lang: str) -> None:
     goals = db.list_goals(message.from_user.id, only_active=True)
     await state.clear()
-    await message.answer(_goals_text(goals, lang), reply_markup=goals_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, _goals_text(goals, lang), goals_keyboard(lang))
 
 
 async def _open_report_from_message(message: Message, state: FSMContext, lang: str) -> None:
     await state.clear()
     text, prefs, _, period = _report_panel_text(message.from_user.id, period="week")
-    await message.answer(
+    await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         text,
-        reply_markup=report_settings_keyboard(
+        report_settings_keyboard(
             lang,
             frequency=str(prefs.get("frequency") or "weekly"),
             enabled=bool(prefs.get("enabled", True)),
@@ -2102,7 +2100,9 @@ async def _open_report_from_message(message: Message, state: FSMContext, lang: s
 
 async def _open_trainer_from_message(message: Message, state: FSMContext, lang: str) -> None:
     await state.clear()
-    await message.answer(
+    await screen_mod.show_screen(
+        message.bot,
+        message.chat.id,
         _tr(
             lang,
             "🏋️ <b>Тренер / Персональный модуль</b>\n\n"
@@ -2112,7 +2112,7 @@ async def _open_trainer_from_message(message: Message, state: FSMContext, lang: 
             "Maqsadni tanlang. Keyin bot <b>vazn;bo'y;yosh</b> so'rab haftalik reja tuzadi.\n"
             "<i>Rejada yuklama, dam olish va mashqlar texnikasi havolalari bo'ladi.</i>",
         ),
-        reply_markup=trainer_keyboard(lang),
+        trainer_keyboard(lang),
     )
 
 
@@ -2145,12 +2145,14 @@ async def _answer_data_question(message: Message, lang: str, question: str) -> N
         answer = await asyncio.to_thread(ai_service.assistant_reply, question, context, lang)
     except Exception:
         logger.exception("assistant_reply failed")
-        await message.answer(
+        await screen_mod.send_ephemeral(
+            message.bot,
+            message.chat.id,
             _tr(lang, "Не смог посчитать сейчас, попробуй позже.", "Hozir hisoblay olmadim, keyinroq urining."),
-            reply_markup=back_to_menu_keyboard(lang),
+            back_to_menu_keyboard(lang),
         )
         return
-    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, answer, back_to_menu_keyboard(lang))
 
 
 async def _handle_ai_inbox_route(
@@ -2229,13 +2231,15 @@ async def _handle_ai_inbox_route(
                 context = db.get_ai_context(message.from_user.id)
                 answer = await asyncio.to_thread(ai_service.trainer_reply, cleaned_text, context, lang)
             except Exception as exc:
-                await message.answer(
+                await screen_mod.send_ephemeral(
+                    message.bot,
+                    message.chat.id,
                     f"{_tr(lang, 'Ошибка тренера', 'Trener xatosi')}: {_h(exc)}",
-                    reply_markup=back_to_menu_keyboard(lang),
+                    back_to_menu_keyboard(lang),
                 )
                 return True
             await state.clear()
-            await message.answer(answer, reply_markup=trainer_keyboard(lang))
+            await screen_mod.send_ephemeral(message.bot, message.chat.id, answer, trainer_keyboard(lang))
             return True
         await _open_trainer_from_message(message, state, lang)
         return True
@@ -2257,9 +2261,11 @@ async def _handle_ai_inbox_route(
             _, tz_name, _ = _user_profile(message.from_user.id)
             habits = db.list_today_habits(message.from_user.id, tz_name=tz_name)
             await state.clear()
-            await message.answer(
+            await screen_mod.show_screen(
+                message.bot,
+                message.chat.id,
                 _tr(lang, "Привычка добавлена.\n", "Odat qo'shildi.\n") + _habits_text(habits, lang),
-                reply_markup=habits_keyboard(habits, lang),
+                habits_keyboard(habits, lang),
             )
             return True
         await _open_habits_from_message(message, state, lang)
@@ -2273,9 +2279,11 @@ async def _handle_ai_inbox_route(
             db.add_goal(message.from_user.id, goal_type=goal_type, title=title, target_value=target_value)
             goals = db.list_goals(message.from_user.id, only_active=True)
             await state.clear()
-            await message.answer(
+            await screen_mod.show_screen(
+                message.bot,
+                message.chat.id,
                 _tr(lang, "Цель добавлена.\n", "Maqsad qo'shildi.\n") + _goals_text(goals, lang),
-                reply_markup=goals_keyboard(lang),
+                goals_keyboard(lang),
             )
             return True
         await _open_goals_from_message(message, state, lang)
@@ -4016,7 +4024,7 @@ async def msg_trainer_question(message: Message, state: FSMContext) -> None:
 
     await safe_delete_message(message)
     await state.clear()
-    await message.answer(answer, reply_markup=trainer_keyboard(lang))
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, answer, trainer_keyboard(lang))
 
 
 @router.callback_query(F.data == 'menu:export')
@@ -4033,7 +4041,7 @@ async def cmd_export(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.clear()
     lang = _lang_for_user_id(message.from_user.id)
-    await message.answer(_tr(lang, "Экспорт отключен в этой версии.", "Eksport bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, _tr(lang, "Экспорт отключен в этой версии.", "Eksport bu versiyada o'chirilgan."), main_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == 'menu:ai')
@@ -4050,7 +4058,7 @@ async def cmd_ai(message: Message, state: FSMContext) -> None:
     await safe_delete_message(message)
     await state.clear()
     lang = _lang_for_user_id(message.from_user.id)
-    await message.answer(_tr(lang, "AI-помощник отключен в этой версии.", "AI yordamchi bu versiyada o'chirilgan."), reply_markup=main_menu_keyboard(lang))
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, _tr(lang, "AI-помощник отключен в этой версии.", "AI yordamchi bu versiyada o'chirilgan."), main_menu_keyboard(lang))
 
 
 @router.message(BotStates.waiting_ai_question, F.text)
@@ -4131,15 +4139,15 @@ async def _send_dashboard(target: Message, telegram_id: int, period_code: str) -
 
     kb = _dashboard_keyboard(period_code, lang)
     if bundle.chart:
-        await target.answer_photo(
+        await screen_mod.send_chart(
+            target.bot,
+            target.chat.id,
             BufferedInputFile(bundle.chart, filename="dashboard.png"),
             caption=text[:1024],
             reply_markup=kb,
         )
-        if len(text) > 1024:
-            await target.answer(text[1024:])
     else:
-        await target.answer(text, reply_markup=kb)
+        await screen_mod.show_screen(target.bot, target.chat.id, text, kb)
 
 
 @router.message(Command("dashboard"))
@@ -4217,15 +4225,19 @@ async def _send_dashboard_chart(target: Message, telegram_id: int, kind: str, pe
 
     kb = _dashboard_keyboard(period_code, lang)
     if chart_bytes:
-        await target.answer_photo(
+        await screen_mod.send_chart(
+            target.bot,
+            target.chat.id,
             BufferedInputFile(chart_bytes, filename=f"{kind}.png"),
             caption=caption,
             reply_markup=kb,
         )
     else:
-        await target.answer(
+        await screen_mod.send_ephemeral(
+            target.bot,
+            target.chat.id,
             _tr(lang, "Недостаточно данных для графика.", "Grafik uchun maʼlumot yetarli emas."),
-            reply_markup=kb,
+            kb,
         )
 
 
@@ -4272,7 +4284,7 @@ async def _send_not_understood(
     if transcript:
         prefix = _tr(lang, "🎙️ Распознано: ", "🎙️ Aniqlandi: ")
         hint = f"{prefix}<i>{_h(transcript[:200])}</i>\n\n{hint}"
-    await message.answer(hint, reply_markup=main_menu_keyboard(lang))
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, hint, main_menu_keyboard(lang))
 
 
 @router.message()
@@ -4336,6 +4348,7 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
         if await _handle_ai_inbox_route(message, state, raw_text, lang):
             return
 
+        await safe_delete_message(message)
         await _send_not_understood(message, lang)
         return
 
@@ -4360,12 +4373,15 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
                 return
             if await _handle_ai_inbox_route(message, state, transcript, lang, has_voice=True):
                 return
+            await safe_delete_message(message)
             await _send_not_understood(message, lang, transcript=transcript)
             return
 
+        await safe_delete_message(message)
         await _send_not_understood(message, lang)
         return
 
+    await safe_delete_message(message)
     await _send_not_understood(message, lang)
 
 

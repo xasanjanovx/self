@@ -9,6 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
 from .db import Database
+from . import screen as screen_mod
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ async def reminder_worker(bot: Bot, db: Database, check_seconds: int = 60) -> No
                 if not telegram_id or not text:
                     continue
                 try:
-                    await bot.send_message(telegram_id, f"⏰ {text}")
+                    await screen_mod.send_reminder(bot, telegram_id, f"⏰ {text}")
                 except TelegramForbiddenError:
                     logger.info("Skip reminder: user %s blocked the bot", telegram_id)
                 except TelegramRetryAfter as exc:
