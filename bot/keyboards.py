@@ -4,7 +4,41 @@ import re
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from . import emoji as _pe
+
 Lang = str
+
+
+def _btn(
+    text: str,
+    callback_data: str | None = None,
+    *,
+    url: str | None = None,
+    style: str | None = None,
+    icon: str | None = None,
+) -> InlineKeyboardButton:
+    """Build an inline button with optional Bot API 9.4 color style and a
+    premium-emoji icon. aiogram passes unknown fields through, so this works
+    without a library upgrade."""
+    kwargs: dict[str, object] = {"text": text}
+    if callback_data is not None:
+        kwargs["callback_data"] = callback_data
+    if url is not None:
+        kwargs["url"] = url
+    if style:
+        kwargs["style"] = style
+    if icon:
+        kwargs["icon_custom_emoji_id"] = icon
+    return InlineKeyboardButton(**kwargs)
+
+
+_LEADING_SYMBOLS = re.compile(r"^[^\w(]+", re.UNICODE)
+
+
+def _label(text: str) -> str:
+    """Strip a leading unicode emoji so a button icon doesn't double up."""
+    cleaned = _LEADING_SYMBOLS.sub("", text).strip()
+    return cleaned or text
 
 TEXTS: dict[Lang, dict[str, str]] = {
     "ru": {
@@ -147,27 +181,28 @@ def _money(value: float) -> str:
 
 
 def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    P = "primary"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "menu_nutrition"), callback_data="menu:calorie"),
-                InlineKeyboardButton(text=_t(lang, "menu_finance"), callback_data="menu:finance"),
+                _btn(_label(_t(lang, "menu_nutrition")), "menu:calorie", style=P),
+                _btn(_label(_t(lang, "menu_finance")), "menu:finance", style=P, icon=_pe.ID_FINANCE),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "menu_habits"), callback_data="menu:habits"),
-                InlineKeyboardButton(text=_t(lang, "menu_goals"), callback_data="menu:goals"),
+                _btn(_label(_t(lang, "menu_habits")), "menu:habits", style=P, icon=_pe.ID_HABITS),
+                _btn(_label(_t(lang, "menu_goals")), "menu:goals", style=P, icon=_pe.ID_GOALS),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "menu_trainer"), callback_data="menu:trainer"),
-                InlineKeyboardButton(text=_t(lang, "menu_report"), callback_data="menu:report"),
+                _btn(_label(_t(lang, "menu_trainer")), "menu:trainer", style=P, icon=_pe.ID_TRAINER),
+                _btn(_label(_t(lang, "menu_report")), "menu:report", style=P, icon=_pe.ID_REPORT),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "menu_vacancy"), callback_data="menu:vacancy"),
-                InlineKeyboardButton(text=_t(lang, "menu_language"), callback_data="menu:language"),
+                _btn(_label(_t(lang, "menu_vacancy")), "menu:vacancy", style=P, icon=_pe.ID_VACANCY),
+                _btn(_label(_t(lang, "menu_language")), "menu:language", style=P, icon=_pe.ID_LANGUAGE),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "menu_analytics"), callback_data="menu:dashboard"),
-                InlineKeyboardButton(text=_t(lang, "menu_refresh"), callback_data="menu:open"),
+                _btn(_label(_t(lang, "menu_analytics")), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
+                _btn(_label(_t(lang, "menu_refresh")), "menu:open", icon=_pe.ID_REFRESH),
             ],
         ]
     )
@@ -194,10 +229,10 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "save"), callback_data="calorie:confirm"),
-                InlineKeyboardButton(text=_t(lang, "cancel"), callback_data="calorie:cancel"),
+                _btn(_t(lang, "save"), "calorie:confirm", style="success"),
+                _btn(_t(lang, "cancel"), "calorie:cancel", style="danger"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="calorie:panel")],
+            [_btn(_t(lang, "back"), "calorie:panel")],
         ]
     )
 
@@ -236,8 +271,8 @@ def calorie_meals_keyboard(entries: list[dict], period: str, lang: str = "ru") -
 def calorie_detail_keyboard(log_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=_t(lang, "delete"), callback_data=f"calorie:ask_del:{log_id}")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="calorie:panel")],
+            [_btn(_t(lang, "delete"), f"calorie:ask_del:{log_id}", style="danger", icon=_pe.ID_DELETE)],
+            [_btn(_t(lang, "back"), "calorie:panel")],
         ]
     )
 
@@ -246,10 +281,10 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "yes_delete"), callback_data=f"calorie:del:{log_id}"),
-                InlineKeyboardButton(text=_t(lang, "no"), callback_data=f"calorie:view:{log_id}"),
+                _btn(_t(lang, "yes_delete"), f"calorie:del:{log_id}", style="danger"),
+                _btn(_t(lang, "no"), f"calorie:view:{log_id}"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="calorie:panel")],
+            [_btn(_t(lang, "back"), "calorie:panel")],
         ]
     )
 
@@ -346,8 +381,8 @@ def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "r
 def finance_detail_keyboard(entry_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=_t(lang, "delete"), callback_data=f"finance:ask_del:{entry_id}")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+            [_btn(_t(lang, "delete"), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)],
+            [_btn(_t(lang, "back"), "menu:finance")],
         ]
     )
 
@@ -356,10 +391,10 @@ def finance_delete_confirm_keyboard(entry_id: str | int, lang: str = "ru") -> In
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "yes_delete"), callback_data=f"finance:del:{entry_id}"),
-                InlineKeyboardButton(text=_t(lang, "no"), callback_data=f"finance:view:{entry_id}"),
+                _btn(_t(lang, "yes_delete"), f"finance:del:{entry_id}", style="danger"),
+                _btn(_t(lang, "no"), f"finance:view:{entry_id}"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+            [_btn(_t(lang, "back"), "menu:finance")],
         ]
     )
 
@@ -368,10 +403,10 @@ def finance_add_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "save"), callback_data="finance:add_confirm"),
-                InlineKeyboardButton(text=_t(lang, "cancel"), callback_data="finance:add_cancel"),
+                _btn(_t(lang, "save"), "finance:add_confirm", style="success"),
+                _btn(_t(lang, "cancel"), "finance:add_cancel", style="danger"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+            [_btn(_t(lang, "back"), "menu:finance")],
         ]
     )
 
@@ -397,11 +432,11 @@ def habits_keyboard(habits: list[dict], lang: str = "ru") -> InlineKeyboardMarku
 
     rows.append(
         [
-            InlineKeyboardButton(text=_t(lang, "add"), callback_data="habit:add"),
-            InlineKeyboardButton(text=_t(lang, "refresh"), callback_data="menu:habits"),
+            _btn(_t(lang, "add"), "habit:add", style="success", icon=_pe.ID_ADD),
+            _btn(_t(lang, "refresh"), "menu:habits"),
         ]
     )
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    rows.append([_btn(_t(lang, "back"), "menu:open")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -459,11 +494,11 @@ def report_settings_keyboard(
             ],
             [InlineKeyboardButton(text=status, callback_data="noop")],
             [
-                InlineKeyboardButton(text=_t(lang, "report_weekly"), callback_data="report:set:weekly"),
-                InlineKeyboardButton(text=_t(lang, "report_monthly"), callback_data="report:set:monthly"),
+                _btn(_t(lang, "report_weekly"), "report:set:weekly", style="primary"),
+                _btn(_t(lang, "report_monthly"), "report:set:monthly", style="primary"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "report_off"), callback_data="report:set:off")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
+            [_btn(_t(lang, "report_off"), "report:set:off", style="danger")],
+            [_btn(_t(lang, "back"), "menu:open")],
         ]
     )
 
@@ -507,11 +542,11 @@ def vacancy_result_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if contact_url:
-        rows.append([InlineKeyboardButton(text=_t(lang, "vacancy_contact"), url=contact_url)])
+        rows.append([_btn(_t(lang, "vacancy_contact"), url=contact_url, style="primary")])
     if show_publish:
-        rows.append([InlineKeyboardButton(text=_t(lang, "vacancy_publish"), callback_data="vacancy:publish")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "vacancy_again"), callback_data="vacancy:again")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+        rows.append([_btn(_t(lang, "vacancy_publish"), "vacancy:publish", style="success")])
+    rows.append([_btn(_t(lang, "vacancy_again"), "vacancy:again")])
+    rows.append([_btn(_t(lang, "back"), "menu:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
