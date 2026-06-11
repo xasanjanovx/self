@@ -1112,6 +1112,29 @@ class AIService:
             temperature=0.3,
         ).strip()
 
+    def assistant_reply(self, question: str, context: dict[str, Any], language: str = "ru") -> str:
+        """Answer a question about the user's own data (finance, nutrition, habits)."""
+        lang = "uzbek" if (language or "").strip().lower() == "uz" else "russian"
+        prompt = (
+            "Ты — персональный ассистент в Telegram-боте по финансам, питанию и привычкам. "
+            "Ответь на вопрос пользователя, опираясь ТОЛЬКО на данные из контекста за последние ~30 дней. "
+            "Аккуратно считай суммы. Если данных не хватает — честно скажи об этом. "
+            f"Пиши на {lang}. Кратко, до 8 строк, с конкретными числами; при необходимости короткий список."
+        )
+        return self._generate_content(
+            model=self.text_model,
+            parts=[
+                {
+                    "text": (
+                        f"{prompt}\n\n"
+                        f"Данные пользователя: {json.dumps(context, ensure_ascii=False, default=str)}\n"
+                        f"Вопрос: {question}"
+                    )
+                }
+            ],
+            temperature=0.2,
+        ).strip()
+
     def trainer_reply(self, question: str, context: dict[str, Any], language: str = "ru") -> str:
         lang = "uzbek" if (language or "").strip().lower() == "uz" else "russian"
         prompt = (

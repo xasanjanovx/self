@@ -2138,6 +2138,21 @@ def _extract_habit_name_from_text(text: str) -> str | None:
     return None
 
 
+async def _answer_data_question(message: Message, lang: str, question: str) -> None:
+    """Answer a free-form question about the user's own data via AI."""
+    try:
+        context = db.get_ai_context(message.from_user.id)
+        answer = await asyncio.to_thread(ai_service.assistant_reply, question, context, lang)
+    except Exception:
+        logger.exception("assistant_reply failed")
+        await message.answer(
+            _tr(lang, "Не смог посчитать сейчас, попробуй позже.", "Hozir hisoblay olmadim, keyinroq urining."),
+            reply_markup=back_to_menu_keyboard(lang),
+        )
+        return
+    await message.answer(answer, reply_markup=back_to_menu_keyboard(lang))
+
+
 async def _handle_ai_inbox_route(
     message: Message,
     state: FSMContext,
@@ -2181,6 +2196,11 @@ async def _handle_ai_inbox_route(
             await state.set_state(BotStates.waiting_finance_input)
             await msg_finance_input(message, state)
             return True
+        if intent.mode == "answer" and cleaned_text:
+            await safe_delete_message(message)
+            await state.clear()
+            await _answer_data_question(message, lang, cleaned_text)
+            return True
         await safe_delete_message(message)
         await _open_finance_from_message(message, state, lang)
         return True
@@ -2222,6 +2242,10 @@ async def _handle_ai_inbox_route(
 
     if intent.module == "report":
         await safe_delete_message(message)
+        if intent.mode == "answer" and cleaned_text:
+            await state.clear()
+            await _answer_data_question(message, lang, cleaned_text)
+            return True
         await _open_report_from_message(message, state, lang)
         return True
 
