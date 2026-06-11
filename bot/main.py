@@ -515,60 +515,60 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     target_f = float(profile.get("fat") or 0)
     target_c = float(profile.get("carbs") or 0)
 
-    left_kcal = max(0.0, target_kcal - totals["calories"])
-    left_p = max(0.0, target_p - totals["protein"])
-    left_f = max(0.0, target_f - totals["fat"])
-    left_c = max(0.0, target_c - totals["carbs"])
+    eaten_kcal = float(totals["calories"])
+    left_kcal = max(0.0, target_kcal - eaten_kcal)
+    kcal_ratio = (eaten_kcal / target_kcal) if target_kcal > 0 else 0.0
+    kcal_pct = int(round(kcal_ratio * 100))
+    kcal_bar = _progress_bar(kcal_ratio)
     title = _h(profile.get("title") or "-")
+
     profile_line = ""
     if profile.get("weight") and profile.get("height") and profile.get("age"):
         if lang == "uz":
             profile_line = (
-                f"Profil: <b>{float(profile['weight']):.1f} kg / {int(float(profile['height']))} sm / {int(profile['age'])} yosh</b>"
+                f"<i>{float(profile['weight']):.1f} kg / {int(float(profile['height']))} sm / {int(profile['age'])} yosh</i>"
             )
         else:
             profile_line = (
-                f"Профиль: <b>{float(profile['weight']):.1f} кг / {int(float(profile['height']))} см / {int(profile['age'])} лет</b>"
+                f"<i>{float(profile['weight']):.1f} кг / {int(float(profile['height']))} см / {int(profile['age'])} лет</i>"
             )
 
     if lang == "uz":
         lines = [
-            "🍽️ <b>Oziqlanish / Professional treker</b>",
+            "🍽️ <b>Oziqlanish</b>",
             f"Maqsad: <b>{title}</b>",
+        ]
+        if profile_line:
+            lines.append(profile_line)
+        lines += [
             "",
-            "<b>Kunlik metrikalar</b>",
-            f"• Qoldiq: <b>{int(left_kcal)}/{int(target_kcal)}</b> kkal",
-            f"• Reja: {int(target_kcal)} kkal | O {int(target_p)} Y {int(target_f)} U {int(target_c)}",
-            f"• Fakt: {int(totals['calories'])} kkal | O {int(totals['protein'])} Y {int(totals['fat'])} U {int(totals['carbs'])}",
-            f"• Qoldiq: {int(left_kcal)} kkal | O {int(left_p)} Y {int(left_f)} U {int(left_c)}",
+            f"{kcal_bar} {kcal_pct}%",
+            f"Yeyildi: <b>{int(eaten_kcal)}</b> / {int(target_kcal)} kkal · qoldi {int(left_kcal)}",
             "",
-            "<i>Taom rasmi, matni yoki ovozli xabar yuboring.</i>",
+            f"🥩 Oqsil {int(totals['protein'])}/{int(target_p)} g",
+            f"🧈 Yog' {int(totals['fat'])}/{int(target_f)} g",
+            f"🍞 Uglevod {int(totals['carbs'])}/{int(target_c)} g",
             "",
+            "<i>📷 Ovqat rasmi, matni yoki ovozli xabar yuboring.</i>",
         ]
     else:
         lines = [
-            "🍽️ <b>Питание / Профессиональный трекер</b>",
+            "🍽️ <b>Питание</b>",
             f"Цель: <b>{title}</b>",
-            "",
-            "<b>Дневные метрики</b>",
-            f"• Осталось: <b>{int(left_kcal)}/{int(target_kcal)}</b> ккал",
-            f"• План: {int(target_kcal)} ккал | Б {int(target_p)} Ж {int(target_f)} У {int(target_c)}",
-            f"• Факт: {int(totals['calories'])} ккал | Б {int(totals['protein'])} Ж {int(totals['fat'])} У {int(totals['carbs'])}",
-            f"• Остаток: {int(left_kcal)} ккал | Б {int(left_p)} Ж {int(left_f)} У {int(left_c)}",
-            "",
-            "<i>Отправь фото, текст или голосовое сообщение с описанием блюда.</i>",
-            "",
         ]
-    if profile_line:
-        lines.insert(2, profile_line)
-        lines.insert(3, "")
-
-    lines.append("")
-    lines.append(
-        "Qabullar ro'yxatini \"Qabullar\" tugmasi orqali oching."
-        if lang == "uz"
-        else "Открой список через кнопку «Приемы» и выбери период: день, неделя или месяц."
-    )
+        if profile_line:
+            lines.append(profile_line)
+        lines += [
+            "",
+            f"{kcal_bar} {kcal_pct}%",
+            f"Съедено: <b>{int(eaten_kcal)}</b> / {int(target_kcal)} ккал · осталось {int(left_kcal)}",
+            "",
+            f"🥩 Белки {int(totals['protein'])}/{int(target_p)} г",
+            f"🧈 Жиры {int(totals['fat'])}/{int(target_f)} г",
+            f"🍞 Углеводы {int(totals['carbs'])}/{int(target_c)} г",
+            "",
+            "<i>📷 Отправь фото, текст или голос с описанием блюда.</i>",
+        ]
     return "\n".join(lines), entries
 
 
