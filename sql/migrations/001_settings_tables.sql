@@ -1,13 +1,9 @@
 -- Migration 001: move profiles/settings out of the goals.title JSON hack
 -- into dedicated tables. Safe to run multiple times (idempotent).
 --
--- STATUS: prepared migration. The bot still reads/writes the legacy
--- goals.title storage today. Adopt in a coordinated step:
---   1. Run this file in Supabase -> SQL Editor (creates tables + backfills data).
---   2. Tell the developer; the db layer is then switched to these tables
---      and verified against your real data (legacy stays as a safe fallback).
--- Running this file alone is harmless: it only creates tables and copies data,
--- it does not change current bot behaviour.
+-- STATUS: ACTIVE. The bot auto-detects these tables and uses them when present,
+-- with the legacy goals.title storage kept as a transparent fallback and for
+-- lazy per-user backfill. Running this file is safe and idempotent.
 --
 -- NOTE: these tables are created WITHOUT a name prefix to match the existing
 -- schema.sql. If you run the bot with DB_TABLE_PREFIX set, add the same prefix

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,8 @@ from zoneinfo import ZoneInfo
 from supabase import Client, create_client
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -19,9 +22,27 @@ class Database:
         self._nutri_prefix = "NUTRI_V1:"
         self._report_pref_prefix = "REPORT_PREF_V1:"
         self._finance_pref_prefix = "FINANCE_PREF_V1:"
+        self._table_cache: dict[str, bool] = {}
 
     def _table(self, name: str) -> str:
         return f"{self.table_prefix}{name}"
+
+    def _table_available(self, name: str) -> bool:
+        """Probe once whether a (migrated) table exists. Cached per process.
+
+        Lets the bot transparently use the new settings tables when they have
+        been created, and fall back to the legacy goals.title storage otherwise.
+        """
+        cached = self._table_cache.get(name)
+        if cached is not None:
+            return cached
+        try:
+            self.client.table(self._table(name)).select("telegram_id").limit(1).execute()
+            available = True
+        except Exception:
+            available = False
+        self._table_cache[name] = available
+        return available
 
     def _zone(self, tz_name: str | None = None) -> ZoneInfo | timezone:
         key = str(tz_name or self.default_timezone or "UTC")
@@ -81,6 +102,81 @@ class Database:
         return query.execute().data or []
 
     def get_nutrition_profile(self, telegram_id: int) -> dict[str, Any] | None:
+        if self._table_available("nutrition_profiles"):
+            try:
+                rows = (
+                    self.client.table(self._table("nutrition_profiles"))
+                    .select("*")
+                    .eq("telegram_id", telegram_id)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                logger.exception("nutrition_profiles read failed; falling back to legacy")
+                return self._legacy_get_nutrition_profile(telegram_id)
+            if rows:
+                return self._shape_nutrition_row(rows[0])
+            legacy = self._legacy_get_nutrition_profile(telegram_id)
+            if legacy:
+                try:
+                    self._save_nutrition_new(telegram_id, legacy)
+                except Exception:
+                    logger.exception("nutrition lazy backfill failed")
+            return legacy
+        return self._legacy_get_nutrition_profile(telegram_id)
+
+    def save_nutrition_profile(self, telegram_id: int, profile: dict[str, Any]) -> None:
+        if self._table_available("nutrition_profiles"):
+            try:
+                self._save_nutrition_new(telegram_id, profile)
+                return
+            except Exception:
+                logger.exception("nutrition_profiles write failed; falling back to legacy")
+        self._legacy_save_nutrition_profile(telegram_id, profile)
+
+    @staticmethod
+    def _shape_nutrition_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "goal_id": None,
+            "mode": row.get("mode"),
+            "title": row.get("title"),
+            "daily_calories": int(row.get("daily_calories") or 0),
+            "protein": row.get("protein"),
+            "fat": row.get("fat"),
+            "carbs": row.get("carbs"),
+            "weight": row.get("weight"),
+            "height": row.get("height"),
+            "age": row.get("age"),
+            "bmi": row.get("bmi"),
+            "tdee": row.get("tdee"),
+        }
+
+    def _save_nutrition_new(self, telegram_id: int, profile: dict[str, Any]) -> None:
+        def _num(key: str) -> float | None:
+            value = profile.get(key)
+            return float(value) if value is not None else None
+
+        payload = {
+            "telegram_id": telegram_id,
+            "mode": profile.get("mode"),
+            "title": profile.get("title"),
+            "daily_calories": int(profile.get("daily_calories") or 0),
+            "protein": _num("protein"),
+            "fat": _num("fat"),
+            "carbs": _num("carbs"),
+            "weight": _num("weight"),
+            "height": _num("height"),
+            "age": int(profile["age"]) if profile.get("age") is not None else None,
+            "bmi": _num("bmi"),
+            "tdee": int(profile["tdee"]) if profile.get("tdee") is not None else None,
+        }
+        self.client.table(self._table("nutrition_profiles")).upsert(
+            payload, on_conflict="telegram_id"
+        ).execute()
+
+    def _legacy_get_nutrition_profile(self, telegram_id: int) -> dict[str, Any] | None:
         goals = self._list_goal_rows(telegram_id, only_active=False)
         for goal in goals:
             title = str(goal.get("title") or "")
@@ -96,8 +192,8 @@ class Database:
             return payload
         return None
 
-    def save_nutrition_profile(self, telegram_id: int, profile: dict[str, Any]) -> None:
-        existing = self.get_nutrition_profile(telegram_id)
+    def _legacy_save_nutrition_profile(self, telegram_id: int, profile: dict[str, Any]) -> None:
+        existing = self._legacy_get_nutrition_profile(telegram_id)
         payload = dict(profile)
         payload["daily_calories"] = int(payload.get("daily_calories") or 0)
         title = self._nutri_prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -138,6 +234,88 @@ class Database:
         return [row for row in rows if not self._is_internal_goal_title(str(row.get("title") or ""))]
 
     def get_report_preferences(self, telegram_id: int) -> dict[str, Any]:
+        if self._table_available("report_preferences"):
+            try:
+                rows = (
+                    self.client.table(self._table("report_preferences"))
+                    .select("*")
+                    .eq("telegram_id", telegram_id)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                logger.exception("report_preferences read failed; falling back to legacy")
+                return self._legacy_get_report_preferences(telegram_id)
+            if rows:
+                row = rows[0]
+                frequency = str(row.get("frequency") or "weekly").strip().lower()
+                if frequency not in {"weekly", "monthly"}:
+                    frequency = "weekly"
+                return {
+                    "goal_id": None,
+                    "enabled": bool(row.get("enabled", True)),
+                    "frequency": frequency,
+                    "last_sent_key": (str(row.get("last_sent_key") or "").strip() or None),
+                }
+            legacy = self._legacy_get_report_preferences(telegram_id)
+            if legacy.get("goal_id"):
+                try:
+                    self._save_report_new(
+                        telegram_id,
+                        enabled=bool(legacy.get("enabled", True)),
+                        frequency=str(legacy.get("frequency") or "weekly"),
+                        last_sent_key=legacy.get("last_sent_key"),
+                    )
+                except Exception:
+                    logger.exception("report prefs lazy backfill failed")
+            legacy["goal_id"] = None
+            return legacy
+        return self._legacy_get_report_preferences(telegram_id)
+
+    def save_report_preferences(
+        self,
+        telegram_id: int,
+        *,
+        enabled: bool,
+        frequency: str,
+        last_sent_key: str | None = None,
+    ) -> dict[str, Any]:
+        freq = str(frequency or "weekly").strip().lower()
+        if freq not in {"weekly", "monthly"}:
+            freq = "weekly"
+        if self._table_available("report_preferences"):
+            try:
+                self._save_report_new(
+                    telegram_id, enabled=enabled, frequency=freq, last_sent_key=last_sent_key
+                )
+                return {"enabled": bool(enabled), "frequency": freq, "last_sent_key": (last_sent_key or None)}
+            except Exception:
+                logger.exception("report_preferences write failed; falling back to legacy")
+        return self._legacy_save_report_preferences(
+            telegram_id, enabled=enabled, frequency=freq, last_sent_key=last_sent_key
+        )
+
+    def _save_report_new(
+        self,
+        telegram_id: int,
+        *,
+        enabled: bool,
+        frequency: str,
+        last_sent_key: str | None,
+    ) -> None:
+        self.client.table(self._table("report_preferences")).upsert(
+            {
+                "telegram_id": telegram_id,
+                "enabled": bool(enabled),
+                "frequency": frequency,
+                "last_sent_key": (last_sent_key or None),
+            },
+            on_conflict="telegram_id",
+        ).execute()
+
+    def _legacy_get_report_preferences(self, telegram_id: int) -> dict[str, Any]:
         rows = self._list_goal_rows(telegram_id, only_active=False)
         for row in rows:
             title = str(row.get("title") or "")
@@ -166,7 +344,7 @@ class Database:
             "last_sent_key": None,
         }
 
-    def save_report_preferences(
+    def _legacy_save_report_preferences(
         self,
         telegram_id: int,
         *,
@@ -174,7 +352,7 @@ class Database:
         frequency: str,
         last_sent_key: str | None = None,
     ) -> dict[str, Any]:
-        current = self.get_report_preferences(telegram_id)
+        current = self._legacy_get_report_preferences(telegram_id)
         freq = str(frequency or "weekly").strip().lower()
         if freq not in {"weekly", "monthly"}:
             freq = "weekly"
@@ -207,6 +385,87 @@ class Database:
         return payload
 
     def get_finance_settings(self, telegram_id: int) -> dict[str, float]:
+        if self._table_available("finance_settings"):
+            try:
+                rows = (
+                    self.client.table(self._table("finance_settings"))
+                    .select("*")
+                    .eq("telegram_id", telegram_id)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception:
+                logger.exception("finance_settings read failed; falling back to legacy")
+                return self._legacy_get_finance_settings(telegram_id)
+            if rows:
+                row = rows[0]
+                return {
+                    "card_base": float(row.get("card_base") or 0.0),
+                    "cash_base": float(row.get("cash_base") or 0.0),
+                    "lent_base": float(row.get("lent_base") or 0.0),
+                    "debt_base": float(row.get("debt_base") or 0.0),
+                    "monthly_credit_payment": float(row.get("monthly_credit_payment") or 0.0),
+                    "goal_id": None,
+                }
+            legacy = self._legacy_get_finance_settings(telegram_id)
+            if legacy.get("goal_id"):
+                try:
+                    self._save_finance_new(telegram_id, legacy)
+                except Exception:
+                    logger.exception("finance settings lazy backfill failed")
+            legacy["goal_id"] = None
+            return legacy
+        return self._legacy_get_finance_settings(telegram_id)
+
+    def save_finance_settings(
+        self,
+        telegram_id: int,
+        *,
+        card_base: float,
+        cash_base: float,
+        lent_base: float,
+        debt_base: float,
+        monthly_credit_payment: float,
+    ) -> dict[str, float]:
+        payload = {
+            "card_base": float(card_base),
+            "cash_base": float(cash_base),
+            "lent_base": float(lent_base),
+            "debt_base": float(debt_base),
+            "monthly_credit_payment": float(monthly_credit_payment),
+        }
+        if self._table_available("finance_settings"):
+            try:
+                self._save_finance_new(telegram_id, payload)
+                payload["goal_id"] = None
+                return payload
+            except Exception:
+                logger.exception("finance_settings write failed; falling back to legacy")
+        return self._legacy_save_finance_settings(
+            telegram_id,
+            card_base=card_base,
+            cash_base=cash_base,
+            lent_base=lent_base,
+            debt_base=debt_base,
+            monthly_credit_payment=monthly_credit_payment,
+        )
+
+    def _save_finance_new(self, telegram_id: int, payload: dict[str, Any]) -> None:
+        self.client.table(self._table("finance_settings")).upsert(
+            {
+                "telegram_id": telegram_id,
+                "card_base": float(payload.get("card_base") or 0.0),
+                "cash_base": float(payload.get("cash_base") or 0.0),
+                "lent_base": float(payload.get("lent_base") or 0.0),
+                "debt_base": float(payload.get("debt_base") or 0.0),
+                "monthly_credit_payment": float(payload.get("monthly_credit_payment") or 0.0),
+            },
+            on_conflict="telegram_id",
+        ).execute()
+
+    def _legacy_get_finance_settings(self, telegram_id: int) -> dict[str, float]:
         rows = self._list_goal_rows(telegram_id, only_active=False)
         for row in reversed(rows):
             title = str(row.get("title") or "")
@@ -234,7 +493,7 @@ class Database:
             "goal_id": None,
         }
 
-    def save_finance_settings(
+    def _legacy_save_finance_settings(
         self,
         telegram_id: int,
         *,
@@ -244,7 +503,7 @@ class Database:
         debt_base: float,
         monthly_credit_payment: float,
     ) -> dict[str, float]:
-        current = self.get_finance_settings(telegram_id)
+        current = self._legacy_get_finance_settings(telegram_id)
         payload = {
             "card_base": float(card_base),
             "cash_base": float(cash_base),
