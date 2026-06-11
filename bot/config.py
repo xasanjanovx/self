@@ -41,28 +41,50 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
-def _gemini_model(name: str, default: str = "gemini-3-flash-preview") -> str:
+def _gemini_model(name: str, default: str = "gemini-3.5-flash") -> str:
+    """Return the configured model name, or a sane default.
+
+    We intentionally trust the value provided via environment variables instead
+    of rewriting it. Hardcoding/overriding model names caused every AI call to
+    hit a non-existent model and fail.
+    """
     value = os.getenv(name, "").strip()
-    if not value:
-        return default
-    lower = value.lower()
-    if lower in {"gemini-3-flash", "gemini-3-flash-preview", "gemini-3.0-flash", "gemini-3.0-flash-preview"}:
-        return default
-    if lower.startswith("gemini-2.5"):
-        return default
-    return value
+    return value or default
+
+
+def _candidate_env_files() -> list[Path]:
+    """Collect .env files from the package root and parent directories.
+
+    Supports both `self/.env` and a repo-root `.env`, as well as the current
+    working directory, so the bot finds credentials regardless of where it is
+    launched from.
+    """
+    here = Path(__file__).resolve()
+    candidate_dirs = [here.parent.parent, here.parent.parent.parent, Path.cwd()]
+
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for directory in candidate_dirs:
+        env_path = (directory / ".env").resolve()
+        if env_path in seen:
+            continue
+        seen.add(env_path)
+        if env_path.exists():
+            files.append(env_path)
+    return files
 
 
 @lru_cache(maxsize=1)
 def load_settings() -> Settings:
-    root_env = Path(__file__).resolve().parent.parent / ".env"
-    load_dotenv(dotenv_path=root_env)
-    load_dotenv()
-    if root_env.exists():
-        for key, value in dotenv_values(root_env, encoding="utf-8-sig").items():
+    # Real environment variables (e.g. Railway Variables) always win.
+    # Local .env files only fill in the gaps, and never override.
+    for env_path in _candidate_env_files():
+        load_dotenv(dotenv_path=env_path, override=False)
+        for key, value in dotenv_values(env_path, encoding="utf-8-sig").items():
             if not key or value is None:
                 continue
             os.environ.setdefault(key, value)
+    load_dotenv(override=False)
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         supabase_url=_required("SUPABASE_URL"),

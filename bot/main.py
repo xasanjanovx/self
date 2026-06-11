@@ -4119,6 +4119,38 @@ async def cb_dashboard_chart(callback: CallbackQuery) -> None:
         await _send_dashboard_chart(callback.message, callback.from_user.id, kind, period_code)
 
 
+async def _send_not_understood(
+    message: Message,
+    lang: str,
+    *,
+    transcript: str | None = None,
+) -> None:
+    """Reply with a helpful hint and the main menu.
+
+    We never silently delete a user's message: if the bot cannot route the
+    input, it must tell the user what to do instead of staying quiet.
+    """
+    hint = _tr(
+        lang,
+        "Не понял сообщение 🤔 Выбери раздел в меню ниже 👇\n\n"
+        "Подсказки:\n"
+        "• 🍽️ Питание: пришли фото еды, текст «омлет и кофе» или голосовое\n"
+        "• 💰 Финансы: «расход 25000 еда» или «доход 300000 зарплата»\n"
+        "• 📣 Вакансия: пришли текст вакансии\n"
+        "• 🤖 AI: открой раздел «Тренер», чтобы задать вопрос",
+        "Xabarni tushunmadim 🤔 Quyidagi menyudan bo'lim tanlang 👇\n\n"
+        "Maslahatlar:\n"
+        "• 🍽️ Oziqlanish: ovqat rasmi, «omlet va kofe» matni yoki ovozli xabar\n"
+        "• 💰 Moliya: «chiqim 25000 ovqat» yoki «kirim 300000 oylik»\n"
+        "• 📣 Vakansiya: vakansiya matnini yuboring\n"
+        "• 🤖 AI: savol berish uchun «Trener» bo'limini oching",
+    )
+    if transcript:
+        prefix = _tr(lang, "🎙️ Распознано: ", "🎙️ Aniqlandi: ")
+        hint = f"{prefix}<i>{_h(transcript[:200])}</i>\n\n{hint}"
+    await message.answer(hint, reply_markup=main_menu_keyboard(lang))
+
+
 @router.message()
 async def fallback_message(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
@@ -4180,6 +4212,9 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
         if await _handle_ai_inbox_route(message, state, raw_text, lang):
             return
 
+        await _send_not_understood(message, lang)
+        return
+
     if message.voice or message.audio:
         try:
             transcript = await _transcribe_message_audio(message)
@@ -4201,12 +4236,13 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
                 return
             if await _handle_ai_inbox_route(message, state, transcript, lang, has_voice=True):
                 return
+            await _send_not_understood(message, lang, transcript=transcript)
+            return
 
-        await state.set_state(BotStates.waiting_calorie_input)
-        await msg_calorie_input_voice(message, state)
+        await _send_not_understood(message, lang)
         return
 
-    await safe_delete_message(message)
+    await _send_not_understood(message, lang)
 
 
 def _report_due_key(local_now: datetime, frequency: str) -> str | None:
@@ -4304,6 +4340,10 @@ async def weekly_report_worker(bot: Bot) -> None:
 
 async def on_startup(bot: Bot) -> None:
     logger.info('Starting background workers...')
+    try:
+        await asyncio.to_thread(ai_service.ensure_models)
+    except Exception:
+        logger.exception('Failed to resolve Gemini models at startup')
     background_tasks.append(asyncio.create_task(weekly_report_worker(bot), name='weekly-report-worker'))
     background_tasks.append(
         asyncio.create_task(

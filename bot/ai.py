@@ -672,6 +672,63 @@ class AIService:
         except Exception:
             pass
 
+    def list_available_models(self) -> set[str]:
+        """Return model names (short form) that support generateContent."""
+        response = self._client.get(self.base_url, headers={"x-goog-api-key": self.api_key})
+        response.raise_for_status()
+        models = response.json().get("models", []) or []
+        names: set[str] = set()
+        for item in models:
+            methods = item.get("supportedGenerationMethods", []) or []
+            if "generateContent" not in methods:
+                continue
+            name = str(item.get("name") or "").split("/")[-1]
+            if name:
+                names.add(name)
+        return names
+
+    def ensure_models(self) -> None:
+        """Self-heal model selection at startup.
+
+        If a configured model is not available for this API key (e.g. an old
+        name left in env vars), fall back to the first working alternative so
+        AI features keep functioning instead of failing with 404.
+        """
+        try:
+            available = self.list_available_models()
+        except Exception as exc:
+            logger.warning("Could not list Gemini models, keeping configured ones: %s", exc)
+            return
+        if not available:
+            return
+
+        preferred = [
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-flash-latest",
+            "gemini-2.0-flash",
+        ]
+
+        def pick(current: str) -> str:
+            if current in available:
+                return current
+            for candidate in preferred:
+                if candidate in available:
+                    logger.warning("Model '%s' unavailable, using '%s' instead", current, candidate)
+                    return candidate
+            logger.error("No preferred Gemini model available; keeping '%s'", current)
+            return current
+
+        self.text_model = pick(self.text_model)
+        self.vision_model = pick(self.vision_model)
+        self.transcribe_model = pick(self.transcribe_model)
+        logger.info(
+            "Gemini models resolved: text=%s vision=%s transcribe=%s",
+            self.text_model,
+            self.vision_model,
+            self.transcribe_model,
+        )
+
     def _estimate_from_payload(self, data: dict[str, Any], fallback_desc: str = "Блюдо") -> CalorieEstimate:
         return CalorieEstimate(
             meal_desc=str(data.get("meal_desc") or fallback_desc).strip() or fallback_desc,
