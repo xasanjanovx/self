@@ -256,7 +256,12 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
 
 def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.append([InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day")])
+    rows.append(
+        [
+            InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day"),
+            InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings"),
+        ]
+    )
     rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

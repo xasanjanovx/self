@@ -1076,49 +1076,58 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
     settings_fin = db.get_finance_settings(telegram_id)
     balances = _finance_balances_with_base(telegram_id)
+    totals = db.get_today_finance_totals(telegram_id, tz_name=tz_name)
     monthly_credit = float(settings_fin.get("monthly_credit_payment") or 0.0)
     wallet_total = float(balances["card"]) + float(balances["cash"])
+
     if lang == "uz":
         lines = [
-            "💰 <b>Moliya / Professional nazorat</b>",
+            "💰 <b>Moliya</b>",
             "",
-            f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
+            f"💼 Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
+            f"💳 Karta {_fmt_money(balances['card'])}  ·  💵 Naqd {_fmt_money(balances['cash'])}",
             "",
-            "<b>Joriy hisoblar</b>",
-            f"• Karta: <b>{_fmt_money(balances['card'])} {currency}</b>",
-            f"• Naqd: <b>{_fmt_money(balances['cash'])} {currency}</b>",
-            f"• Qarzga berilgan: <b>{_fmt_money(balances['lent'])} {currency}</b>",
-            f"• Mening qarzim: <b>{_fmt_money(balances['debt'])} {currency}</b>",
-            f"• Oylik kredit to'lovi: <b>{_fmt_money(monthly_credit)} {currency}</b>",
+            "📊 <b>Bugun</b>",
+            f"↗️ Kirim: {_fmt_money(totals['income'])} {currency}",
+            f"↘️ Chiqim: {_fmt_money(totals['expense'])} {currency}",
+        ]
+        if balances["lent"] or balances["debt"] or monthly_credit:
+            lines.append("")
+            if balances["lent"]:
+                lines.append(f"🤝 Qarzga berilgan: {_fmt_money(balances['lent'])} {currency}")
+            if balances["debt"]:
+                lines.append(f"📌 Mening qarzim: {_fmt_money(balances['debt'])} {currency}")
+            if monthly_credit:
+                lines.append(f"🏦 Kredit/oy: {_fmt_money(monthly_credit)} {currency}")
+        lines += [
             "",
-            "<i>Matn yoki ovoz yuboring. Bot oddiy kirim/chiqim va ichki o'tkazmalarni tushunadi.</i>",
-            "Misol: <code>dal v dolg 100000 s karty</code>",
-            "",
+            "<i>✍️ Operatsiyani matn yoki ovoz bilan yozing:</i>",
+            "<code>chiqim 25000 ovqat</code> · <code>kirim 300000 oylik</code>",
         ]
     else:
         lines = [
-            "💰 <b>Финансы / Профессиональный контроль</b>",
+            "💰 <b>Финансы</b>",
             "",
-            f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
+            f"💼 Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
+            f"💳 Карта {_fmt_money(balances['card'])}  ·  💵 Наличные {_fmt_money(balances['cash'])}",
             "",
-            "<b>Текущие счета</b>",
-            f"• Карта: <b>{_fmt_money(balances['card'])} {currency}</b>",
-            f"• Наличные: <b>{_fmt_money(balances['cash'])} {currency}</b>",
-            f"• Дал в долг: <b>{_fmt_money(balances['lent'])} {currency}</b>",
-            f"• Мои долги: <b>{_fmt_money(balances['debt'])} {currency}</b>",
-            f"• Ежемесячный платёж по кредиту: <b>{_fmt_money(monthly_credit)} {currency}</b>",
-            "",
-            "<i>Ввод: текст или голос. Поддерживаются обычные операции и внутренние переводы.</i>",
-            "Пример: <code>дал в долг 100000 с карты</code>",
-            "",
+            "📊 <b>Сегодня</b>",
+            f"↗️ Доход: {_fmt_money(totals['income'])} {currency}",
+            f"↘️ Расход: {_fmt_money(totals['expense'])} {currency}",
         ]
-
-    lines.append("")
-    lines.append(
-        "Operatsiyalarni \"Operatsiyalar\" tugmasi orqali oching va davrni tanlang: kun/hafta/oy."
-        if lang == "uz"
-        else "Открой операции через кнопку «Операции» и выбери период: день, неделя или месяц."
-    )
+        if balances["lent"] or balances["debt"] or monthly_credit:
+            lines.append("")
+            if balances["lent"]:
+                lines.append(f"🤝 Дал в долг: {_fmt_money(balances['lent'])} {currency}")
+            if balances["debt"]:
+                lines.append(f"📌 Мои долги: {_fmt_money(balances['debt'])} {currency}")
+            if monthly_credit:
+                lines.append(f"🏦 Кредит/мес: {_fmt_money(monthly_credit)} {currency}")
+        lines += [
+            "",
+            "<i>✍️ Напиши операцию текстом или голосом:</i>",
+            "<code>расход 25000 еда</code> · <code>доход 300000 зарплата</code>",
+        ]
     return "\n".join(lines), entries
 
 
