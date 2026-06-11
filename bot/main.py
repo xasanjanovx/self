@@ -1815,7 +1815,7 @@ async def safe_delete_message(message: Message | None) -> None:
         pass
 
 
-async def send_main_menu(message: Message, telegram_id: int) -> None:
+async def send_main_menu(message: Message, telegram_id: int, *, force_new: bool = False) -> None:
     user = db.get_user(telegram_id) or {}
     lang = _lang_from_user(user)
     try:
@@ -1823,7 +1823,7 @@ async def send_main_menu(message: Message, telegram_id: int) -> None:
     except Exception:
         logger.exception('build_dashboard_text failed in send_main_menu')
         text = _tr(lang, "Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    await screen_mod.show_screen(message.bot, message.chat.id, text, main_menu_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, text, main_menu_keyboard(lang), force_new=force_new)
 
 
 async def edit_main_menu(callback: CallbackQuery, telegram_id: int) -> None:
@@ -2188,7 +2188,7 @@ async def _handle_ai_inbox_route(
 
     if intent.module == "menu":
         await safe_delete_message(message)
-        await send_main_menu(message, message.from_user.id)
+        await send_main_menu(message, message.from_user.id, force_new=True)
         return True
 
     if intent.module == "vacancy":
@@ -2305,7 +2305,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    await send_main_menu(message, message.from_user.id, force_new=True)
 
 
 @router.message(Command('menu'))
@@ -2314,7 +2314,7 @@ async def cmd_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    await send_main_menu(message, message.from_user.id, force_new=True)
 
 
 @router.message(Command('help'))
@@ -2355,7 +2355,7 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
         "📊 <b>/dashboard</b> — grafikli tahlil\n\n"
         "Buyruqlar: /menu · /dashboard · /help",
     )
-    await screen_mod.show_screen(message.bot, message.chat.id, help_text, back_to_menu_keyboard(lang))
+    await screen_mod.show_screen(message.bot, message.chat.id, help_text, back_to_menu_keyboard(lang), force_new=True)
 
 @router.callback_query(F.data == 'noop')
 async def cb_noop(callback: CallbackQuery) -> None:
@@ -4302,7 +4302,7 @@ async def fallback_message(message: Message, state: FSMContext) -> None:
     text = raw_text.lower()
     if text in {'start', '/start', 'menu', '/menu', 'help', '/help'}:
         await safe_delete_message(message)
-        await send_main_menu(message, message.from_user.id)
+        await send_main_menu(message, message.from_user.id, force_new=True)
         return
 
     current_state = await state.get_state()

@@ -96,13 +96,20 @@ async def show_screen(
     chat_id: int,
     text: str,
     reply_markup: Any | None = None,
+    *,
+    force_new: bool = False,
 ) -> int:
     """Render the main screen: edit the existing one in place when possible,
-    otherwise replace it. Clears any transient messages first."""
+    otherwise replace it. Clears any transient messages first.
+
+    force_new=True always sends a fresh message (deleting the old one). Use it
+    for explicit /start, /menu, /help so the menu always appears even after the
+    user cleared the chat history (a cleared message can still be edited
+    server-side, which would otherwise leave the user seeing nothing)."""
     await clear_ephemerals(bot, chat_id)
 
     old = _get_screen(chat_id)
-    if old:
+    if old and not force_new:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=old, text=text, reply_markup=reply_markup
@@ -113,6 +120,8 @@ async def show_screen(
                 return old
             # Not editable (deleted, or was a media message) -> replace it.
             await _safe_delete(bot, chat_id, old)
+    elif old and force_new:
+        await _safe_delete(bot, chat_id, old)
 
     msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
     _set_screen(chat_id, msg.message_id)

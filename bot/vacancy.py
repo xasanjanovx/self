@@ -13,17 +13,17 @@ VACANCY_CONTACT_TEMPLATE = (
 )
 
 _EMOJI_META = {
-    "top": ("✅", "5389061359403039918"),
-    "openings": ("✅", "6307344346748290621"),
-    "location": ("📍", "5886446115905082831"),
-    "salary": ("💰", "5348418461838098123"),
-    "schedule": ("🕔", "5258419835922030550"),
-    "requirements": ("⚠️", "5881702736843511327"),
-    "benefits": ("✅", "5985596818912712352"),
-    "duties": ("❗️", "5879813604068298387"),
-    "phone": ("📞", "5897938112654348733"),
-    "telegram": ("✈️", "5875465628285931233"),
-    "footer": ("➡️", "5260450573768990626"),
+    "top": ("✅", "5825794181183836432"),       # Галочка
+    "openings": ("✅", "5825794181183836432"),  # Галочка
+    "location": ("📍", "5796440171364749940"),  # Булавка
+    "salary": ("💰", "5769403330761593044"),    # Кошелек
+    "schedule": ("🕔", None),                    # нет в наборе -> обычный
+    "requirements": ("⚠️", "5877597667231534929"),  # Список
+    "benefits": ("✅", "5843843420468024653"),  # Избранное
+    "duties": ("❗️", "5879841310902324730"),    # Карандаш
+    "phone": ("📞", None),                        # нет в наборе -> обычный
+    "telegram": ("✈️", "5875465628285931233"),  # Telegram
+    "footer": ("➡️", None),                       # нет в наборе -> обычный
 }
 
 _VACANCY_KEYWORDS = (
@@ -98,7 +98,7 @@ _VACANCY_DIVIDER = "— — — — — — — — — — —"
 
 def _emoji(name: str, premium: bool) -> str:
     fallback, emoji_id = _EMOJI_META[name]
-    if not premium:
+    if not premium or not emoji_id:
         return fallback
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
 
