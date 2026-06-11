@@ -1,13 +1,12 @@
-"""Premium (custom) emoji helpers.
-
-Custom emoji here use ONLY the TgAndroidIcons pack
-(https://t.me/addemoji/TgAndroidIcons). Where the pack has no matching icon we
-fall back to a plain unicode emoji (no custom entity) — per project owner's rule
-"use only these emoji, no others".
+"""Premium (custom) emoji — curated "serious" set selected from the IDs
+provided by the project owner (resolved via getCustomEmojiStickers).
 
 Custom emoji render as premium for Telegram Premium users and as the plain
 fallback character for everyone else. They work in message text/captions and,
 since Bot API 9.4, as inline-button icons (icon_custom_emoji_id).
+
+Where the provided pack has no sensible match (food, dumbbell, banknote, wave,
+up/down arrows) we use a close premium icon or a plain unicode emoji.
 """
 from __future__ import annotations
 
@@ -16,40 +15,54 @@ def e(fallback: str, emoji_id: str) -> str:
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
 
 
-# --- Text emoji: TgAndroidIcons custom where available, else plain unicode ---
-HELLO = e("👋", "5870734657384877785")      # Привет
-CHECK = e("✅", "5825794181183836432")       # Галочка
-CROSS = e("❌", "5872829476143894491")       # Запрет / Отмена
-INFO = e("ℹ️", "5879785854284599288")        # Информация
-BELL = e("🔔", "5909201569898827582")        # Уведомления
-STAR = e("⭐", "5843843420468024653")        # Избранное
-PIN = e("📌", "5796440171364749940")         # Булавка
-SETTINGS = e("⚙️", "5877260593903177342")    # Настройки
-WALLET = e("💼", "5769403330761593044")      # Кошелек
-CHART = e("📊", "5931472654660800739")       # Диаграмма
+# --- Text emoji (used in message bodies) ---
+CALENDAR = e("📅", "5967782394080530708")    # 📅
+CHECK = e("✅", "5985596818912712352")        # ✅
+CROSS = e("❌", "5388627550526270988")        # ❌
+FIRE = e("🔥", "5420315771991497307")         # 🔥
+INFO = e("📄", "5877301185639091664")         # 📄 (help/info)
+BELL = e("🔔", "5242628160297641831")         # 🔔
+IDEA = e("🧠", "6257767895732848636")         # 🧠 (insight)
+STAR = e("⭐", "5274046919809704653")         # ⭐
+PIN = e("📍", "5886446115905082831")          # 📍
+SETTINGS = e("⚙️", "5350396951407895212")     # ⚙️
+WALLET = e("💰", "5348418461838098123")       # 💰
+HANDSHAKE = e("🤝", "5357080225463149588")    # 🤝
+INCOME = e("🟢", "5852777287451151788")       # 🟢 (income)
+EXPENSE = e("🔴", "5291899179008798421")      # 🔴 (expense)
+CHART = e("🧾", "5458458113826910668")        # 🧾 (report)
+NUTRITION = e("🗒", "5877597667231534929")    # 🗒 (food diary)
+HOME = e("🏠", "5188561131995690450")         # 🏠
+ROCKET = e("🚀", "5458555944591981600")       # 🚀
 
-# No matching icon in the pack -> plain unicode (not a custom emoji):
-CALENDAR = "📅"
-FIRE = "🔥"
-IDEA = "💡"
+# No premium match in the provided pack -> plain unicode:
+HELLO = "👋"
 CASH = "💵"
-ARROW_UP = "↗️"
-ARROW_DOWN = "↘️"
-CHART_UP = "📈"
-CHART_DOWN = "📉"
+CARD = "💳"
+BANK = "🏦"
 
-# --- Raw IDs for inline-button icons (all from TgAndroidIcons) ---
-ID_FINANCE = "5769403330761593044"   # Кошелек
-ID_HABITS = "5825794181183836432"    # Галочка
-ID_GOALS = "5843843420468024653"     # Избранное
-ID_TRAINER = "5935847413859225147"   # Спорт
-ID_REPORT = "5931472654660800739"    # Диаграмма
-ID_VACANCY = "5967389567781703494"   # Рабочий портфель
-ID_LANGUAGE = "5778184941154078090"  # Перевод
-ID_ANALYTICS = "5960714428394507968" # Глаз / Просмотры
-ID_REFRESH = "5877410604225924969"   # Обновления
-ID_SAVE = "5825794181183836432"      # Галочка
-ID_CANCEL = "5872829476143894491"    # Запрет / Отмена
-ID_DELETE = "5879896690210639947"    # Корзина
-ID_ADD = "5879841310902324730"       # Карандаш
-ID_BACK = "5875082500023258804"      # Возврат
+# --- Raw IDs for inline-button icons (icon_custom_emoji_id) ---
+ID_NUTRITION = "5877597667231534929"  # 🗒 (food diary)
+ID_FINANCE = "5348418461838098123"    # 💰
+ID_HABITS = "5420315771991497307"     # 🔥
+ID_GOALS = "5780530293945405228"      # 🎯
+ID_TRAINER = "6257767895732848636"    # 🧠
+ID_REPORT = "5458458113826910668"     # 🧾
+ID_VACANCY = "5458809519461136265"    # 💼
+ID_LANGUAGE = "5188381825701021648"   # 🌐
+ID_ANALYTICS = "5188311512791393083"  # 🔎
+ID_REFRESH = "5877410604225924969"    # 🔄
+ID_SAVE = "5985596818912712352"       # ✅
+ID_CANCEL = "5240241223632954241"     # 🚫
+ID_DELETE = "5841541824803509441"     # 🗑
+ID_ADD = "5406829076465861567"        # ➕
+ID_BACK = "5258236805890710909"       # ⬅️
+ID_HOME = "5188561131995690450"       # 🏠
+ID_SETTINGS = "5350396951407895212"   # ⚙️
+ID_PIN = "5886446115905082831"        # 📍
+ID_CALENDAR = "5967782394080530708"   # 📅
+ID_EDIT = "5879841310902324730"       # ✏️
+ID_FIRE = "5420315771991497307"       # 🔥
+ID_STAR = "5274046919809704653"       # ⭐
+ID_GOAL = "5780530293945405228"       # 🎯
+ID_PERIOD = "5967782394080530708"     # 📅

@@ -185,7 +185,7 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_label(_t(lang, "menu_nutrition")), "menu:calorie", style=P),
+                _btn(_label(_t(lang, "menu_nutrition")), "menu:calorie", style=P, icon=_pe.ID_NUTRITION),
                 _btn(_label(_t(lang, "menu_finance")), "menu:finance", style=P, icon=_pe.ID_FINANCE),
             ],
             [
@@ -212,15 +212,15 @@ def nutrition_goal_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "goal_loss"), callback_data="nutri:set:loss"),
-                InlineKeyboardButton(text=_t(lang, "goal_maintain"), callback_data="nutri:set:maintain"),
+                _btn(_t(lang, "goal_loss"), "nutri:set:loss", style="primary"),
+                _btn(_t(lang, "goal_maintain"), "nutri:set:maintain", style="primary"),
             ],
             [
-                InlineKeyboardButton(text=_t(lang, "goal_gain"), callback_data="nutri:set:gain"),
-                InlineKeyboardButton(text=_t(lang, "goal_muscle"), callback_data="nutri:set:muscle"),
+                _btn(_t(lang, "goal_gain"), "nutri:set:gain", style="primary"),
+                _btn(_t(lang, "goal_muscle"), "nutri:set:muscle", style="primary"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "goal_custom"), callback_data="nutri:set:custom")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
+            [_btn(_t(lang, "goal_custom"), "nutri:set:custom", icon=_pe.ID_EDIT)],
+            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -229,19 +229,19 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_t(lang, "save"), "calorie:confirm", style="success"),
-                _btn(_t(lang, "cancel"), "calorie:cancel", style="danger"),
+                _btn(_label(_t(lang, "save")), "calorie:confirm", style="success", icon=_pe.ID_SAVE),
+                _btn(_label(_t(lang, "cancel")), "calorie:cancel", style="danger", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_t(lang, "back"), "calorie:panel")],
+            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
         ]
     )
 
 
 def calorie_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.append([InlineKeyboardButton(text=_t(lang, "calorie_goal"), callback_data="calorie:goals")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "calorie_meals"), callback_data="calorie:meals:day")])
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    rows.append([_btn(_label(_t(lang, "calorie_goal")), "calorie:goals", style="primary", icon=_pe.ID_GOAL)])
+    rows.append([_btn(_label(_t(lang, "calorie_meals")), "calorie:meals:day", style="primary", icon=_pe.ID_NUTRITION)])
+    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -264,15 +264,15 @@ def calorie_meals_keyboard(entries: list[dict], period: str, lang: str = "ru") -
         title = f"{desc[:28]} • {kcal_text}"[:64]
         rows.append([InlineKeyboardButton(text=title, callback_data=f"calorie:view:{entry_id}")])
 
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="calorie:panel")])
+    rows.append([_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def calorie_detail_keyboard(log_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(_t(lang, "delete"), f"calorie:ask_del:{log_id}", style="danger", icon=_pe.ID_DELETE)],
-            [_btn(_t(lang, "back"), "calorie:panel")],
+            [_btn(_label(_t(lang, "delete")), f"calorie:ask_del:{log_id}", style="danger", icon=_pe.ID_DELETE)],
+            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -281,10 +281,10 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_t(lang, "yes_delete"), f"calorie:del:{log_id}", style="danger"),
-                _btn(_t(lang, "no"), f"calorie:view:{log_id}"),
+                _btn(_label(_t(lang, "yes_delete")), f"calorie:del:{log_id}", style="danger", icon=_pe.ID_DELETE),
+                _btn(_label(_t(lang, "no")), f"calorie:view:{log_id}", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_t(lang, "back"), "calorie:panel")],
+            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -293,11 +293,11 @@ def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeybo
     rows: list[list[InlineKeyboardButton]] = []
     rows.append(
         [
-            InlineKeyboardButton(text=_t(lang, "finance_ops"), callback_data="finance:ops:day"),
-            InlineKeyboardButton(text=_t(lang, "finance_settings"), callback_data="finance:settings"),
+            _btn(_label(_t(lang, "finance_ops")), "finance:ops:day", style="primary", icon=_pe.ID_REPORT),
+            _btn(_label(_t(lang, "finance_settings")), "finance:settings", style="primary", icon=_pe.ID_SETTINGS),
         ]
     )
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
+    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -381,8 +381,8 @@ def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "r
 def finance_detail_keyboard(entry_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(_t(lang, "delete"), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)],
-            [_btn(_t(lang, "back"), "menu:finance")],
+            [_btn(_label(_t(lang, "delete")), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)],
+            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -391,10 +391,10 @@ def finance_delete_confirm_keyboard(entry_id: str | int, lang: str = "ru") -> In
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_t(lang, "yes_delete"), f"finance:del:{entry_id}", style="danger"),
-                _btn(_t(lang, "no"), f"finance:view:{entry_id}"),
+                _btn(_label(_t(lang, "yes_delete")), f"finance:del:{entry_id}", style="danger", icon=_pe.ID_DELETE),
+                _btn(_label(_t(lang, "no")), f"finance:view:{entry_id}", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_t(lang, "back"), "menu:finance")],
+            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -403,10 +403,10 @@ def finance_add_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_t(lang, "save"), "finance:add_confirm", style="success"),
-                _btn(_t(lang, "cancel"), "finance:add_cancel", style="danger"),
+                _btn(_label(_t(lang, "save")), "finance:add_confirm", style="success", icon=_pe.ID_SAVE),
+                _btn(_label(_t(lang, "cancel")), "finance:add_cancel", style="danger", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_t(lang, "back"), "menu:finance")],
+            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -432,11 +432,11 @@ def habits_keyboard(habits: list[dict], lang: str = "ru") -> InlineKeyboardMarku
 
     rows.append(
         [
-            _btn(_t(lang, "add"), "habit:add", style="success", icon=_pe.ID_ADD),
-            _btn(_t(lang, "refresh"), "menu:habits"),
+            _btn(_label(_t(lang, "add")), "habit:add", style="success", icon=_pe.ID_ADD),
+            _btn(_label(_t(lang, "refresh")), "menu:habits", icon=_pe.ID_REFRESH),
         ]
     )
-    rows.append([_btn(_t(lang, "back"), "menu:open")])
+    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -494,11 +494,11 @@ def report_settings_keyboard(
             ],
             [InlineKeyboardButton(text=status, callback_data="noop")],
             [
-                _btn(_t(lang, "report_weekly"), "report:set:weekly", style="primary"),
-                _btn(_t(lang, "report_monthly"), "report:set:monthly", style="primary"),
+                _btn(_label(_t(lang, "report_weekly")), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
+                _btn(_label(_t(lang, "report_monthly")), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
             ],
-            [_btn(_t(lang, "report_off"), "report:set:off", style="danger")],
-            [_btn(_t(lang, "back"), "menu:open")],
+            [_btn(_label(_t(lang, "report_off")), "report:set:off", style="danger", icon=_pe.ID_CANCEL)],
+            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -510,7 +510,7 @@ def language_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=_t(lang, "lang_ru"), callback_data="lang:set:ru"),
                 InlineKeyboardButton(text=_t(lang, "lang_uz"), callback_data="lang:set:uz"),
             ],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
+            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
         ]
     )
 
@@ -519,18 +519,18 @@ def trainer_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=_t(lang, "trainer_fat"), callback_data="trainer:plan:fat"),
-                InlineKeyboardButton(text=_t(lang, "trainer_muscle"), callback_data="trainer:plan:muscle"),
+                _btn(_label(_t(lang, "trainer_fat")), "trainer:plan:fat", style="primary", icon=_pe.ID_FIRE),
+                _btn(_label(_t(lang, "trainer_muscle")), "trainer:plan:muscle", style="primary", icon=_pe.ID_TRAINER),
             ],
-            [InlineKeyboardButton(text=_t(lang, "trainer_ask"), callback_data="trainer:ask")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")],
+            [_btn(_label(_t(lang, "trainer_ask")), "trainer:ask", icon=_pe.ID_EDIT)],
+            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
         ]
     )
 
 
 def vacancy_panel_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")]]
+        inline_keyboard=[[_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)]]
     )
 
 
@@ -542,11 +542,11 @@ def vacancy_result_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if contact_url:
-        rows.append([_btn(_t(lang, "vacancy_contact"), url=contact_url, style="primary")])
+        rows.append([_btn(_label(_t(lang, "vacancy_contact")), url=contact_url, style="primary")])
     if show_publish:
-        rows.append([_btn(_t(lang, "vacancy_publish"), "vacancy:publish", style="success")])
-    rows.append([_btn(_t(lang, "vacancy_again"), "vacancy:again")])
-    rows.append([_btn(_t(lang, "back"), "menu:open")])
+        rows.append([_btn(_label(_t(lang, "vacancy_publish")), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
+    rows.append([_btn(_label(_t(lang, "vacancy_again")), "vacancy:again", icon=_pe.ID_REFRESH)])
+    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -560,5 +560,5 @@ def vacancy_channel_keyboard(lang: str = "ru", contact_url: str | None = None) -
 
 def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=_t(lang, "to_menu"), callback_data="menu:open")]]
+        inline_keyboard=[[_btn(_label(_t(lang, "to_menu")), "menu:open", style="primary", icon=_pe.ID_HOME)]]
     )

@@ -200,7 +200,7 @@ def build_dashboard_text(telegram_id: int) -> str:
     name = _h(first_name or ("Do'st" if lang == "uz" else "Друг"))
 
     if lang == "uz":
-        lines = [f"{pe.HELLO} Assalomu alaykum, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", "🍽️ <b>Oziqlanish</b>"]
+        lines = [f"{pe.HELLO} Assalomu alaykum, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", f"{pe.NUTRITION} <b>Oziqlanish</b>"]
         if target_kcal > 0:
             lines += [
                 f"{kcal_bar} {kcal_pct}%",
@@ -223,7 +223,7 @@ def build_dashboard_text(telegram_id: int) -> str:
         ]
         return "\n".join(lines)
 
-    lines = [f"{pe.HELLO} Привет, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", "🍽️ <b>Питание</b>"]
+    lines = [f"{pe.HELLO} Привет, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", f"{pe.NUTRITION} <b>Питание</b>"]
     if target_kcal > 0:
         lines += [
             f"{kcal_bar} {kcal_pct}%",
@@ -368,12 +368,12 @@ def format_calorie_pending(items: list[dict[str, Any]], lang: str = "ru", transc
 
 
 def goals_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    add_text = "➕ Qo'shish" if lang == "uz" else "➕ Добавить цель"
-    back_text = "⬅️ Ortga" if lang == "uz" else "⬅️ Назад"
+    add_text = "Qo'shish" if lang == "uz" else "Добавить цель"
+    back_text = "Ortga" if lang == "uz" else "Назад"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=add_text, callback_data="goal:add")],
-            [InlineKeyboardButton(text=back_text, callback_data="menu:open")],
+            [InlineKeyboardButton(text=add_text, callback_data="goal:add", style="success", icon_custom_emoji_id=pe.ID_ADD)],
+            [InlineKeyboardButton(text=back_text, callback_data="menu:open", icon_custom_emoji_id=pe.ID_BACK)],
         ]
     )
 
@@ -543,7 +543,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     if lang == "uz":
         lines = [
-            "🍽️ <b>Oziqlanish</b>",
+            f"{pe.NUTRITION} <b>Oziqlanish</b>",
             f"Maqsad: <b>{title}</b>",
         ]
         if profile_line:
@@ -561,7 +561,7 @@ def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         ]
     else:
         lines = [
-            "🍽️ <b>Питание</b>",
+            f"{pe.NUTRITION} <b>Питание</b>",
             f"Цель: <b>{title}</b>",
         ]
         if profile_line:
@@ -1096,17 +1096,17 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"💳 Karta {_fmt_money(balances['card'])}  ·  {pe.CASH} Naqd {_fmt_money(balances['cash'])}",
             "",
             f"{pe.CHART} <b>Bugun</b>",
-            f"{pe.ARROW_UP} Kirim: {_fmt_money(totals['income'])} {currency}",
-            f"{pe.ARROW_DOWN} Chiqim: {_fmt_money(totals['expense'])} {currency}",
+            f"{pe.INCOME} Kirim: {_fmt_money(totals['income'])} {currency}",
+            f"{pe.EXPENSE} Chiqim: {_fmt_money(totals['expense'])} {currency}",
         ]
         if balances["lent"] or balances["debt"] or monthly_credit:
             lines.append("")
             if balances["lent"]:
-                lines.append(f"🤝 Qarzga berilgan: {_fmt_money(balances['lent'])} {currency}")
+                lines.append(f"{pe.HANDSHAKE} Qarzga berilgan: {_fmt_money(balances['lent'])} {currency}")
             if balances["debt"]:
                 lines.append(f"{pe.PIN} Mening qarzim: {_fmt_money(balances['debt'])} {currency}")
             if monthly_credit:
-                lines.append(f"🏦 Kredit/oy: {_fmt_money(monthly_credit)} {currency}")
+                lines.append(f"{pe.BANK} Kredit/oy: {_fmt_money(monthly_credit)} {currency}")
         lines += [
             "",
             "<i>✍️ Operatsiyani matn yoki ovoz bilan yozing:</i>",
@@ -1120,17 +1120,17 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
             f"💳 Карта {_fmt_money(balances['card'])}  ·  {pe.CASH} Наличные {_fmt_money(balances['cash'])}",
             "",
             f"{pe.CHART} <b>Сегодня</b>",
-            f"{pe.ARROW_UP} Доход: {_fmt_money(totals['income'])} {currency}",
-            f"{pe.ARROW_DOWN} Расход: {_fmt_money(totals['expense'])} {currency}",
+            f"{pe.INCOME} Доход: {_fmt_money(totals['income'])} {currency}",
+            f"{pe.EXPENSE} Расход: {_fmt_money(totals['expense'])} {currency}",
         ]
         if balances["lent"] or balances["debt"] or monthly_credit:
             lines.append("")
             if balances["lent"]:
-                lines.append(f"🤝 Дал в долг: {_fmt_money(balances['lent'])} {currency}")
+                lines.append(f"{pe.HANDSHAKE} Дал в долг: {_fmt_money(balances['lent'])} {currency}")
             if balances["debt"]:
                 lines.append(f"{pe.PIN} Мои долги: {_fmt_money(balances['debt'])} {currency}")
             if monthly_credit:
-                lines.append(f"🏦 Кредит/мес: {_fmt_money(monthly_credit)} {currency}")
+                lines.append(f"{pe.BANK} Кредит/мес: {_fmt_money(monthly_credit)} {currency}")
         lines += [
             "",
             "<i>✍️ Напиши операцию текстом или голосом:</i>",
@@ -2340,7 +2340,7 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
         "✅ <b>Привычки</b>, 🎯 <b>Цели</b>, ⏰ напоминания — через меню\n"
         "📊 <b>/dashboard</b> — аналитика с графиками\n\n"
         "Команды: /menu · /dashboard · /help",
-        "ℹ️ <b>Botdan qanday foydalanish</b>\n\n"
+        f"{pe.INFO} <b>Botdan qanday foydalanish</b>\n\n"
         "Botga oddiy tilda yozing — u bo'limni o'zi tushunadi:\n\n"
         "🍽️ <b>Oziqlanish</b>\n"
         "• Ovqat rasmi → bot BJUni hisoblaydi\n"
