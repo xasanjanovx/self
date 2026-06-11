@@ -41,7 +41,7 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
-def _gemini_model(name: str, default: str = "gemini-3.5-flash") -> str:
+def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
     """Return the configured model name, or a sane default.
 
     We intentionally trust the value provided via environment variables instead
