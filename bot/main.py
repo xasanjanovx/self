@@ -89,6 +89,24 @@ def _fmt_money(value: float) -> str:
     return f"{value:,.0f}".replace(',', ' ')
 
 
+def _progress_bar(ratio: float, width: int = 10) -> str:
+    """Render a compact unicode progress bar, e.g. ▰▰▰▱▱▱▱▱▱▱."""
+    ratio = max(0.0, min(1.0, ratio))
+    filled = int(round(ratio * width))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+_WEEKDAYS = {
+    "ru": ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"],
+    "uz": ["dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba", "yakshanba"],
+}
+
+
+def _weekday_name(d: date, lang: str) -> str:
+    names = _WEEKDAYS.get("uz" if lang == "uz" else "ru", _WEEKDAYS["ru"])
+    return names[d.weekday()]
+
+
 def _user_profile(telegram_id: int) -> tuple[dict[str, Any], str, str]:
     user = db.get_user(telegram_id) or {}
     timezone_name = str(user.get('timezone') or settings.app_timezone)
@@ -155,38 +173,70 @@ def build_dashboard_text(telegram_id: int) -> str:
     total_habits = len(habits)
     done_habits = len([h for h in habits if h.get("completed_today")])
     left_habits = max(0, total_habits - done_habits)
-    today_text = _today_local(tz_name).strftime("%d.%m.%Y")
+    today = _today_local(tz_name)
+    today_text = today.strftime("%d.%m.%Y")
+    weekday = _weekday_name(today, lang)
 
+    eaten_kcal = float(nutrition["calories"])
     target_kcal = float((nutrition_profile or {}).get("daily_calories") or 0.0)
-    left_kcal = max(0.0, target_kcal - float(nutrition["calories"]))
-    kcal_ratio = f"{int(left_kcal)}/{int(target_kcal)}" if target_kcal > 0 else "0/0"
+    left_kcal = max(0.0, target_kcal - eaten_kcal)
+    kcal_ratio = (eaten_kcal / target_kcal) if target_kcal > 0 else 0.0
+    kcal_pct = int(round(kcal_ratio * 100))
+    kcal_bar = _progress_bar(kcal_ratio)
+    meals_count = int(nutrition["meals"])
+
+    habit_ratio = (done_habits / total_habits) if total_habits > 0 else 0.0
+    habit_bar = _progress_bar(habit_ratio)
 
     first_name = str(user.get("first_name") or "").strip()
-    name = _h(first_name or "Друг")
-    if lang == "uz":
-        return (
-            f"Assalomu Alaykum, <b>{name}</b>\n"
-            f"<i>Bugun - {today_text}</i>\n\n"
-            f"🍽️ <b>Oziqlanish</b>\n"
-            f"• Qoldiq: <b>{kcal_ratio}</b> kkal\n"
-            f"• Fakt: {int(nutrition['calories'])} kkal, {int(nutrition['meals'])} ta qabul.\n\n"
-            f"✅ <b>Odatlar</b>\n"
-            f"• {done_habits}/{total_habits} bajarildi, {left_habits} ta qoldi.\n\n"
-            f"💰 <b>Moliya</b>\n"
-            f"• Balans: <b>{_fmt_money(wallet_total)} {currency}</b>"
-        )
+    name = _h(first_name or ("Do'st" if lang == "uz" else "Друг"))
 
-    return (
-        f"Assalomu Alaykum, <b>{name}</b>\n"
-        f"<i>Сегодня - {today_text}</i>\n\n"
-        f"🍽️ <b>Питание</b>\n"
-        f"• Осталось: <b>{kcal_ratio}</b> ккал\n"
-        f"• Факт: {int(nutrition['calories'])} ккал, {int(nutrition['meals'])} прием.\n\n"
-        f"✅ <b>Привычки</b>\n"
-        f"• {done_habits}/{total_habits} выполнено, {left_habits} осталось.\n\n"
-        f"💰 <b>Финансы</b>\n"
-        f"• Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>"
-    )
+    if lang == "uz":
+        lines = [f"👋 Assalomu alaykum, <b>{name}</b>", f"📅 {weekday}, {today_text}", "", "🍽️ <b>Oziqlanish</b>"]
+        if target_kcal > 0:
+            lines += [
+                f"{kcal_bar} {kcal_pct}%",
+                f"Yeyildi: <b>{int(eaten_kcal)}</b> / {int(target_kcal)} kkal",
+                f"Qoldi: {int(left_kcal)} kkal · {meals_count} ta qabul",
+            ]
+        else:
+            lines += ["<i>Profil sozlanmagan — «🍽️ Oziqlanish» bo'limini oching</i>"]
+        lines += ["", "✅ <b>Odatlar</b>"]
+        if total_habits > 0:
+            done_msg = "Barchasi bajarildi! 🎉" if left_habits == 0 else f"{left_habits} ta qoldi"
+            lines += [f"{habit_bar} {done_habits}/{total_habits}", done_msg]
+        else:
+            lines += ["<i>Birinchi odatni qo'shing — «✅ Odatlar»</i>"]
+        lines += [
+            "",
+            "💰 <b>Moliya</b>",
+            f"💳 {_fmt_money(card_balance)}   💵 {_fmt_money(cash_balance)}",
+            f"Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
+        ]
+        return "\n".join(lines)
+
+    lines = [f"👋 Привет, <b>{name}</b>", f"📅 {weekday}, {today_text}", "", "🍽️ <b>Питание</b>"]
+    if target_kcal > 0:
+        lines += [
+            f"{kcal_bar} {kcal_pct}%",
+            f"Съедено: <b>{int(eaten_kcal)}</b> / {int(target_kcal)} ккал",
+            f"Осталось: {int(left_kcal)} ккал · {meals_count} приёмов",
+        ]
+    else:
+        lines += ["<i>Профиль не настроен — открой раздел «🍽️ Питание»</i>"]
+    lines += ["", "✅ <b>Привычки</b>"]
+    if total_habits > 0:
+        done_msg = "Все выполнено! 🎉" if left_habits == 0 else f"осталось {left_habits}"
+        lines += [f"{habit_bar} {done_habits}/{total_habits}", done_msg]
+    else:
+        lines += ["<i>Добавь первую привычку — раздел «✅ Привычки»</i>"]
+    lines += [
+        "",
+        "💰 <b>Финансы</b>",
+        f"💳 {_fmt_money(card_balance)}   💵 {_fmt_money(cash_balance)}",
+        f"Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
+    ]
+    return "\n".join(lines)
 
 
 def format_calorie_estimate(estimate: CalorieEstimate, lang: str = "ru") -> str:
@@ -2225,7 +2275,39 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
     await state.clear()
     await force_remove_reply_keyboard(message)
     await safe_delete_message(message)
-    await send_main_menu(message, message.from_user.id)
+    lang = _lang_for_user_id(message.from_user.id)
+    help_text = _tr(
+        lang,
+        "ℹ️ <b>Как пользоваться ботом</b>\n\n"
+        "Просто напиши боту обычным языком — он сам поймёт раздел:\n\n"
+        "🍽️ <b>Питание</b>\n"
+        "• Фото еды → бот посчитает КБЖУ\n"
+        "• Текст: «омлет из 3 яиц и кофе»\n"
+        "• Голосом перечисли блюда\n\n"
+        "💰 <b>Финансы</b>\n"
+        "• «расход 25000 еда» / «доход 300000 зарплата»\n"
+        "• «перевёл 100000 с карты на наличные»\n"
+        "• Можно несколько операций за раз\n\n"
+        "📣 <b>Вакансии</b> — пришли текст вакансии, бот оформит пост\n"
+        "✅ <b>Привычки</b>, 🎯 <b>Цели</b>, ⏰ напоминания — через меню\n"
+        "📊 <b>/dashboard</b> — аналитика с графиками\n\n"
+        "Команды: /menu · /dashboard · /help",
+        "ℹ️ <b>Botdan qanday foydalanish</b>\n\n"
+        "Botga oddiy tilda yozing — u bo'limni o'zi tushunadi:\n\n"
+        "🍽️ <b>Oziqlanish</b>\n"
+        "• Ovqat rasmi → bot BJUni hisoblaydi\n"
+        "• Matn: «3 tuxumdan omlet va kofe»\n"
+        "• Ovozli ravishda taomlarni sanang\n\n"
+        "💰 <b>Moliya</b>\n"
+        "• «chiqim 25000 ovqat» / «kirim 300000 oylik»\n"
+        "• «kartadan naqdga 100000 o'tkazdim»\n"
+        "• Bir vaqtda bir nechta operatsiya\n\n"
+        "📣 <b>Vakansiya</b> — vakansiya matnini yuboring, bot post qiladi\n"
+        "✅ <b>Odatlar</b>, 🎯 <b>Maqsadlar</b>, ⏰ eslatmalar — menyu orqali\n"
+        "📊 <b>/dashboard</b> — grafikli tahlil\n\n"
+        "Buyruqlar: /menu · /dashboard · /help",
+    )
+    await message.answer(help_text, reply_markup=back_to_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == 'noop')
@@ -3988,7 +4070,7 @@ def _dashboard_keyboard(active: str, lang: str) -> InlineKeyboardMarkup:
                 callback_data=f"dash:mood:{active}",
             ),
         ],
-        [InlineKeyboardButton(text="⬅️", callback_data="menu:main")],
+        [InlineKeyboardButton(text="⬅️", callback_data="menu:open")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -4032,6 +4114,15 @@ async def cmd_dashboard(message: Message, state: FSMContext) -> None:
     await ensure_user_message(message)
     await state.clear()
     await _send_dashboard(message, message.from_user.id, "7d")
+
+
+@router.callback_query(F.data == "menu:dashboard")
+async def cb_menu_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    await state.clear()
+    await callback.answer()
+    if callback.message is not None:
+        await _send_dashboard(callback.message, callback.from_user.id, "7d")
 
 
 @router.callback_query(F.data.in_({"dash:7d", "dash:30d", "dash:90d"}))
