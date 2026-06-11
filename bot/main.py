@@ -58,6 +58,7 @@ from .reports import build_report_bundle, build_weekly_summary
 from . import charts as charts_mod
 from . import streaks as streaks_mod
 from . import screen as screen_mod
+from . import emoji as pe
 from .states import BotStates
 from .vacancy import (
     VACANCY_DEFAULT_REGION_TAG,
@@ -199,7 +200,7 @@ def build_dashboard_text(telegram_id: int) -> str:
     name = _h(first_name or ("Do'st" if lang == "uz" else "Друг"))
 
     if lang == "uz":
-        lines = [f"👋 Assalomu alaykum, <b>{name}</b>", f"📅 {weekday}, {today_text}", "", "🍽️ <b>Oziqlanish</b>"]
+        lines = [f"{pe.HELLO} Assalomu alaykum, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", "🍽️ <b>Oziqlanish</b>"]
         if target_kcal > 0:
             lines += [
                 f"{kcal_bar} {kcal_pct}%",
@@ -208,7 +209,7 @@ def build_dashboard_text(telegram_id: int) -> str:
             ]
         else:
             lines += ["<i>Profil sozlanmagan — «🍽️ Oziqlanish» bo'limini oching</i>"]
-        lines += ["", "✅ <b>Odatlar</b>"]
+        lines += ["", f"{pe.CHECK} <b>Odatlar</b>"]
         if total_habits > 0:
             done_msg = "Barchasi bajarildi! 🎉" if left_habits == 0 else f"{left_habits} ta qoldi"
             lines += [f"{habit_bar} {done_habits}/{total_habits}", done_msg]
@@ -216,13 +217,13 @@ def build_dashboard_text(telegram_id: int) -> str:
             lines += ["<i>Birinchi odatni qo'shing — «✅ Odatlar»</i>"]
         lines += [
             "",
-            "💰 <b>Moliya</b>",
-            f"💳 {_fmt_money(card_balance)}   💵 {_fmt_money(cash_balance)}",
+            f"{pe.WALLET} <b>Moliya</b>",
+            f"💳 {_fmt_money(card_balance)}   {pe.CASH} {_fmt_money(cash_balance)}",
             f"Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
         ]
         return "\n".join(lines)
 
-    lines = [f"👋 Привет, <b>{name}</b>", f"📅 {weekday}, {today_text}", "", "🍽️ <b>Питание</b>"]
+    lines = [f"{pe.HELLO} Привет, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today_text}", "", "🍽️ <b>Питание</b>"]
     if target_kcal > 0:
         lines += [
             f"{kcal_bar} {kcal_pct}%",
@@ -231,7 +232,7 @@ def build_dashboard_text(telegram_id: int) -> str:
         ]
     else:
         lines += ["<i>Профиль не настроен — открой раздел «🍽️ Питание»</i>"]
-    lines += ["", "✅ <b>Привычки</b>"]
+    lines += ["", f"{pe.CHECK} <b>Привычки</b>"]
     if total_habits > 0:
         done_msg = "Все выполнено! 🎉" if left_habits == 0 else f"осталось {left_habits}"
         lines += [f"{habit_bar} {done_habits}/{total_habits}", done_msg]
@@ -239,8 +240,8 @@ def build_dashboard_text(telegram_id: int) -> str:
         lines += ["<i>Добавь первую привычку — раздел «✅ Привычки»</i>"]
     lines += [
         "",
-        "💰 <b>Финансы</b>",
-        f"💳 {_fmt_money(card_balance)}   💵 {_fmt_money(cash_balance)}",
+        f"{pe.WALLET} <b>Финансы</b>",
+        f"💳 {_fmt_money(card_balance)}   {pe.CASH} {_fmt_money(cash_balance)}",
         f"Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
     ]
     return "\n".join(lines)
@@ -1089,21 +1090,21 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
 
     if lang == "uz":
         lines = [
-            "💰 <b>Moliya</b>",
+            f"{pe.WALLET} <b>Moliya</b>",
             "",
             f"💼 Balans: <b>{_fmt_money(wallet_total)} {currency}</b>",
-            f"💳 Karta {_fmt_money(balances['card'])}  ·  💵 Naqd {_fmt_money(balances['cash'])}",
+            f"💳 Karta {_fmt_money(balances['card'])}  ·  {pe.CASH} Naqd {_fmt_money(balances['cash'])}",
             "",
-            "📊 <b>Bugun</b>",
-            f"↗️ Kirim: {_fmt_money(totals['income'])} {currency}",
-            f"↘️ Chiqim: {_fmt_money(totals['expense'])} {currency}",
+            f"{pe.CHART} <b>Bugun</b>",
+            f"{pe.ARROW_UP} Kirim: {_fmt_money(totals['income'])} {currency}",
+            f"{pe.ARROW_DOWN} Chiqim: {_fmt_money(totals['expense'])} {currency}",
         ]
         if balances["lent"] or balances["debt"] or monthly_credit:
             lines.append("")
             if balances["lent"]:
                 lines.append(f"🤝 Qarzga berilgan: {_fmt_money(balances['lent'])} {currency}")
             if balances["debt"]:
-                lines.append(f"📌 Mening qarzim: {_fmt_money(balances['debt'])} {currency}")
+                lines.append(f"{pe.PIN} Mening qarzim: {_fmt_money(balances['debt'])} {currency}")
             if monthly_credit:
                 lines.append(f"🏦 Kredit/oy: {_fmt_money(monthly_credit)} {currency}")
         lines += [
@@ -1113,21 +1114,21 @@ def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
         ]
     else:
         lines = [
-            "💰 <b>Финансы</b>",
+            f"{pe.WALLET} <b>Финансы</b>",
             "",
             f"💼 Баланс: <b>{_fmt_money(wallet_total)} {currency}</b>",
-            f"💳 Карта {_fmt_money(balances['card'])}  ·  💵 Наличные {_fmt_money(balances['cash'])}",
+            f"💳 Карта {_fmt_money(balances['card'])}  ·  {pe.CASH} Наличные {_fmt_money(balances['cash'])}",
             "",
-            "📊 <b>Сегодня</b>",
-            f"↗️ Доход: {_fmt_money(totals['income'])} {currency}",
-            f"↘️ Расход: {_fmt_money(totals['expense'])} {currency}",
+            f"{pe.CHART} <b>Сегодня</b>",
+            f"{pe.ARROW_UP} Доход: {_fmt_money(totals['income'])} {currency}",
+            f"{pe.ARROW_DOWN} Расход: {_fmt_money(totals['expense'])} {currency}",
         ]
         if balances["lent"] or balances["debt"] or monthly_credit:
             lines.append("")
             if balances["lent"]:
                 lines.append(f"🤝 Дал в долг: {_fmt_money(balances['lent'])} {currency}")
             if balances["debt"]:
-                lines.append(f"📌 Мои долги: {_fmt_money(balances['debt'])} {currency}")
+                lines.append(f"{pe.PIN} Мои долги: {_fmt_money(balances['debt'])} {currency}")
             if monthly_credit:
                 lines.append(f"🏦 Кредит/мес: {_fmt_money(monthly_credit)} {currency}")
         lines += [
@@ -2325,7 +2326,7 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
     lang = _lang_for_user_id(message.from_user.id)
     help_text = _tr(
         lang,
-        "ℹ️ <b>Как пользоваться ботом</b>\n\n"
+        f"{pe.INFO} <b>Как пользоваться ботом</b>\n\n"
         "Просто напиши боту обычным языком — он сам поймёт раздел:\n\n"
         "🍽️ <b>Питание</b>\n"
         "• Фото еды → бот посчитает КБЖУ\n"
@@ -2355,7 +2356,6 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
         "Buyruqlar: /menu · /dashboard · /help",
     )
     await screen_mod.show_screen(message.bot, message.chat.id, help_text, back_to_menu_keyboard(lang))
-
 
 @router.callback_query(F.data == 'noop')
 async def cb_noop(callback: CallbackQuery) -> None:
@@ -4152,7 +4152,7 @@ async def _send_dashboard(target: Message, telegram_id: int, period_code: str) -
 
     text = _h(bundle.text)
     if bundle.insight:
-        text += f"\n\n💡 <i>{_h(bundle.insight)}</i>"
+        text += f"\n\n{pe.IDEA} <i>{_h(bundle.insight)}</i>"
 
     kb = _dashboard_keyboard(period_code, lang)
     if bundle.chart:
@@ -4283,16 +4283,16 @@ async def _send_not_understood(
     if transcript:
         notice = _tr(
             lang,
-            f"❌ Не понял: «{_h(transcript[:80])}». Открой меню — /menu",
-            f"❌ Tushunmadim: «{_h(transcript[:80])}». Menyu — /menu",
+            f"Не понял: «{_h(transcript[:80])}». Открой меню — /menu",
+            f"Tushunmadim: «{_h(transcript[:80])}». Menyu — /menu",
         )
     else:
         notice = _tr(
             lang,
-            "❌ Непонятное сообщение. Открой меню — /menu",
-            "❌ Tushunarsiz xabar. Menyu — /menu",
+            "Непонятное сообщение. Открой меню — /menu",
+            "Tushunarsiz xabar. Menyu — /menu",
         )
-    await screen_mod.send_ephemeral(message.bot, message.chat.id, notice)
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, f"{pe.CROSS} {notice}")
 
 
 @router.message()
@@ -4454,7 +4454,7 @@ async def weekly_report_worker(bot: Bot) -> None:
                 )
                 caption = _h(bundle.text)
                 if bundle.insight:
-                    caption += f"\n\n💡 <i>{_h(bundle.insight)}</i>"
+                    caption += f"\n\n{pe.IDEA} <i>{_h(bundle.insight)}</i>"
 
                 if bundle.chart:
                     await bot.send_photo(
