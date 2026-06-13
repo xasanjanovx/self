@@ -1026,10 +1026,17 @@ def _finance_account_balances(telegram_id: int) -> dict[str, float]:
         transfer = _finance_transfer_from_note(row.get("note"))
         if transfer:
             from_bucket, to_bucket = transfer
-            if from_bucket in balances:
-                balances[from_bucket] -= amount
-            if to_bucket in balances:
-                balances[to_bucket] += amount
+            # A transfer moves value from->to. For real accounts (card/cash) and
+            # the "lent" asset, the source loses and the destination gains.
+            # "debt" is a LIABILITY: its sign is inverted vs the cash direction —
+            # repaying a debt (to=debt) must DECREASE it, borrowing (from=debt)
+            # must INCREASE it.
+            for bucket, sign in ((from_bucket, -1.0), (to_bucket, 1.0)):
+                if bucket not in balances:
+                    continue
+                if bucket == "debt":
+                    sign = -sign
+                balances[bucket] += sign * amount
             continue
 
         bucket = _finance_bucket_from_note(row.get("note"))
@@ -2998,68 +3005,79 @@ async def msg_finance_input(message: Message, state: FSMContext) -> None:
             return
 
     parse_error: Exception | None = None
-    try:
-        items = await asyncio.to_thread(ai_service.parse_finance_items, raw_text)
-    except Exception as exc:
-        logger.exception('Finance parse failed')
-        parse_error = exc
-        items = []
-
-    transfers = _extract_finance_transfers(raw_text, lang)
-
     prepared: list[dict[str, Any]] = []
-    transfer_keys = {
-        _transfer_key(
-            float(item.get("amount") or 0),
-            str(item.get("from_bucket") or ""),
-            str(item.get("to_bucket") or ""),
-        )
-        for item in transfers
-    }
-    transfer_amounts = [transfer_key[0] for transfer_key in transfer_keys]
 
-    for item in items:
-        entry_type = str(item.get("type") or "expense")
-        amount = float(item.get("amount") or 0)
-        if amount <= 0:
-            continue
+    # Primary: smart unified parser (income/expense/transfer in one pass).
+    try:
+        prepared = await asyncio.to_thread(ai_service.parse_finance_ops, raw_text)
+    except Exception as exc:
+        logger.exception('Finance ops parse failed')
+        parse_error = exc
+        prepared = []
 
-        if _is_transfer_like_item(item):
-            transfer_candidate = _finance_transfer_from_ai_item(item, raw_text, lang)
-            if transfer_candidate:
-                candidate_key = _transfer_key(
-                    float(transfer_candidate.get("amount") or 0),
-                    str(transfer_candidate.get("from_bucket") or ""),
-                    str(transfer_candidate.get("to_bucket") or ""),
-                )
-                if candidate_key in transfer_keys:
+    # Fallback: legacy item parser + regex transfer detection.
+    if not prepared:
+        try:
+            items = await asyncio.to_thread(ai_service.parse_finance_items, raw_text)
+        except Exception as exc:
+            logger.exception('Finance parse failed')
+            parse_error = exc
+            items = []
+
+        transfers = _extract_finance_transfers(raw_text, lang)
+        transfer_keys = {
+            _transfer_key(
+                float(item.get("amount") or 0),
+                str(item.get("from_bucket") or ""),
+                str(item.get("to_bucket") or ""),
+            )
+            for item in transfers
+        }
+        transfer_amounts = [transfer_key[0] for transfer_key in transfer_keys]
+
+        for item in items:
+            entry_type = str(item.get("type") or "expense")
+            amount = float(item.get("amount") or 0)
+            if amount <= 0:
+                continue
+
+            if _is_transfer_like_item(item):
+                transfer_candidate = _finance_transfer_from_ai_item(item, raw_text, lang)
+                if transfer_candidate:
+                    candidate_key = _transfer_key(
+                        float(transfer_candidate.get("amount") or 0),
+                        str(transfer_candidate.get("from_bucket") or ""),
+                        str(transfer_candidate.get("to_bucket") or ""),
+                    )
+                    if candidate_key in transfer_keys:
+                        continue
+                    transfer_keys.add(candidate_key)
+                    transfer_amounts.append(candidate_key[0])
+                    prepared.append(transfer_candidate)
                     continue
-                transfer_keys.add(candidate_key)
-                transfer_amounts.append(candidate_key[0])
-                prepared.append(transfer_candidate)
-                continue
 
-        if transfer_amounts and _is_transfer_like_item(item):
-            if any(abs(amount - transfer_amount) < 0.01 for transfer_amount in transfer_amounts):
-                continue
+            if transfer_amounts and _is_transfer_like_item(item):
+                if any(abs(amount - transfer_amount) < 0.01 for transfer_amount in transfer_amounts):
+                    continue
 
-        category = str(item.get("category") or "прочее").strip() or "прочее"
-        note = item.get("note")
-        bucket = _normalize_fin_bucket(item.get("bucket"))
-        if bucket == "card":
-            bucket = _infer_fin_bucket(f"{category} {note or ''} {raw_text}", entry_type)
+            category = str(item.get("category") or "прочее").strip() or "прочее"
+            note = item.get("note")
+            bucket = _normalize_fin_bucket(item.get("bucket"))
+            if bucket == "card":
+                bucket = _infer_fin_bucket(f"{category} {note or ''} {raw_text}", entry_type)
 
-        prepared.append(
-            {
-                "type": entry_type,
-                "amount": amount,
-                "category": category,
-                "note": note,
-                "bucket": bucket,
-            }
-        )
+            prepared.append(
+                {
+                    "type": entry_type,
+                    "amount": amount,
+                    "category": category,
+                    "note": note,
+                    "bucket": bucket,
+                }
+            )
 
-    prepared.extend(transfers)
+        prepared.extend(transfers)
+
     prepared = _dedupe_prepared_finance_items(prepared)
 
     if not prepared:

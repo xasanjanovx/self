@@ -952,6 +952,109 @@ class AIService:
         confidence = max(0.0, min(1.0, confidence))
         return InboxIntent(module=module, mode=mode, confidence=confidence, cleaned_text=cleaned_text)
 
+    def parse_finance_ops(self, raw_text: str) -> list[dict[str, Any]]:
+        """Smart unified finance parser.
+
+        Returns a list of normalized operations ready to store:
+          income/expense: {"type","amount","category","note","bucket"(card|cash|lent|debt)}
+          transfer:       {"kind":"transfer","amount","from_bucket","to_bucket","category","note"}
+
+        Understands debts, lending, paying for a friend, repayments, account
+        transfers and multi-operation sentences. Returns [] if nothing parsed.
+        """
+        prompt = (
+            "Ты — финансовый ассистент. Разбери сообщение на список операций и верни ТОЛЬКО JSON-массив.\n\n"
+            "Счета: \"card\" (карта), \"cash\" (наличные).\n"
+            "Виртуальные счета: \"lent\" (мне должны / я дал в долг), \"debt\" (я должен / мои долги/кредит).\n\n"
+            "Типы (kind):\n"
+            "- \"income\": доход. Поля: amount, category, note, account(card|cash).\n"
+            "- \"expense\": расход. Поля: amount, category, note, account(card|cash).\n"
+            "- \"transfer\": перемещение между счетами. Поля: amount, from, to, category, note.\n\n"
+            "ПРАВИЛА ДОЛГОВ (важно):\n"
+            "- дал в долг / оплатил за друга / занял кому-то (с карты) → transfer from=card(или cash) to=lent.\n"
+            "- мне вернули долг / друг вернул (на наличные) → transfer from=lent to=cash(или card).\n"
+            "- я взял в долг / занял у кого-то (на карту) → transfer from=debt to=card(или cash).\n"
+            "- я вернул свой долг / погасил кредит (картой) → transfer from=card(или cash) to=debt.\n"
+            "- снял с карты / положил на карту → transfer card<->cash.\n\n"
+            "В одном сообщении может быть несколько операций — верни все по порядку.\n"
+            "Суммы — числа без пробелов. Если счёт не указан — по умолчанию card.\n\n"
+            "Примеры:\n"
+            "\"расход 25000 еда, доход 300000 зарплата\" -> "
+            '[{"kind":"expense","amount":25000,"category":"еда","note":"еда","account":"card"},'
+            '{"kind":"income","amount":300000,"category":"зарплата","note":"зарплата","account":"card"}]\n'
+            "\"я сам вернул свои долги картой 100000\" -> "
+            '[{"kind":"transfer","amount":100000,"from":"card","to":"debt","category":"Погашение долга","note":"вернул свой долг картой"}]\n'
+            "\"оплатил за друга картой 50000, а он вернул мне наличными\" -> "
+            '[{"kind":"transfer","amount":50000,"from":"card","to":"lent","category":"Оплата за друга","note":"оплатил за друга"},'
+            '{"kind":"transfer","amount":50000,"from":"lent","to":"cash","category":"Возврат долга","note":"друг вернул наличными"}]\n'
+            "\"снял с карты 200000\" -> "
+            '[{"kind":"transfer","amount":200000,"from":"card","to":"cash","category":"Снятие наличных","note":"снял с карты"}]\n'
+            "\"взял в долг 500000 на карту\" -> "
+            '[{"kind":"transfer","amount":500000,"from":"debt","to":"card","category":"Взял в долг","note":"взял в долг"}]\n'
+            "Если ничего не извлечь — верни []."
+        )
+
+        try:
+            text = self._generate_content(
+                model=self.text_model,
+                parts=[{"text": f"{prompt}\n\nСообщение: {raw_text}"}],
+                temperature=0.0,
+            )
+            parsed = _extract_json(text)
+        except Exception:
+            return []
+
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list):
+            return []
+
+        buckets = {"card", "cash", "lent", "debt"}
+        result: list[dict[str, Any]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                amount = float(item.get("amount"))
+            except Exception:
+                continue
+            if amount <= 0:
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            note = str(item.get("note") or "").strip() or None
+            category = str(item.get("category") or "").strip()
+
+            if kind == "transfer":
+                from_bucket = str(item.get("from") or "").strip().lower()
+                to_bucket = str(item.get("to") or "").strip().lower()
+                if from_bucket not in buckets or to_bucket not in buckets or from_bucket == to_bucket:
+                    continue
+                result.append(
+                    {
+                        "kind": "transfer",
+                        "amount": amount,
+                        "from_bucket": from_bucket,
+                        "to_bucket": to_bucket,
+                        "category": category or "Перевод",
+                        "note": note,
+                    }
+                )
+            else:
+                entry_type = "income" if kind == "income" else "expense"
+                account = str(item.get("account") or "card").strip().lower()
+                if account not in {"card", "cash"}:
+                    account = "card"
+                result.append(
+                    {
+                        "type": entry_type,
+                        "amount": amount,
+                        "category": category or ("доход" if entry_type == "income" else "прочее"),
+                        "note": note,
+                        "bucket": account,
+                    }
+                )
+        return result
+
     def parse_finance_items(self, raw_text: str) -> list[dict[str, Any]]:
         prompt = (
             "Ты извлекаешь финансовые операции из текста. "
