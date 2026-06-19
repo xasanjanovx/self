@@ -280,6 +280,89 @@ def _is_vacancy_ad_line(line: str) -> bool:
     return any(token in lower for token in _VACANCY_AD_TOKENS)
 
 
+_SLOGAN_TOKENS = (
+    "karyera",
+    "karera",
+    "biz bilan",
+    "boshlang",
+    "boshlaymiz",
+    "qo'shil",
+    "qoshil",
+    "orzu",
+    "kelajagi",
+    "kelajak",
+    "muvaffaqiyat",
+    "jamoamizga qo",
+    "начни карьеру",
+    "карьер",
+    "присоедин",
+    "мечт",
+    "будущ",
+    "успех",
+    "join our team",
+    "your career",
+    "dream",
+)
+
+_JOB_INDICATOR_TOKENS = (
+    "vakans",
+    "вакан",
+    "kerak",
+    "kere",
+    "требует",
+    "ishga",
+    "lavozim",
+    "bo'sh ish",
+    "bo‘sh ish",
+    "xodim",
+    "ish o'rni",
+    "ish o‘rni",
+    "taklif",
+    "qabul qil",
+    "приглаша",
+    "ищем",
+    "talab",
+    "hiring",
+    "job",
+    "position",
+    "operator",
+    "оператор",
+    "sotuvchi",
+    "продавец",
+    "menejer",
+    "manager",
+    "менеджер",
+    "mutaxassis",
+    "специалист",
+    "usta",
+    "haydovchi",
+    "oshpaz",
+    "kassir",
+    "ofitsiant",
+)
+
+
+def _is_generic_slogan(text: str | None) -> bool:
+    """A headline is a useless slogan if it sells the dream/channel but names no job."""
+    low = (text or "").strip().lower()
+    if not low:
+        return True
+    if any(token in low for token in _SLOGAN_TOKENS):
+        return True
+    if not any(token in low for token in _JOB_INDICATOR_TOKENS):
+        return True
+    return False
+
+
+def _pick_headline(ai_headline: str | None, fallback_headline: str | None) -> str | None:
+    """Prefer a headline that names the position over a generic motivational slogan."""
+    if ai_headline and not _is_generic_slogan(ai_headline):
+        return ai_headline
+    if fallback_headline and not _is_generic_slogan(fallback_headline):
+        return fallback_headline
+    return ai_headline or fallback_headline
+
+
 def _extract_vacancy_details_fallback(raw_text: str) -> list[str]:
     known_prefixes = (
         "hudud",
@@ -1328,7 +1411,10 @@ class AIService:
             'Формат: {"headline":"...","company":"...","titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
             '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
             '"details":["..."],"phone":"+998... | +998...","telegram":"@username"}. '
-            "headline: цепляющая первая строка (без рекламных слоганов чужого канала). "
+            "headline: бери строку-приглашение с должностью (например «QIZLARNI CALL-CENTER OPERATORI "
+            "LAVOZIMIGA ISHGA TAKLIF QILAMIZ» или «Требуется продавец-консультант»). "
+            "НЕ бери общие мотивационные слоганы канала типа «Karyerangizni biz bilan boshlang», "
+            "«Начни карьеру с нами», «Присоединяйся к команде», «Orzungizdagi ish» — они запрещены как headline. "
             "company: название компании/работодателя, если указано, иначе '-'. "
             "Сохрани ВСЕ контакты. phone: укажи ВСЕ телефонные номера через ' | ' (например '+998901112233 | +998935556677'). "
             "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
@@ -1399,6 +1485,6 @@ class AIService:
             details=ai_data.details or fallback.details,
             phone=merged_phone,
             telegram=ai_data.telegram or fallback.telegram,
-            headline=ai_data.headline or fallback.headline,
+            headline=_pick_headline(ai_data.headline, fallback.headline),
             company=ai_data.company or fallback.company,
         )
