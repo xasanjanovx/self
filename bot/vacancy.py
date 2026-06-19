@@ -94,6 +94,7 @@ _VACANCY_DISCLAIMER_LINES = (
 _VACANCY_FOOTER_URL = "https://t.me/ishdasiz"
 _VACANCY_FOOTER_TEXT = "Tez va oson ish toping!"
 _VACANCY_DIVIDER = "— — — — — — — — — — —"
+_BULLET = "•"
 
 
 def _emoji(name: str, premium: bool) -> str:
@@ -161,6 +162,16 @@ def _telegram_block(value: str | None) -> str | None:
     return _h(clean) if clean else None
 
 
+def _format_phone_block(value: str | None) -> str | None:
+    clean = _clean_value(value)
+    if not clean:
+        return None
+    parts = [p.strip() for p in clean.split("|") if p.strip()]
+    if not parts:
+        return None
+    return " | ".join(_h(p) for p in parts)
+
+
 def build_vacancy_panel_text(lang: str = "ru") -> str:
     if lang == "uz":
         return (
@@ -199,6 +210,38 @@ def _remove_cross_duplicates(items: list[str], blocked: set[str]) -> list[str]:
         blocked.add(key)
         cleaned.append(item)
     return cleaned
+
+
+_STOP_WORDS = {
+    "va", "bilan", "uchun", "ham", "yoki", "bo'lishi", "bo'lsa", "ega",
+    "и", "в", "на", "для", "с", "по", "от", "до", "или", "быть",
+    "the", "and", "for", "with", "you", "your",
+}
+
+
+def _significant_words(text: str) -> set[str]:
+    words = re.findall(r"[\wʻ'’\u0400-\u04FF]+", text.casefold())
+    return {w for w in words if len(w) > 3 and w not in _STOP_WORDS}
+
+
+def _dedup_against(items: list[str], others: list[str], *, threshold: float = 0.7) -> list[str]:
+    """Drop items whose significant words mostly repeat info already shown elsewhere."""
+    pool: set[str] = set()
+    for other in others:
+        pool |= _significant_words(other)
+    if not pool:
+        return items
+    kept: list[str] = []
+    for item in items:
+        words = _significant_words(item)
+        if not words:
+            kept.append(item)
+            continue
+        overlap = len(words & pool) / len(words)
+        if overlap >= threshold:
+            continue
+        kept.append(item)
+    return kept
 
 
 def _trim_items(items: list[str], *, max_items: int, max_len: int) -> list[str]:
@@ -295,7 +338,9 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
             )
         )
     ]
-    phone = _clean_value(data.phone)
+    # Убираем из «доп. информации» строки, которые дублируют требования/обязанности/условия.
+    details = _dedup_against(details, requirements + duties + benefits + titles)
+    phone = _format_phone_block(data.phone)
     telegram = _telegram_block(data.telegram)
 
     lines: list[str] = [
@@ -307,7 +352,7 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
     if len(titles) > 1:
         lines.append("<b>Bo'sh ish o'rinlari:</b>")
         for title in titles:
-            lines.append(f"{_emoji('openings', premium)} {_h(title)}")
+            lines.append(f"{_BULLET} {_h(title)}")
         _append_blank(lines)
 
     if company:
@@ -329,13 +374,13 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
         lines.append(_h(schedule))
         _append_blank(lines)
 
-    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements, bullet=_emoji('requirements', premium))
-    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits, bullet=_emoji('benefits', premium))
-    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties, bullet=_emoji('duties', premium))
-    _append_section(lines, "<b>Qo'shimcha ma'lumotlar:</b>", details, bullet=_emoji('openings', premium))
+    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements, bullet=_BULLET)
+    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits, bullet=_BULLET)
+    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties, bullet=_BULLET)
+    _append_section(lines, f"{_emoji('openings', premium)} <b>Qo'shimcha ma'lumotlar:</b>", details, bullet=_BULLET)
 
     if phone:
-        lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {_h(phone)}")
+        lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {phone}")
     if telegram:
         lines.append(f"{_emoji('telegram', premium)} <b>Telegram:</b> {telegram}")
     if phone or telegram:

@@ -197,11 +197,63 @@ def _extract_phone_from_text(text: str) -> str | None:
     return None
 
 
+def _extract_all_phones_from_text(text: str) -> list[str]:
+    """Extract every valid phone number, de-duplicated by digits, order preserved."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _VACANCY_PHONE_RE.finditer(text or ""):
+        raw = re.sub(r"\s+", " ", match.group(0)).strip()
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) < 9:
+            continue
+        # Узбекские номера: 9 цифр (после кода) или 12 (с 998). Длиннее — это суммы/диапазоны.
+        if len(digits) > 12:
+            continue
+        if len(digits) <= 10 and not raw.startswith("+") and not digits.startswith("998"):
+            continue
+        # Compare by the last 9 digits so "+998 90..." and "90..." are one number.
+        key = digits[-9:]
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(raw)
+    return found
+
+
+_CONTACT_HINTS = (
+    "tel",
+    "phone",
+    "telefon",
+    "aloqa",
+    "bog'lan",
+    "bog‘lan",
+    "контакт",
+    "телефон",
+    "whatsapp",
+    "📞",
+    "☎",
+    "📱",
+)
+
+
+def _extract_contact_phones(text: str) -> list[str]:
+    """Collect phone numbers only from contact-like lines to avoid salary/year noise."""
+    lines: list[str] = []
+    for line in (text or "").splitlines():
+        low = line.lower()
+        if "+998" in line or any(hint in low for hint in _CONTACT_HINTS):
+            lines.append(line)
+    return _extract_all_phones_from_text("\n".join(lines))
+
+
 def _normalize_phone_value(value: Any) -> str | None:
     text = str(value or "").strip()
     if not text or text == "-":
         return None
-    return _extract_phone_from_text(text)
+    phones = _extract_all_phones_from_text(text)
+    if not phones:
+        return None
+    return " | ".join(phones)
 
 
 def _normalize_region_tag(value: Any, raw_text: str, default_region_tag: str) -> str:
@@ -577,7 +629,8 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
         if address == "-" and any(token in lower for token in ("адрес", "manzil", "локац", "location")):
             address = line.split(":", 1)[1].strip() if ":" in line else line
 
-    phone = _extract_phone_from_text(raw_text)
+    phones = _extract_contact_phones(raw_text)
+    phone = " | ".join(phones) if phones else None
 
     telegram = None
     telegram_match = _VACANCY_TELEGRAM_RE.search(raw_text)
@@ -1274,10 +1327,10 @@ class AIService:
             "Ответ только JSON без пояснений. "
             'Формат: {"headline":"...","company":"...","titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
             '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
-            '"details":["..."],"phone":"+998...","telegram":"@username"}. '
+            '"details":["..."],"phone":"+998... | +998...","telegram":"@username"}. '
             "headline: цепляющая первая строка (без рекламных слоганов чужого канала). "
             "company: название компании/работодателя, если указано, иначе '-'. "
-            "Сохрани ВСЕ контакты: телефон и telegram-username. "
+            "Сохрани ВСЕ контакты. phone: укажи ВСЕ телефонные номера через ' | ' (например '+998901112233 | +998935556677'). "
             "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
             "Если данных нет — '-' для строк и [] для списков. "
             "region_tag: только uppercase hashtag вида #TOSHKENT."
@@ -1327,6 +1380,13 @@ class AIService:
         ai_data = _normalize_vacancy_payload(parsed, raw_text, default_region_tag)
         fallback = _extract_vacancy_fallback(raw_text, default_region_tag)
 
+        # Объединяем номера из ответа AI и из контактных строк, чтобы не потерять второй
+        # номер и не зацепить суммы зарплаты.
+        phone_sources = [ai_data.phone or ""]
+        phone_sources.extend(_extract_contact_phones(raw_text))
+        merged_phones = _extract_all_phones_from_text(" | ".join(p for p in phone_sources if p))
+        merged_phone = " | ".join(merged_phones) if merged_phones else (ai_data.phone or fallback.phone)
+
         return VacancyTemplateData(
             titles=ai_data.titles or fallback.titles,
             region_tag=ai_data.region_tag or fallback.region_tag,
@@ -1337,7 +1397,7 @@ class AIService:
             benefits=ai_data.benefits or fallback.benefits,
             duties=ai_data.duties or fallback.duties,
             details=ai_data.details or fallback.details,
-            phone=ai_data.phone or fallback.phone,
+            phone=merged_phone,
             telegram=ai_data.telegram or fallback.telegram,
             headline=ai_data.headline or fallback.headline,
             company=ai_data.company or fallback.company,
