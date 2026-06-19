@@ -51,6 +51,7 @@ from .keyboards import (
     report_settings_keyboard,
     trainer_keyboard,
     vacancy_channel_keyboard,
+    vacancy_mode_keyboard,
     vacancy_panel_keyboard,
     vacancy_result_keyboard,
 )
@@ -3738,39 +3739,101 @@ async def msg_vacancy_input(message: Message, state: FSMContext) -> None:
         )
         return
 
+    # Сохраняем исходный текст и спрашиваем режим оформления.
+    await safe_delete_message(message)
+    await state.update_data(
+        pending_vacancy_raw=raw_text,
+        pending_vacancy_premium=bool(getattr(message.from_user, "is_premium", False)),
+        pending_vacancy_preview_photo_id=(message.photo[-1].file_id if message.photo else None),
+        pending_vacancy_post=None,
+        pending_vacancy_contact_url=None,
+    )
+    await _edit_panel_from_state(
+        message,
+        state,
+        _build_vacancy_mode_prompt(lang),
+        vacancy_mode_keyboard(lang),
+    )
+
+
+def _build_vacancy_mode_prompt(lang: str) -> str:
+    if lang == "uz":
+        return (
+            "🧩 <b>Vakansiyani qanday rasmiylashtiramiz?</b>\n\n"
+            "1️⃣ <b>Shablon</b> — matnni toza shablon ko'rinishiga keltiramiz, faktlarni o'zgartirmaymiz.\n"
+            "2️⃣ <b>Grammatika + struktura</b> — xatolarni tuzatamiz, premium emoji qo'shamiz, "
+            "strukturani yaxshilaymiz (faktlar saqlanadi).\n"
+            "3️⃣ <b>Kengaytirish (AI)</b> — ma'lumot kam bo'lsa, AI mos bandlar bilan to'ldiradi "
+            "va vakansiya ohangiga (jiddiy yoki jozibali) moslaydi.\n\n"
+            "Kerakli variantni tanlang 👇"
+        )
+    return (
+        "🧩 <b>Как оформить вакансию?</b>\n\n"
+        "1️⃣ <b>Шаблон</b> — приведу текст к чистому шаблону, факты не меняю.\n"
+        "2️⃣ <b>Грамматика + структура</b> — исправлю ошибки, добавлю премиум-эмодзи и "
+        "улучшу структуру (все факты сохраняются).\n"
+        "3️⃣ <b>Расширить (AI)</b> — если данных мало, AI дополнит уместными пунктами и "
+        "подберёт тон (строгий или привлекающий).\n\n"
+        "Выбери нужный вариант 👇"
+    )
+
+
+@router.callback_query(F.data.startswith("vacancy:mode:"))
+async def cb_vacancy_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    mode = callback.data.split(":", 2)[-1].strip().lower()
+    if mode not in {"template", "improve", "enrich"}:
+        mode = "template"
+
+    data = await state.get_data()
+    raw_text = str(data.get("pending_vacancy_raw") or "").strip()
+    premium = bool(data.get("pending_vacancy_premium", False))
+    if not raw_text:
+        await callback.answer(
+            _tr(lang, "Сначала пришли текст вакансии", "Avval vakansiya matnini yuboring"),
+            show_alert=True,
+        )
+        return
+
+    await _remember_panel(callback, state)
+    # Показываем индикатор обработки, чтобы пользователь видел реакцию.
+    await safe_edit_message(
+        callback,
+        _tr(lang, "⏳ Оформляю вакансию…", "⏳ Vakansiya tayyorlanmoqda…"),
+        reply_markup=None,
+    )
+    await callback.answer()
+
     try:
         parsed = await asyncio.to_thread(
             ai_service.extract_vacancy_template_data,
             raw_text,
             default_region_tag=VACANCY_DEFAULT_REGION_TAG,
+            mode=mode,
         )
-        post_text = format_vacancy_post(parsed, premium=bool(getattr(message.from_user, "is_premium", False)))
+        post_text = format_vacancy_post(parsed, premium=premium)
         contact_url = build_contact_url(parsed.telegram)
     except Exception as exc:
         logger.exception("Vacancy parse failed")
-        await safe_delete_message(message)
-        await _edit_panel_from_state(
-            message,
-            state,
+        await safe_edit_message(
+            callback,
             build_vacancy_panel_text(lang)
             + "\n\n"
             + _tr(lang, "Ошибка обработки вакансии", "Vakansiya tahlil xatosi")
             + f": {_h(exc)}",
-            vacancy_panel_keyboard(lang),
+            reply_markup=vacancy_panel_keyboard(lang),
         )
         return
 
-    await safe_delete_message(message)
     await state.update_data(
         pending_vacancy_post=post_text,
         pending_vacancy_contact_url=contact_url,
-        pending_vacancy_preview_photo_id=(message.photo[-1].file_id if message.photo else None),
     )
-    await _edit_panel_from_state(
-        message,
-        state,
+    await safe_edit_message(
+        callback,
         post_text,
-        vacancy_result_keyboard(lang, contact_url, show_publish=True),
+        reply_markup=vacancy_result_keyboard(lang, contact_url, show_publish=True),
     )
 
 

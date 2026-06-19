@@ -102,6 +102,10 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "vacancy_again": "📣 Еще вакансия",
         "vacancy_contact": "📩 Связаться",
         "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
+        "vacancy_mode_title": "Как оформить вакансию?",
+        "vacancy_mode_template": "Шаблон (как есть)",
+        "vacancy_mode_improve": "Грамматика + структура",
+        "vacancy_mode_enrich": "Расширить (AI)",
         "delete_reminder": "Удалить • {time} {text}",
     },
     "uz": {
@@ -165,6 +169,10 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "vacancy_again": "📣 Yana vakansiya",
         "vacancy_contact": "📩 Bog'lanish",
         "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
+        "vacancy_mode_title": "Vakansiyani qanday rasmiylashtiramiz?",
+        "vacancy_mode_template": "Shablon (bor holicha)",
+        "vacancy_mode_improve": "Grammatika + struktura",
+        "vacancy_mode_enrich": "Kengaytirish (AI)",
         "delete_reminder": "O'chirish • {time} {text}",
     },
 }
@@ -531,6 +539,17 @@ def trainer_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 def vacancy_panel_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)]]
+    )
+
+
+def vacancy_mode_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(_t(lang, "vacancy_mode_template"), "vacancy:mode:template", style="primary", icon=_pe.ID_REPORT)],
+            [_btn(_t(lang, "vacancy_mode_improve"), "vacancy:mode:improve", style="primary", icon=_pe.ID_EDIT)],
+            [_btn(_t(lang, "vacancy_mode_enrich"), "vacancy:mode:enrich", style="success", icon=_pe.ID_STAR)],
+            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
+        ]
     )
 
 
