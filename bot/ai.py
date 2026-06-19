@@ -350,7 +350,7 @@ def _vacancy_section_lines(raw_text: str, keywords: tuple[str, ...]) -> list[str
                 break
             result.append(clean)
 
-    return _normalize_list_value(result)
+    return _normalize_list_value(result, max_items=30, max_len=220)
 
 
 def _vacancy_fallback_titles(raw_text: str) -> list[str]:
@@ -609,11 +609,11 @@ def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> Vacancy
 
 def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: str) -> VacancyTemplateData:
     data = payload if isinstance(payload, dict) else {}
-    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=20, max_len=90))
-    requirements = _strip_ad_lines(_normalize_list_value(data.get("requirements"), max_items=6, max_len=160))
-    benefits = _strip_ad_lines(_normalize_list_value(data.get("benefits"), max_items=6, max_len=160))
-    duties = _strip_ad_lines(_normalize_list_value(data.get("duties"), max_items=6, max_len=160))
-    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=20, max_len=180))
+    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=25, max_len=120))
+    requirements = _strip_ad_lines(_normalize_list_value(data.get("requirements"), max_items=30, max_len=220))
+    benefits = _strip_ad_lines(_normalize_list_value(data.get("benefits"), max_items=30, max_len=220))
+    duties = _strip_ad_lines(_normalize_list_value(data.get("duties"), max_items=30, max_len=220))
+    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=30, max_len=220))
 
     return VacancyTemplateData(
         titles=titles,
@@ -1270,8 +1270,13 @@ class AIService:
         prompt = (
             "Ты извлекаешь данные из текста вакансии для Telegram-шаблона. "
             "Текст может быть на русском или узбекском, с шумом, эмодзи, пересланным оформлением или без структуры. "
-            "Нужно перенести максимум фактов из исходника. Нельзя придумывать факты. "
-            "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
+            "Нужно перенести МАКСИМУМ фактов из исходника. Нельзя придумывать факты. "
+            "ВАЖНО: сохраняй ВСЕ пункты списков (требования, условия/льготы, обязанности) — НЕ сокращай, "
+            "НЕ объединяй и НЕ выбрасывай пункты. Переноси формулировки максимально близко к оригиналу, "
+            "только убери лишние эмодзи/маркеры в начале строк. "
+            "Вступительный/описательный абзац и важные уточнения положи в details, чтобы ничего не потерять. "
+            "Нельзя переносить только рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
+            "ОБЯЗАТЕЛЬНО сохрани все контакты: телефон и telegram-username. "
             "Если данных нет, используй '-' для строк и [] для списков. "
             "Ответ только JSON без пояснений. "
             'Формат: {"headline":"...","company":"...","titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
@@ -1279,7 +1284,7 @@ class AIService:
             '"details":["..."],"phone":"+998...","telegram":"@username"}. '
             "headline: цепляющая первая строка по исходнику (без выдумок и без рекламных слоганов канала). "
             "company: название компании/работодателя, если явно указано, иначе '-'. "
-            "Поле titles: 1-20 названий должности/ролей, сколько реально указано в источнике. "
+            "Поле titles: названия должности/ролей, сколько реально указано в источнике. "
             "region_tag: только uppercase hashtag вида #TOSHKENT или #ANDIJON."
         )
 

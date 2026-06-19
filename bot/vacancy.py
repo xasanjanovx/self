@@ -182,11 +182,11 @@ def _append_blank(lines: list[str]) -> None:
         lines.append("")
 
 
-def _append_section(lines: list[str], title: str, items: list[str]) -> None:
+def _append_section(lines: list[str], title: str, items: list[str], bullet: str = "•") -> None:
     if not items:
         return
     lines.append(title)
-    lines.extend(f"- {_h(item)}" for item in items)
+    lines.extend(f"{bullet} {_h(item)}" for item in items)
     _append_blank(lines)
 
 
@@ -234,7 +234,7 @@ def _build_headline(
 
 
 def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> str:
-    titles = _trim_items(_clean_list(data.titles), max_items=8, max_len=72)
+    titles = _trim_items(_clean_list(data.titles), max_items=25, max_len=120)
     titles = [
         title
         for title in titles
@@ -255,23 +255,23 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
             blocked_keys.add(direct_value.casefold().strip())
     requirements = _trim_items(
         _remove_cross_duplicates(_clean_list(data.requirements), blocked_keys),
-        max_items=5,
-        max_len=120,
+        max_items=30,
+        max_len=220,
     )
     benefits = _trim_items(
         _remove_cross_duplicates(_clean_list(data.benefits), blocked_keys),
-        max_items=4,
-        max_len=120,
+        max_items=30,
+        max_len=220,
     )
     duties = _trim_items(
         _remove_cross_duplicates(_clean_list(data.duties), blocked_keys),
-        max_items=5,
-        max_len=120,
+        max_items=30,
+        max_len=220,
     )
     details = _trim_items(
         _remove_cross_duplicates(_clean_list(data.details), blocked_keys),
-        max_items=6,
-        max_len=120,
+        max_items=30,
+        max_len=220,
     )
     details = [
         item
@@ -329,10 +329,10 @@ def format_vacancy_post(data: VacancyTemplateData, *, premium: bool = True) -> s
         lines.append(_h(schedule))
         _append_blank(lines)
 
-    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements)
-    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits)
-    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties)
-    _append_section(lines, "<b>Qo'shimcha ma'lumotlar:</b>", details)
+    _append_section(lines, f"{_emoji('requirements', premium)} <b>Talablar:</b>", requirements, bullet=_emoji('requirements', premium))
+    _append_section(lines, f"{_emoji('benefits', premium)} <b>Qulayliklar:</b>", benefits, bullet=_emoji('benefits', premium))
+    _append_section(lines, f"{_emoji('duties', premium)} <b>Vazifalar:</b>", duties, bullet=_emoji('duties', premium))
+    _append_section(lines, "<b>Qo'shimcha ma'lumotlar:</b>", details, bullet=_emoji('openings', premium))
 
     if phone:
         lines.append(f"{_emoji('phone', premium)} <b>Aloqa:</b> {_h(phone)}")
