@@ -188,6 +188,39 @@ def _money(value: float) -> str:
     return f"{float(value):,.0f}".replace(",", " ")
 
 
+# Quick-add button labels, refreshed by main.py right before a panel is rendered.
+# Stored as plain strings so the keyboard layer stays free of DB/business logic.
+_last_quick_calorie: list[str] = []
+_last_quick_finance: list[str] = []
+
+
+def set_last_quick_calorie(labels: list[str] | None) -> None:
+    global _last_quick_calorie
+    _last_quick_calorie = list(labels or [])
+
+
+def set_last_quick_finance(labels: list[str] | None) -> None:
+    global _last_quick_finance
+    _last_quick_finance = list(labels or [])
+
+
+def _quick_rows(prefix: str, labels: list[str]) -> list[list[InlineKeyboardButton]]:
+    """Build rows of quick-add buttons (2 per row), index-based callbacks."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for idx, label in enumerate(labels):
+        text = str(label or "").strip()
+        if not text:
+            continue
+        row.append(_btn(text[:64], f"{prefix}:quick:{idx}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
+
+
 def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     P = "primary"
     return InlineKeyboardMarkup(
@@ -247,6 +280,7 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 
 def calorie_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    rows.extend(_quick_rows("calorie", _last_quick_calorie))
     rows.append([_btn(_label(_t(lang, "calorie_goal")), "calorie:goals", style="primary", icon=_pe.ID_GOAL)])
     rows.append([_btn(_label(_t(lang, "calorie_meals")), "calorie:meals:day", style="primary", icon=_pe.ID_NUTRITION)])
     rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
@@ -299,6 +333,7 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
 
 def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    rows.extend(_quick_rows("finance", _last_quick_finance))
     rows.append(
         [
             _btn(_label(_t(lang, "finance_ops")), "finance:ops:day", style="primary", icon=_pe.ID_REPORT),

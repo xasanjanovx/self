@@ -49,6 +49,8 @@ from .keyboards import (
     main_menu_keyboard,
     nutrition_goal_keyboard,
     report_settings_keyboard,
+    set_last_quick_calorie,
+    set_last_quick_finance,
     trainer_keyboard,
     vacancy_channel_keyboard,
     vacancy_mode_keyboard,
@@ -492,9 +494,59 @@ def build_nutrition_setup_text(lang: str = "ru") -> str:
     )
 
 
+def _refresh_calorie_quick(telegram_id: int, lang: str) -> list[dict[str, Any]]:
+    """Fetch most-used meals and refresh the quick-add button labels for the panel."""
+    try:
+        items = db.list_top_calorie_meals(telegram_id, limit=10)
+    except Exception:
+        logger.exception("calorie quick fetch failed")
+        items = []
+    unit = "kkal" if lang == "uz" else "ккал"
+    labels: list[str] = []
+    for item in items:
+        desc = str(item.get("meal_desc") or "").strip()
+        if not desc:
+            continue
+        kcal = item.get("calories")
+        if kcal is not None:
+            try:
+                kcal_text = f"{int(round(float(kcal)))} {unit}"
+            except (TypeError, ValueError):
+                kcal_text = unit
+            labels.append(f"🍽 {desc[:22]} · {kcal_text}")
+        else:
+            labels.append(f"🍽 {desc[:30]}")
+    set_last_quick_calorie(labels)
+    return items
+
+
+def _refresh_finance_quick(telegram_id: int, lang: str) -> list[dict[str, Any]]:
+    """Fetch most-used operations and refresh the quick-add button labels for the panel."""
+    try:
+        items = db.list_top_finance_ops(telegram_id, limit=10)
+    except Exception:
+        logger.exception("finance quick fetch failed")
+        items = []
+    labels: list[str] = []
+    for item in items:
+        entry_type = str(item.get("entry_type") or "expense")
+        sign = "➕" if entry_type == "income" else "➖"
+        try:
+            amount = float(item.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        note_clean = _finance_note_without_bucket(item.get("note"))
+        category = str(item.get("category") or "").strip()
+        desc = note_clean or category or _tr(lang, "операция", "amaliyot")
+        labels.append(f"{sign}{_fmt_money(amount)} {desc}")
+    set_last_quick_finance(labels)
+    return items
+
+
 def build_calorie_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     user, tz_name, _ = _user_profile(telegram_id)
     lang = _lang_from_user(user)
+    _refresh_calorie_quick(telegram_id, lang)
     profile = db.get_nutrition_profile(telegram_id)
     totals = db.get_today_nutrition_totals(telegram_id, tz_name=tz_name)
     entries = db.list_today_calorie_entries(telegram_id, tz_name=tz_name)
@@ -1089,6 +1141,7 @@ def _finance_current_targets_to_base(telegram_id: int, targets: dict[str, float]
 def build_finance_panel(telegram_id: int) -> tuple[str, list[dict[str, Any]]]:
     user, tz_name, currency = _user_profile(telegram_id)
     lang = _lang_from_user(user)
+    _refresh_finance_quick(telegram_id, lang)
     entries = db.list_today_finance_entries(telegram_id, tz_name=tz_name)
     settings_fin = db.get_finance_settings(telegram_id)
     balances = _finance_balances_with_base(telegram_id)
@@ -2726,8 +2779,44 @@ async def cb_calorie_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer(_tr(lang, 'Действие отменено', 'Amal bekor qilindi'))
 
 
-@router.callback_query(F.data.startswith('calorie:view:'))
-async def cb_calorie_view(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith('calorie:quick:'))
+async def cb_calorie_quick(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    try:
+        idx = int(str(callback.data).split(':')[-1])
+    except (TypeError, ValueError):
+        await callback.answer()
+        return
+
+    items = db.list_top_calorie_meals(callback.from_user.id, limit=10)
+    if idx < 0 or idx >= len(items):
+        await callback.answer(_tr(lang, 'Запись не найдена, обнови панель', 'Yozuv topilmadi, panelni yangilang'), show_alert=True)
+        return
+
+    item = items[idx]
+    try:
+        db.add_calorie_log(
+            callback.from_user.id,
+            photo_url=None,
+            meal_desc=str(item.get('meal_desc') or '').strip(),
+            calories=item.get('calories'),
+            protein=item.get('protein'),
+            fat=item.get('fat'),
+            carbs=item.get('carbs'),
+            confidence=None,
+            advice=None,
+        )
+    except Exception as exc:
+        logger.exception('Calorie quick add failed')
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
+        return
+
+    text, entries = build_calorie_panel(callback.from_user.id)
+    await state.set_state(BotStates.waiting_calorie_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, text, reply_markup=calorie_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, 'Добавлено ✅', "Qo'shildi ✅"))
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)
     log_id = callback.data.split('calorie:view:', 1)[1]
@@ -3157,7 +3246,41 @@ async def cb_finance_add_confirm(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer(_tr(lang, "Операции сохранены", "Operatsiyalar saqlandi"))
 
 
-@router.callback_query(F.data == "finance:add_cancel")
+@router.callback_query(F.data.startswith("finance:quick:"))
+async def cb_finance_quick(callback: CallbackQuery, state: FSMContext) -> None:
+    await ensure_user_callback(callback)
+    lang = _lang_for_user_id(callback.from_user.id)
+    try:
+        idx = int(str(callback.data).split(":")[-1])
+    except (TypeError, ValueError):
+        await callback.answer()
+        return
+
+    items = db.list_top_finance_ops(callback.from_user.id, limit=10)
+    if idx < 0 or idx >= len(items):
+        await callback.answer(_tr(lang, "Операция не найдена, обнови панель", "Amaliyot topilmadi, panelni yangilang"), show_alert=True)
+        return
+
+    item = items[idx]
+    try:
+        db.add_finance_entry(
+            callback.from_user.id,
+            entry_type=str(item.get("entry_type") or "expense"),
+            amount=float(item.get("amount") or 0),
+            category=str(item.get("category") or "").strip() or _tr(lang, "прочее", "boshqa"),
+            note=item.get("note"),
+            source="quick",
+        )
+    except Exception as exc:
+        logger.exception("Finance quick add failed")
+        await callback.answer(f"{_tr(lang, 'Ошибка', 'Xato')}: {_h(exc)}", show_alert=True)
+        return
+
+    text, entries = build_finance_panel(callback.from_user.id)
+    await state.set_state(BotStates.waiting_finance_input)
+    await _remember_panel(callback, state)
+    await safe_edit_message(callback, text, reply_markup=finance_panel_keyboard(entries, lang))
+    await callback.answer(_tr(lang, "Добавлено ✅", "Qo'shildi ✅"))
 async def cb_finance_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await ensure_user_callback(callback)
     lang = _lang_for_user_id(callback.from_user.id)

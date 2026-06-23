@@ -740,6 +740,38 @@ class Database:
             or []
         )
 
+    def list_top_finance_ops(self, telegram_id: int, limit: int = 10, days: int = 120) -> list[dict[str, Any]]:
+        """Return the most-used finance operations (exact type+category+note+amount),
+        ranked by usage count, ties broken by recency. Used for quick-add buttons."""
+        rows = self.list_finance_entries(telegram_id, days=days)
+        groups: dict[tuple, dict[str, Any]] = {}
+        for idx, row in enumerate(rows):
+            entry_type = str(row.get("entry_type") or "expense").strip() or "expense"
+            category = str(row.get("category") or "").strip()
+            note = row.get("note")
+            note_str = str(note or "").strip()
+            try:
+                amount = float(row.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0:
+                continue
+            key = (entry_type, category.casefold(), note_str.casefold(), round(amount, 2))
+            existing = groups.get(key)
+            if existing is None:
+                groups[key] = {
+                    "entry_type": entry_type,
+                    "category": category,
+                    "note": note_str or None,
+                    "amount": amount,
+                    "count": 1,
+                    "first_idx": idx,  # rows are ordered newest-first
+                }
+            else:
+                existing["count"] += 1
+        ranked = sorted(groups.values(), key=lambda g: (-g["count"], g["first_idx"]))
+        return ranked[:limit]
+
     def get_today_finance_totals(self, telegram_id: int, tz_name: str | None = None) -> dict[str, float]:
         tz = self._zone(tz_name)
         local_today = datetime.now(tz).date().isoformat()
@@ -896,6 +928,32 @@ class Database:
             .data
             or []
         )
+
+    def list_top_calorie_meals(self, telegram_id: int, limit: int = 10, days: int = 120) -> list[dict[str, Any]]:
+        """Return the most-logged meals (grouped by description, most recent macros),
+        ranked by usage count, ties broken by recency. Used for quick-add buttons."""
+        rows = self.list_calorie_logs(telegram_id, days=days)
+        groups: dict[str, dict[str, Any]] = {}
+        for idx, row in enumerate(rows):  # rows are ordered newest-first
+            desc = str(row.get("meal_desc") or "").strip()
+            if not desc:
+                continue
+            key = desc.casefold()
+            existing = groups.get(key)
+            if existing is None:
+                groups[key] = {
+                    "meal_desc": desc,
+                    "calories": row.get("calories"),
+                    "protein": row.get("protein"),
+                    "fat": row.get("fat"),
+                    "carbs": row.get("carbs"),
+                    "count": 1,
+                    "first_idx": idx,
+                }
+            else:
+                existing["count"] += 1
+        ranked = sorted(groups.values(), key=lambda g: (-g["count"], g["first_idx"]))
+        return ranked[:limit]
 
     def list_today_calorie_entries(self, telegram_id: int, tz_name: str | None = None) -> list[dict[str, Any]]:
         tz = self._zone(tz_name)
