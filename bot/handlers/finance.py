@@ -17,6 +17,7 @@ from .. import emoji as pe
 from .. import finance as fin
 from .. import screen as screen_mod
 from .. import services
+from .. import ui
 from .. import vacancy as vac
 from ..context import ai, db
 from ..keyboards import (
@@ -54,78 +55,59 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
         services.finance_snapshot(profile), services.budgets(profile.telegram_id), services.recurring(profile.telegram_id)
     )
     lang, cur = profile.lang, profile.currency
+    uz = lang == "uz"
     b = snap.balances
     month = snap.month
     labels = [fin.quick_label(item, lang) for item in snap.quick]
 
-    if lang == "uz":
-        lines = [
-            f"{pe.WALLET} <b>Moliya</b>",
-            "",
-            f"💼 Balans: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
-            f"💳 Karta {fin.fmt_money(b['card'])}  ·  {pe.CASH} Naqd {fin.fmt_money(b['cash'])}",
-            "",
-            f"{pe.CHART} <b>Bugun</b>: {pe.INCOME} {fin.fmt_money(snap.today_income)}  {pe.EXPENSE} {fin.fmt_money(snap.today_expense)} {cur}",
-        ]
-    else:
-        lines = [
-            f"{pe.WALLET} <b>Финансы</b>",
-            "",
-            f"💼 Баланс: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
-            f"💳 Карта {fin.fmt_money(b['card'])}  ·  {pe.CASH} Наличные {fin.fmt_money(b['cash'])}",
-            "",
-            f"{pe.CHART} <b>Сегодня</b>: {pe.INCOME} {fin.fmt_money(snap.today_income)}  {pe.EXPENSE} {fin.fmt_money(snap.today_expense)} {cur}",
-        ]
-    if month:
-        change = month.expense_change_pct()
-        change_text = ""
-        if change is not None:
-            arrow = "▲" if change > 0 else "▼"
-            change_text = f" ({arrow}{abs(change):.0f}%)"
-        top = ""
-        if month.by_category:
-            key, amount, _ = month.by_category[0]
-            top = f" · {cats.label(key, lang)} {fin.fmt_money(amount)}"
-        lines.append(
-            (f"📆 <b>{fin.period_title(month.period, lang)}</b>: {fin.fmt_money(month.expense)} {cur}{change_text}{top}")
-        )
-    extras = []
+    header = ui.title(pe.WALLET, "Moliya" if uz else "Финансы", ui.human_date(snap.today, lang))
+
+    balance_lines = [
+        f"💼 <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
+        f"💳 {'Karta' if uz else 'Карта'} {fin.fmt_money(b['card'])}   💵 {'Naqd' if uz else 'Наличные'} {fin.fmt_money(b['cash'])}",
+    ]
     if recurring:
         remaining, pending = fin.recurring_remaining(recurring, snap.today)
         if remaining > 0:
-            free = snap.wallet - remaining
             nxt = pending[0]
             nxt_day = fin.recurring_due_day(int(nxt.get("day_of_month") or 1), snap.today.year, snap.today.month)
-            extras.append(
-                f"🔁 {'To`lovlar qoldi' if lang == 'uz' else 'Обязательные до конца месяца'}: {fin.fmt_money(remaining)} "
-                f"→ {'erkin' if lang == 'uz' else 'свободно'} <b>{fin.fmt_money(free)} {cur}</b>"
+            balance_lines.append(
+                f"🔁 {'To`lovlar' if uz else 'Обязательные'}: {fin.fmt_money(remaining)} → {'erkin' if uz else 'свободно'} <b>{fin.fmt_money(snap.wallet - remaining)}</b>"
             )
-            extras.append(f"   {'keyingi' if lang == 'uz' else 'ближайший'}: {nxt_day:02d} · {h(nxt.get('title'))} · {fin.fmt_money(float(nxt.get('amount') or 0))}")
-    if limits and month:
-        for line in fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:3]:
-            extras.append(line)
+            balance_lines.append(ui.muted(f"{'keyingi' if uz else 'ближайший'}: {nxt_day:02d} · {h(nxt.get('title'))} · {fin.fmt_money(float(nxt.get('amount') or 0))}"))
+    debts = []
     if b["lent"]:
-        extras.append(f"{pe.HANDSHAKE} {'Qarzga berilgan' if lang == 'uz' else 'Дал в долг'}: {fin.fmt_money(b['lent'])}")
+        debts.append(f"🤝 {'Qarzga berilgan' if uz else 'Дал в долг'} {fin.fmt_money(b['lent'])}")
     if b["debt"]:
-        extras.append(f"{pe.PIN} {'Mening qarzim' if lang == 'uz' else 'Мои долги'}: {fin.fmt_money(b['debt'])}")
+        debts.append(f"📌 {'Mening qarzim' if uz else 'Мои долги'} {fin.fmt_money(b['debt'])}")
     credit = float(snap.settings.get("monthly_credit_payment") or 0)
     if credit:
-        extras.append(f"{pe.BANK} {'Kredit/oy' if lang == 'uz' else 'Кредит/мес'}: {fin.fmt_money(credit)}")
-    if extras:
-        lines.append("")
-        lines.extend(extras)
+        debts.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'} {fin.fmt_money(credit)}")
+    if debts:
+        balance_lines.append(" · ".join(debts))
+    balance_card = ui.card(f"<b>{'Balans' if uz else 'Баланс'}</b>", balance_lines)
+
+    period_lines = [f"{'Bugun' if uz else 'Сегодня'}: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}   {pe.INCOME} {fin.fmt_money(snap.today_income)}"]
+    if month:
+        change = month.expense_change_pct()
+        change_text = f" ({'▲' if change > 0 else '▼'}{abs(change):.0f}%)" if change is not None else ""
+        period_lines.append(f"{fin.period_title(month.period, lang)}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}   {pe.INCOME} {fin.fmt_money(month.income)}")
+        if month.by_category:
+            period_lines.append(ui.muted(" · ".join(f"{cats.label(k, lang)} {fin.fmt_money(a)}" for k, a, _ in month.by_category[:3])))
+        if limits:
+            period_lines.extend(fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:3])
+    period_card = ui.card(f"<b>{'Xarajatlar' if uz else 'Расходы'}</b>", period_lines)
+
+    today_card = None
     if snap.today_entries:
-        lines.append("")
-        lines.append("<b>Bugungi operatsiyalar:</b>" if lang == "uz" else "<b>Операции сегодня:</b>")
-        for row in snap.today_entries[:6]:
-            lines.append("• " + _entry_line(row, lang))
-    lines += [
-        "",
-        "<i>✍️ Yozing: <code>taksi 25000</code> · <code>oylik 5 mln</code> · <code>qarzga berdim 200000</code></i>"
-        if lang == "uz"
-        else "<i>✍️ Напиши: <code>такси 25000</code> · <code>зарплата 5 млн</code> · <code>дал в долг 200000</code></i>",
-    ]
-    return "\n".join(lines), labels, snap.quick
+        today_card = ui.card(f"<b>{'Bugungi operatsiyalar' if uz else 'Операции сегодня'}</b>", ["• " + _entry_line(row, lang) for row in snap.today_entries[:6]])
+
+    hint = ui.muted(
+        "✍️ <code>taksi 25000</code> · <code>oylik 5 mln</code> · <code>qarzga berdim 200000</code> · <code>25000</code>"
+        if uz else
+        "✍️ <code>такси 25000</code> · <code>зарплата 5 млн</code> · <code>дал в долг 200000</code> · просто <code>25000</code>"
+    )
+    return ui.join(header, balance_card, period_card, today_card, hint), labels, snap.quick
 
 
 def _entry_line(row: dict[str, Any], lang: str) -> str:
@@ -505,59 +487,60 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
 # ------------------------------------------------------------------ stats
 def build_stats_text(stats: fin.Stats, profile: Profile, limits: dict[str, float] | None = None) -> str:
     lang, cur = profile.lang, profile.currency
+    uz = lang == "uz"
     limits = limits or {}
     p = stats.period
-    title = fin.period_title(p, lang)
-    lines = [f"📊 <b>{'Statistika' if lang == 'uz' else 'Статистика'} — {title}</b>", ""]
+    header = ui.title("📊", "Statistika" if uz else "Статистика", fin.period_title(p, lang))
 
     change = stats.expense_change_pct()
-    change_text = ""
     if change is not None:
-        arrow = "▲" if change > 0 else "▼"
-        change_text = f"  <i>{arrow}{abs(change):.0f}% {'vs' if lang == 'uz' else 'к'} {fin.prev_period_title(p, lang)}</i>"
+        change_text = f"  <i>{'▲' if change > 0 else '▼'}{abs(change):.0f}% {'vs' if uz else 'к'} {fin.prev_period_title(p, lang)}</i>"
     elif stats.prev_expense == 0 and stats.expense > 0 and p.code != "year":
         change_text = f"  <i>({fin.prev_period_title(p, lang)}: 0)</i>"
-    lines.append(f"{pe.EXPENSE} {'Chiqim' if lang == 'uz' else 'Расход'}: <b>{fin.fmt_money(stats.expense)} {cur}</b>{change_text}")
-    lines.append(f"{pe.INCOME} {'Kirim' if lang == 'uz' else 'Доход'}: <b>{fin.fmt_money(stats.income)} {cur}</b>")
+    else:
+        change_text = ""
     net = stats.net
-    lines.append(f"{'Natija' if lang == 'uz' else 'Итог'}: <b>{'+' if net >= 0 else '−'}{fin.fmt_money(abs(net))} {cur}</b>")
+    total_lines = [
+        f"{pe.EXPENSE} {'Chiqim' if uz else 'Расход'}: <b>{fin.fmt_money(stats.expense)} {cur}</b>{change_text}",
+        f"{pe.INCOME} {'Kirim' if uz else 'Доход'}: <b>{fin.fmt_money(stats.income)} {cur}</b>",
+        f"{'Natija' if uz else 'Итог'}: <b>{ui.signed(net, fin.fmt_money)} {cur}</b>",
+    ]
+    if stats.expense > 0 and p.days > 1:
+        total_lines.append(ui.muted(f"{'kuniga o`rtacha' if uz else 'в среднем в день'} {fin.fmt_money(stats.avg_per_day)}"
+                                    + (f" · {'eng qimmat kun' if uz else 'максимум'} {stats.top_day[0].strftime('%d.%m')} — {fin.fmt_money(stats.top_day[1])}" if stats.top_day else "")))
+    if stats.transfers:
+        total_lines.append(ui.muted(f"{'o`tkazmalar' if uz else 'переводов между счетами'}: {stats.transfers}"))
+    totals_card = ui.card(f"<b>{'Jami' if uz else 'Итого'}</b>", total_lines)
 
+    cat_lines: list[str] = []
     if stats.by_category:
-        lines += ["", f"<b>{'Xarajatlar toifalar bo`yicha' if lang == 'uz' else 'Расходы по категориям'}</b>"]
         total = stats.expense or 1.0
         for key, amount, count in stats.by_category[:12]:
             share = amount / total
             prev = stats.prev_by_category.get(key)
             delta = ""
             if prev and prev > 0:
-                pct = (amount - prev) / prev * 100
-                if abs(pct) >= 20:
-                    delta = f" {'▲' if pct > 0 else '▼'}{abs(pct):.0f}%"
+                pct_change = (amount - prev) / prev * 100
+                if abs(pct_change) >= 20:
+                    delta = f" {'▲' if pct_change > 0 else '▼'}{abs(pct_change):.0f}%"
             limit = limits.get(key) if limits and p.code in {"month", "prev_month"} else None
             if limit:
                 ratio = amount / limit
                 flag = "🚫 " if ratio >= 1 else "⚠️ " if ratio >= 0.8 else ""
-                lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> / {fin.fmt_money(limit)} · {ratio * 100:.0f}%{delta}")
-                lines.append(f"{flag}{fin.bar(min(ratio, 1.0), 12)}  <i>×{count}</i>")
+                cat_lines.append(f"{flag}{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> / {fin.fmt_money(limit)} · {ui.pct(ratio)}{delta}")
+                cat_lines.append(f"{fin.bar(min(ratio, 1.0), 12)} <i>×{count}</i>")
             else:
-                lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {share * 100:.0f}%{delta}")
-                lines.append(f"{fin.bar(share, 12)}  <i>×{count}</i>")
+                cat_lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {ui.pct(share)}{delta}")
+                cat_lines.append(f"{fin.bar(share, 12)} <i>×{count}</i>")
     else:
-        lines += ["", "<i>" + ("Bu davrda xarajatlar yo'q." if lang == "uz" else "Расходов за период нет.") + "</i>"]
+        cat_lines.append(ui.muted("Bu davrda xarajatlar yo'q." if uz else "Расходов за период нет."))
+    cats_card = ui.card(f"<b>{'Xarajatlar toifalar bo`yicha' if uz else 'Расходы по категориям'}</b>", cat_lines)
 
+    income_card = None
     if stats.income_by_category and len(stats.income_by_category) > 1:
-        lines += ["", f"<b>{'Kirimlar' if lang == 'uz' else 'Доходы'}</b>"]
-        for key, amount, _ in stats.income_by_category[:5]:
-            lines.append(f"{cats.label(key, lang)} — {fin.fmt_money(amount)}")
-
-    if stats.expense > 0 and p.days > 1:
-        lines.append("")
-        lines.append(f"{'Kuniga o`rtacha' if lang == 'uz' else 'В среднем в день'}: <b>{fin.fmt_money(stats.avg_per_day)} {cur}</b>")
-        if stats.top_day:
-            lines.append(f"{'Eng qimmat kun' if lang == 'uz' else 'Самый затратный день'}: {stats.top_day[0].strftime('%d.%m')} — {fin.fmt_money(stats.top_day[1])}")
-    if stats.transfers:
-        lines.append(f"{'O`tkazmalar' if lang == 'uz' else 'Переводов между счетами'}: {stats.transfers}")
-    return "\n".join(lines)
+        income_card = ui.card(f"<b>{'Kirimlar' if uz else 'Доходы'}</b>",
+                              [f"{cats.label(k, lang)} — {fin.fmt_money(a)}" for k, a, _ in stats.income_by_category[:5]])
+    return ui.join(header, totals_card, cats_card, income_card)
 
 
 @router.callback_query(F.data.startswith("finance:stats:"))

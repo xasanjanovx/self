@@ -57,6 +57,9 @@ def test_recurring_due_and_remaining():
     ]
     today = date(2026, 9, 15)
     remaining, pending = fin.recurring_remaining(items, today)
+    # 5-е уже прошло и не отмечено — считаем оплаченным вне бота; остаётся только 31-е
+    assert remaining == 1_000_000 and [p["id"] for p in pending] == [3]
+    remaining, pending = fin.recurring_remaining(items, date(2026, 9, 3))
     assert remaining == 1_150_000 and [p["id"] for p in pending] == [2, 3]
     due = fin.recurring_due_today(items, today)
     assert [d["id"] for d in due] == [2]  # 3 — уже спрашивали в этом месяце, 31-е ещё не наступило

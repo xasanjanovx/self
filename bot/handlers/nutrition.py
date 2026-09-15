@@ -13,6 +13,7 @@ from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
 from .. import services
+from .. import ui
 from .. import vacancy as vac
 from ..context import ai, db
 from ..keyboards import (
@@ -75,13 +76,11 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
         services.top_meals(profile),
     )
     lang = profile.lang
+    uz = lang == "uz"
     labels = _quick_labels(quick, lang)
+    header = ui.title(pe.NUTRITION, "Oziqlanish" if uz else "Питание", ui.human_date(profile.today, lang))
     if not nutrition_profile:
-        text = (
-            "🍽️ <b>Oziqlanish</b>\n\nAvval maqsad va profilni sozlang — «Maqsad va profil»."
-            if lang == "uz"
-            else "🍽️ <b>Питание</b>\n\nСначала настрой цель и профиль — кнопка «Цель и профиль»."
-        )
+        text = ui.join(header, ui.muted("Avval maqsad va profilni sozlang — «Maqsad va profil»." if uz else "Сначала настрой цель и профиль — кнопка «Цель и профиль»."))
         return text, labels, quick
 
     totals = nutri.totals(logs)
@@ -90,37 +89,30 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
     left = max(0.0, target - eaten)
     ratio = (eaten / target) if target > 0 else 0.0
     p, f_, c = (float(nutrition_profile.get(k) or 0) for k in ("protein", "fat", "carbs"))
-    title = h(nutrition_profile.get("title") or "-")
-    profile_line = ""
+    unit = "kkal" if uz else "ккал"
+
+    goal_line = f"🎯 {h(nutrition_profile.get('title') or '-')}"
     if nutrition_profile.get("weight") and nutrition_profile.get("height") and nutrition_profile.get("age"):
         w, ht, age = float(nutrition_profile["weight"]), int(float(nutrition_profile["height"])), int(nutrition_profile["age"])
-        profile_line = f"<i>{w:.1f} kg / {ht} sm / {age} yosh</i>" if lang == "uz" else f"<i>{w:.1f} кг / {ht} см / {age} лет</i>"
+        goal_line += ui.muted(f" · {w:.1f} kg / {ht} sm / {age} yosh" if uz else f" · {w:.1f} кг / {ht} см / {age} лет")
+    day_lines = [
+        goal_line,
+        f"{fin.bar(ratio, 12)} {ui.pct(ratio)}",
+        f"<b>{int(eaten)}</b> / {int(target)} {unit} · {'qoldi' if uz else 'осталось'} <b>{int(left)}</b>",
+        f"🥩 {int(totals['protein'])}/{int(p)}   🧈 {int(totals['fat'])}/{int(f_)}   🍞 {int(totals['carbs'])}/{int(c)} g",
+    ]
+    day_card = ui.card(f"<b>{'Bugun' if uz else 'Сегодня'}</b>", day_lines)
 
-    lines = [f"{pe.NUTRITION} <b>{'Oziqlanish' if lang == 'uz' else 'Питание'}</b>", f"{'Maqsad' if lang == 'uz' else 'Цель'}: <b>{title}</b>"]
-    if profile_line:
-        lines.append(profile_line)
-    lines += ["", f"{fin.bar(ratio)} {int(round(ratio * 100))}%"]
-    if lang == "uz":
-        lines += [
-            f"Yeyildi: <b>{int(eaten)}</b> / {int(target)} kkal · qoldi {int(left)}",
-            "",
-            f"🥩 Oqsil {int(totals['protein'])}/{int(p)} g   🧈 Yog' {int(totals['fat'])}/{int(f_)} g   🍞 Uglevod {int(totals['carbs'])}/{int(c)} g",
-        ]
-    else:
-        lines += [
-            f"Съедено: <b>{int(eaten)}</b> / {int(target)} ккал · осталось {int(left)}",
-            "",
-            f"🥩 Белки {int(totals['protein'])}/{int(p)} г   🧈 Жиры {int(totals['fat'])}/{int(f_)} г   🍞 Углеводы {int(totals['carbs'])}/{int(c)} г",
-        ]
+    meals_card = None
     if logs:
-        lines.append("")
-        lines.append("<b>Bugun:</b>" if lang == "uz" else "<b>Сегодня:</b>")
+        meal_lines = []
         for row in logs[:8]:
             kcal = row.get("calories")
-            kcal_text = f"{int(float(kcal))}" if kcal is not None else "—"
-            lines.append(f"• {h(str(row.get('meal_desc') or '')[:40])} — {kcal_text}")
-    lines += ["", "<i>📷 Ovqat rasmi, matni yoki ovozli xabar yuboring.</i>" if lang == "uz" else "<i>📷 Отправь фото, текст или голос с описанием блюда.</i>"]
-    return "\n".join(lines), labels, quick
+            meal_lines.append(f"• {h(str(row.get('meal_desc') or '')[:40])} — <b>{int(float(kcal)) if kcal is not None else '—'}</b>")
+        meals_card = ui.card(f"<b>{'Qabullar' if uz else 'Приёмы'}</b> · {int(totals['meals'])}", meal_lines)
+
+    hint = ui.muted("📷 rasm · «osh yedim» · ovozli xabar" if uz else "📷 фото блюда · «съел плов и салат» · голос")
+    return ui.join(header, day_card, meals_card, hint), labels, quick
 
 
 async def render_panel(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:

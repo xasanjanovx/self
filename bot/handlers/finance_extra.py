@@ -15,6 +15,7 @@ from .. import emoji as pe
 from .. import export as export_mod
 from .. import finance as fin
 from .. import services
+from .. import ui
 from ..context import ai, db
 from ..keyboards import (
     amount_category_keyboard,
@@ -39,21 +40,22 @@ MIGRATION_HINT = ("Нужна миграция: выполни <code>sql/migrati
 # ------------------------------------------------------------------ budgets
 def _budgets_text(profile: Profile, statuses: list[fin.BudgetStatus], limits: dict[str, float]) -> str:
     lang, cur = profile.lang, profile.currency
-    lines = [f"🎯 <b>{'Limitlar' if lang == 'uz' else 'Лимиты по категориям'}</b>",
-             f"<i>{'Bu oy' if lang == 'uz' else 'Текущий месяц'}</i>", ""]
+    uz = lang == "uz"
+    header = ui.title("🎯", "Limitlar" if uz else "Лимиты по категориям", fin.period_title(fin.period_for("month", profile.today), lang))
     if not limits:
-        lines.append("<i>" + ("Limitlar yo'q. Kategoriyani tanlang va oylik summani kiriting." if lang == "uz"
-                              else "Лимитов пока нет. Выбери категорию и введи сумму на месяц.") + "</i>")
+        body = ui.muted("Limitlar yo'q. Kategoriyani tanlang va oylik summani kiriting." if uz
+                        else "Лимитов пока нет. Выбери категорию и введи сумму на месяц.")
+        return ui.join(header, body)
+    lines = []
     for b in statuses:
-        lines.append(f"{cats.label(b.category, lang)} — <b>{fin.fmt_money(b.spent)}</b> / {fin.fmt_money(b.limit)} · {b.ratio * 100:.0f}%")
-        lines.append(("🚫 " if b.ratio >= 1 else "⚠️ " if b.ratio >= 0.8 else "") + fin.bar(b.ratio, 12))
+        flag = "🚫 " if b.ratio >= 1 else "⚠️ " if b.ratio >= 0.8 else ""
+        lines.append(f"{flag}{cats.label(b.category, lang)} — <b>{fin.fmt_money(b.spent)}</b> / {fin.fmt_money(b.limit)} · {ui.pct(b.ratio)}")
+        lines.append(fin.bar(min(b.ratio, 1.0), 12))
     total_limit = sum(limits.values())
-    if total_limit:
-        total_spent = sum(b.spent for b in statuses)
-        lines += ["", f"{'Jami' if lang == 'uz' else 'Итого по лимитам'}: {fin.fmt_money(total_spent)} / {fin.fmt_money(total_limit)} {cur}"]
-    lines += ["", "<i>" + ("Kategoriyani bosing — limitni o'zgartirish. 0 — o'chirish." if lang == "uz"
-                         else "Нажми категорию, чтобы задать/изменить лимит. 0 — убрать.") + "</i>"]
-    return "\n".join(lines)
+    total_spent = sum(b.spent for b in statuses)
+    lines.append(f"{'Jami' if uz else 'Итого'}: <b>{fin.fmt_money(total_spent)}</b> / {fin.fmt_money(total_limit)} {cur}")
+    hint = ui.muted("Kategoriyani bosing — limitni o'zgartirish, 0 — o'chirish." if uz else "Нажми категорию, чтобы изменить лимит; 0 — убрать.")
+    return ui.join(header, ui.card(f"<b>{'Holat' if uz else 'Состояние'}</b>", lines), hint)
 
 
 async def render_budgets(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
@@ -130,28 +132,38 @@ async def msg_budget_other(message: Message, state: FSMContext) -> None:
 # ------------------------------------------------------------------ recurring payments
 def _recurring_text(profile: Profile, items: list[dict[str, Any]]) -> str:
     lang, cur = profile.lang, profile.currency
+    uz = lang == "uz"
     today = profile.today
-    lines = [f"🔁 <b>{'Doimiy to`lovlar' if lang == 'uz' else 'Регулярные платежи'}</b>", ""]
+    header = ui.title("🔁", "Doimiy to'lovlar" if uz else "Регулярные платежи", fin.period_title(fin.period_for("month", today), lang))
     if not items:
-        lines.append("<i>" + ("Hali yo'q. Qo'shish: «internet 150000 5» (nom, summa, kun)." if lang == "uz"
-                              else "Пока нет. Добавь: «интернет 150000 5» (название, сумма, число месяца).") + "</i>")
-    else:
-        key = today.strftime("%Y-%m")
-        for it in items:
-            day = fin.recurring_due_day(int(it.get("day_of_month") or 1), today.year, today.month)
-            paid = str(it.get("last_done_key") or "") == key
-            status = "✅" if paid else ("🔔" if day <= today.day else "⏳")
-            if not it.get("enabled", True):
-                status = "⏸"
-            lines.append(f"{status} <b>{day:02d}</b> · {h(it.get('title'))} · {fin.fmt_money(float(it.get('amount') or 0))} · {cats.label(it.get('category'), lang)}")
-        remaining, pending = fin.recurring_remaining(items, today)
-        total = sum(float(i.get("amount") or 0) for i in items if i.get("enabled", True))
-        lines += ["", f"{'Oyiga jami' if lang == 'uz' else 'Всего в месяц'}: <b>{fin.fmt_money(total)} {cur}</b>",
-                  f"{'Bu oy qoldi' if lang == 'uz' else 'Осталось оплатить в этом месяце'}: <b>{fin.fmt_money(remaining)} {cur}</b>"]
-    lines += ["", "<i>" + ("Bot to'lov kunida so'raydi: «To'ladingizmi?» — bir bosishda yoziladi. Qo'shish uchun matn yuboring: «ijara 2 mln 1»."
-                         if lang == "uz" else
-                         "В день платежа бот спросит «Оплатил?» — запись в одно нажатие. Чтобы добавить, просто напиши: «аренда 2 млн 1 числа».") + "</i>"]
-    return "\n".join(lines)
+        body = ui.muted("Hali yo'q. Qo'shish: «internet 150000 5» (nom, summa, kun)." if uz
+                        else "Пока нет. Добавь: «интернет 150000 5» (название, сумма, число месяца).")
+        return ui.join(header, body)
+    key = today.strftime("%Y-%m")
+    lines = []
+    for it in items:
+        day = fin.recurring_due_day(int(it.get("day_of_month") or 1), today.year, today.month)
+        paid = str(it.get("last_done_key") or "") == key
+        if not it.get("enabled", True):
+            status = "⏸"
+        elif paid:
+            status = "✅"
+        elif day < today.day:
+            status = "☑️"
+        elif day == today.day:
+            status = "🔔"
+        else:
+            status = "⏳"
+        lines.append(f"{status} <b>{day:02d}</b> · {h(it.get('title'))} · {fin.fmt_money(float(it.get('amount') or 0))} · {cats.label(it.get('category'), lang)}")
+    remaining, _ = fin.recurring_remaining(items, today)
+    total = sum(float(i.get("amount") or 0) for i in items if i.get("enabled", True))
+    summary = [
+        f"{'Oyiga jami' if uz else 'Всего в месяц'}: <b>{fin.fmt_money(total)} {cur}</b>",
+        f"{'Bu oy qoldi' if uz else 'Ещё предстоит в этом месяце'}: <b>{fin.fmt_money(remaining)} {cur}</b>",
+    ]
+    hint = ui.muted("To'lov kunida bot so'raydi — bir bosishda yoziladi. Qo'shish: «ijara 2 mln 1»." if uz
+                    else "В день платежа бот спросит «Оплатил?» — запись в одно нажатие. Добавить: «аренда 2 млн 1 числа».")
+    return ui.join(header, ui.card(f"<b>{'Ro`yxat' if uz else 'Список'}</b>", lines), ui.card(f"<b>{'Xulosa' if uz else 'Итого'}</b>", summary), hint)
 
 
 async def render_recurring(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
@@ -213,8 +225,12 @@ async def msg_recurring_input(message: Message, state: FSMContext) -> None:
     if not await db.ensure_available("recurring_payments"):
         await render_recurring(message, state, profile)
         return
-    await db.add_recurring(profile.telegram_id, title=parsed["title"], amount=parsed["amount"], category=parsed["category"],
-                           bucket=parsed["bucket"], day_of_month=parsed["day_of_month"])
+    created = await db.add_recurring(profile.telegram_id, title=parsed["title"], amount=parsed["amount"], category=parsed["category"],
+                                     bucket=parsed["bucket"], day_of_month=parsed["day_of_month"])
+    today = profile.today
+    if created.get("id") and fin.recurring_due_day(parsed["day_of_month"], today.year, today.month) < today.day:
+        # день уже прошёл — этот месяц считаем закрытым, спросим со следующего
+        await db.update_recurring(profile.telegram_id, created["id"], {"last_done_key": today.strftime("%Y-%m")})
     services.invalidate_recurring(profile.telegram_id)
     await render_recurring(message, state, profile, notice=profile.tr(
         f"✅ Добавлено: {h(parsed['title'])} · {fin.fmt_money(parsed['amount'])} · каждое {parsed['day_of_month']}-е число · {cats.label(parsed['category'], 'ru')}",

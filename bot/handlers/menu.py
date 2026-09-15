@@ -15,6 +15,7 @@ from .. import finance as fin
 from .. import nutrition as nutri
 from .. import screen as screen_mod
 from .. import services
+from .. import ui
 from ..context import db
 from ..keyboards import back_to_menu_keyboard, language_keyboard, main_menu_keyboard
 from ..profile import Profile, h
@@ -23,77 +24,68 @@ from .common import answer_now, get_profile, safe_delete, safe_edit, set_profile
 router = Router(name="menu")
 logger = logging.getLogger(__name__)
 
-_WEEKDAYS = {
-    "ru": ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"],
-    "uz": ["dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba", "yakshanba"],
-}
-
-
 async def build_dashboard(profile: Profile) -> str:
-    """Один экран: питание + финансы. Все выборки — параллельно."""
-    nutrition_profile, logs, snap = await asyncio.gather(
+    """Один экран: финансы + питание. Все выборки — параллельно."""
+    nutrition_profile, logs, snap, recurring, limits = await asyncio.gather(
         services.nutrition_profile(profile.telegram_id),
         services.today_calorie_logs(profile),
         services.finance_snapshot(profile),
+        services.recurring(profile.telegram_id),
+        services.budgets(profile.telegram_id),
     )
-    totals = nutri.totals(logs)
-    lang = profile.lang
+    lang, cur = profile.lang, profile.currency
+    uz = lang == "uz"
     today = profile.today
-    weekday = _WEEKDAYS["uz" if lang == "uz" else "ru"][today.weekday()]
-    name = h(profile.first_name or ("Do'st" if lang == "uz" else "Друг"))
-    cur = profile.currency
-
-    eaten = float(totals["calories"])
-    target = float((nutrition_profile or {}).get("daily_calories") or 0.0)
-    left = max(0.0, target - eaten)
-    ratio = (eaten / target) if target > 0 else 0.0
-
+    name = h(profile.first_name or ("Do'st" if uz else "Друг"))
+    b = snap.balances
     month = snap.month
-    top_cat = ""
-    if month and month.by_category:
-        key, amount, _ = month.by_category[0]
-        top_cat = f"{cats.label(key, lang)} {fin.fmt_money(amount)}"
 
-    if lang == "uz":
-        lines = [f"{pe.HELLO} Assalomu alaykum, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today.strftime('%d.%m.%Y')}", ""]
-        lines.append(f"{pe.NUTRITION} <b>Oziqlanish</b>")
-        if target > 0:
-            lines += [
-                f"{fin.bar(ratio)} {int(round(ratio * 100))}%",
-                f"Yeyildi: <b>{int(eaten)}</b> / {int(target)} kkal · qoldi {int(left)} · {int(totals['meals'])} ta qabul",
-            ]
-        else:
-            lines.append("<i>Profil sozlanmagan — «Oziqlanish» bo'limini oching</i>")
-        lines += [
-            "",
-            f"{pe.WALLET} <b>Moliya</b>",
-            f"💳 {fin.fmt_money(snap.balances['card'])}   {pe.CASH} {fin.fmt_money(snap.balances['cash'])}",
-            f"Balans: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
-            f"Bugun: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}  {pe.INCOME} {fin.fmt_money(snap.today_income)}",
-        ]
-        if month:
-            lines.append(f"Bu oy chiqim: <b>{fin.fmt_money(month.expense)} {cur}</b>" + (f" · {top_cat}" if top_cat else ""))
-        return "\n".join(lines)
+    header = f"{pe.HELLO} <b>{'Assalomu alaykum' if uz else 'Привет'}, {name}</b>\n{pe.CALENDAR} {ui.human_date(today, lang)}"
 
-    lines = [f"{pe.HELLO} Привет, <b>{name}</b>", f"{pe.CALENDAR} {weekday}, {today.strftime('%d.%m.%Y')}", ""]
-    lines.append(f"{pe.NUTRITION} <b>Питание</b>")
-    if target > 0:
-        lines += [
-            f"{fin.bar(ratio)} {int(round(ratio * 100))}%",
-            f"Съедено: <b>{int(eaten)}</b> / {int(target)} ккал · осталось {int(left)} · {int(totals['meals'])} приёмов",
-        ]
-    else:
-        lines.append("<i>Профиль не настроен — открой раздел «Питание»</i>")
-    lines += [
-        "",
-        f"{pe.WALLET} <b>Финансы</b>",
-        f"💳 {fin.fmt_money(snap.balances['card'])}   {pe.CASH} {fin.fmt_money(snap.balances['cash'])}",
-        f"Баланс: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
-        f"Сегодня: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}  {pe.INCOME} {fin.fmt_money(snap.today_income)}",
+    # --- финансы
+    fin_lines = [
+        f"💼 <b>{fin.fmt_money(snap.wallet)} {cur}</b>   💳 {fin.fmt_money(b['card'])} · 💵 {fin.fmt_money(b['cash'])}",
+        f"{'Bugun' if uz else 'Сегодня'}: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}   {pe.INCOME} {fin.fmt_money(snap.today_income)}",
     ]
     if month:
-        lines.append(f"За месяц потрачено: <b>{fin.fmt_money(month.expense)} {cur}</b>" + (f" · {top_cat}" if top_cat else ""))
-    return "\n".join(lines)
+        change = month.expense_change_pct()
+        change_text = f" ({'▲' if change > 0 else '▼'}{abs(change):.0f}%)" if change is not None else ""
+        top = f" · {cats.label(month.by_category[0][0], lang)} {fin.fmt_money(month.by_category[0][1])}" if month.by_category else ""
+        fin_lines.append(f"{fin.period_title(month.period, lang)}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}{top}")
+    if recurring:
+        remaining, pending = fin.recurring_remaining(recurring, today)
+        if remaining > 0:
+            fin_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)} → {'erkin' if uz else 'свободно'} <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
+    if limits and month:
+        fin_lines.extend(fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:2])
+    debts = []
+    if b["lent"]:
+        debts.append(f"🤝 {'menga qarz' if uz else 'мне должны'} {fin.fmt_money(b['lent'])}")
+    if b["debt"]:
+        debts.append(f"📌 {'mening qarzim' if uz else 'я должен'} {fin.fmt_money(b['debt'])}")
+    if debts:
+        fin_lines.append(" · ".join(debts))
+    finance_card = ui.card(f"{pe.WALLET} <b>{'Moliya' if uz else 'Финансы'}</b>", fin_lines)
+
+    # --- питание
+    totals = nutri.totals(logs)
+    eaten = float(totals["calories"])
+    target = float((nutrition_profile or {}).get("daily_calories") or 0.0)
+    if target > 0:
+        ratio = eaten / target
+        left = max(0.0, target - eaten)
+        nut_lines = [
+            f"{fin.bar(ratio, 12)} {ui.pct(ratio)}",
+            f"<b>{int(eaten)}</b> / {int(target)} {'kkal' if uz else 'ккал'} · {'qoldi' if uz else 'осталось'} {int(left)} · {int(totals['meals'])} {'qabul' if uz else 'приёмов'}",
+        ]
+        if logs:
+            nut_lines.append(ui.muted(" · ".join(h(str(r.get("meal_desc") or "")[:22]) for r in logs[:4])))
+    else:
+        nut_lines = [ui.muted("Profil sozlanmagan — «Oziqlanish» bo'limini oching" if uz else "Профиль не настроен — открой раздел «Питание»")]
+    nutrition_card = ui.card(f"{pe.NUTRITION} <b>{'Oziqlanish' if uz else 'Питание'}</b>", nut_lines)
+
+    hint = ui.muted("✍️ «taksi 25000» · «osh yedim» · rasm · ovoz" if uz else "✍️ «такси 25000» · «съел плов» · фото · голос")
+    return ui.join(header, finance_card, nutrition_card, hint)
 
 
 async def send_main_menu(message: Message, profile: Profile, *, force_new: bool = False) -> None:

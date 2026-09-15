@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery
 from .. import cache
 from .. import emoji as pe
 from .. import services
+from .. import ui
 from ..context import db
 from ..keyboards import settings_keyboard
 from ..profile import Profile
@@ -37,18 +38,18 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             "Xulosalar ishlamaydi: Supabase → SQL Editor da <code>sql/migrations/004_v2_features.sql</code> ni bajaring.",
         )
     if lang == "uz":
-        text = (
-            f"{pe.SETTINGS} <b>Sozlamalar</b>\n\n"
-            "🌅 <b>Ertalabki xulosa</b> (08:00): balans, hafta xarajati, bugungi kaloriya rejasi, yaqin to'lovlar.\n"
-            "🌙 <b>Kechki eslatma</b> (21:00): bugun ovqat yoki xarajat yozilmagan bo'lsa — eslatadi; hammasi yozilgan bo'lsa — kun natijasi.\n"
-            "📊 <b>Avto-hisobot</b>: yakshanba 20:00 (haftalik) yoki oyning 1-kuni (oylik)."
+        text = ui.join(
+            ui.title(pe.SETTINGS, "Sozlamalar"),
+            ui.card("<b>🌅 Ertalabki xulosa</b> · 08:00", ["balans, hafta xarajati, bugungi kaloriya rejasi, yaqin to'lovlar"]),
+            ui.card("<b>🌙 Kechki eslatma</b> · 21:00", ["ovqat yoki xarajat yozilmagan bo'lsa — eslatadi; hammasi yozilgan bo'lsa — kun natijasi"]),
+            ui.card("<b>📊 Avto-hisobot</b>", ["yakshanba 20:00 (haftalik) yoki oyning 1-kuni (oylik)"]),
         )
     else:
-        text = (
-            f"{pe.SETTINGS} <b>Настройки</b>\n\n"
-            "🌅 <b>Утренняя сводка</b> (08:00): баланс, траты за неделю, план калорий на день, ближайшие платежи.\n"
-            "🌙 <b>Вечернее напоминание</b> (21:00): если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня.\n"
-            "📊 <b>Авто-отчёт</b>: воскресенье 20:00 (недельный) или 1-го числа (месячный)."
+        text = ui.join(
+            ui.title(pe.SETTINGS, "Настройки"),
+            ui.card("<b>🌅 Утренняя сводка</b> · 08:00", ["баланс, траты за неделю, план калорий на день, ближайшие платежи"]),
+            ui.card("<b>🌙 Вечернее напоминание</b> · 21:00", ["если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня"]),
+            ui.card("<b>📊 Авто-отчёт</b>", ["воскресенье 20:00 (недельный) или 1-го числа (месячный)"]),
         )
     await safe_edit(
         callback,

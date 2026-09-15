@@ -576,7 +576,9 @@ def recurring_due_day(day_of_month: int, year: int, month: int) -> int:
 
 
 def recurring_remaining(items: list[dict[str, Any]], today: date) -> tuple[float, list[dict[str, Any]]]:
-    """Сумма ещё не оплаченных в этом месяце регулярных платежей и их список."""
+    """Сумма ещё не оплаченных в этом месяце регулярных платежей и их список.
+    Платежи, чей день уже прошёл и которые не отмечены — считаем оплаченными вне бота
+    и не показываем как «обязательные»."""
     key = today.strftime("%Y-%m")
     pending = []
     total = 0.0
@@ -584,6 +586,8 @@ def recurring_remaining(items: list[dict[str, Any]], today: date) -> tuple[float
         if not item.get("enabled", True):
             continue
         if str(item.get("last_done_key") or "") == key:
+            continue
+        if recurring_due_day(int(item.get("day_of_month") or 1), today.year, today.month) < today.day:
             continue
         pending.append(item)
         total += float(item.get("amount") or 0)
