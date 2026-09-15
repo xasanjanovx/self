@@ -1,7 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -21,10 +21,20 @@ class Settings:
     app_timezone: str
     default_currency: str
     default_language: str
-    reminder_check_seconds: int
     weekly_report_check_seconds: int
     weekly_report_hour: int
     weekly_report_minute: int
+    # Personal bot: only these Telegram IDs may use it. Empty = everyone.
+    allowed_telegram_ids: frozenset[int] = field(default_factory=frozenset)
+    # Optional channel (e.g. "@ishdasiz" or "-100123...") for one-tap publishing.
+    vacancy_channel: str = ""
+    # Optional: URL (или @username) для кнопки-футера в посте вакансии.
+    vacancy_footer_url: str = "https://t.me/ishdasiz"
+
+    def is_allowed(self, telegram_id: int | None) -> bool:
+        if not self.allowed_telegram_ids:
+            return True
+        return telegram_id is not None and int(telegram_id) in self.allowed_telegram_ids
 
 
 def _required(name: str) -> str:
@@ -41,24 +51,28 @@ def _int(name: str, default: int) -> int:
     return int(value)
 
 
-def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
-    """Return the configured model name, or a sane default.
+def _ids(name: str) -> frozenset[int]:
+    raw = os.getenv(name, "") or ""
+    result: set[int] = set()
+    for chunk in raw.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            result.add(int(chunk))
+        except ValueError:
+            continue
+    return frozenset(result)
 
-    We intentionally trust the value provided via environment variables instead
-    of rewriting it. Hardcoding/overriding model names caused every AI call to
-    hit a non-existent model and fail.
-    """
+
+def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
     value = os.getenv(name, "").strip()
     return value or default
 
 
 def _candidate_env_files() -> list[Path]:
-    """Collect .env files from the package root and parent directories.
-
-    Supports both `self/.env` and a repo-root `.env`, as well as the current
-    working directory, so the bot finds credentials regardless of where it is
-    launched from.
-    """
+    """`.env` рядом с пакетом, в корне репо и в cwd — чтобы бот находил
+    креды независимо от того, откуда запущен."""
     here = Path(__file__).resolve()
     candidate_dirs = [here.parent.parent, here.parent.parent.parent, Path.cwd()]
 
@@ -76,8 +90,7 @@ def _candidate_env_files() -> list[Path]:
 
 @lru_cache(maxsize=1)
 def load_settings() -> Settings:
-    # Real environment variables (e.g. Railway Variables) always win.
-    # Local .env files only fill in the gaps, and never override.
+    # Реальные переменные окружения (docker env_file) всегда важнее .env-файлов.
     for env_path in _candidate_env_files():
         load_dotenv(dotenv_path=env_path, override=False)
         for key, value in dotenv_values(env_path, encoding="utf-8-sig").items():
@@ -97,8 +110,10 @@ def load_settings() -> Settings:
         app_timezone=os.getenv("APP_TIMEZONE", "Asia/Tashkent"),
         default_currency=os.getenv("DEFAULT_CURRENCY", "UZS"),
         default_language=os.getenv("DEFAULT_LANGUAGE", "ru"),
-        reminder_check_seconds=_int("REMINDER_CHECK_SECONDS", 60),
         weekly_report_check_seconds=_int("WEEKLY_REPORT_CHECK_SECONDS", 1800),
         weekly_report_hour=_int("WEEKLY_REPORT_HOUR", 20),
         weekly_report_minute=_int("WEEKLY_REPORT_MINUTE", 0),
+        allowed_telegram_ids=_ids("ALLOWED_TELEGRAM_IDS"),
+        vacancy_channel=os.getenv("VACANCY_CHANNEL", "").strip(),
+        vacancy_footer_url=os.getenv("VACANCY_FOOTER_URL", "https://t.me/ishdasiz").strip() or "https://t.me/ishdasiz",
     )

@@ -1,4 +1,4 @@
-"""Фоновые рабочие задачи: напоминания, weekly-report."""
+"""Фоновая задача: авто-отчёт (раз в неделю по воскресеньям / раз в месяц 1-го числа)."""
 from __future__ import annotations
 
 import asyncio
@@ -8,43 +8,81 @@ from datetime import datetime, timezone
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
-from .db import Database
-from . import screen as screen_mod
+from . import cache
+from . import insights
+from . import services
+from .context import ai, db, settings
+from .handlers.common import profile_by_id
+from .keyboards import back_to_menu_keyboard
+from .profile import h
+from .reports import build_summary
+from . import emoji as pe
 
 logger = logging.getLogger(__name__)
 
 
-async def reminder_worker(bot: Bot, db: Database, check_seconds: int = 60) -> None:
-    """Проверяет напоминания каждые `check_seconds` секунд и отправляет due.
+def _due_key(local_now: datetime, frequency: str) -> str | None:
+    if frequency == "monthly":
+        return f"{local_now.year:04d}-{local_now.month:02d}" if local_now.day == 1 else None
+    if local_now.weekday() != 6:
+        return None
+    iso = local_now.isocalendar()
+    return f"{int(iso[0]):04d}-W{int(iso[1]):02d}"
 
-    `db.get_due_reminders(now_utc)` сам ставит `last_sent_key`, чтобы не отправлять
-    одно и то же напоминание дважды в одну минуту.
-    """
-    interval = max(15, int(check_seconds))
-    logger.info("Reminder worker started (interval=%ds)", interval)
+
+async def _send_report(bot: Bot, telegram_id: int, frequency: str, due_key: str) -> None:
+    profile = await profile_by_id(telegram_id)
+    days = 30 if frequency == "monthly" else 7
+    payload, nutrition_profile = await asyncio.gather(services.period_payload(profile, days), services.nutrition_profile(telegram_id))
+    title = profile.tr(
+        "📊 <b>Месячный отчёт</b>" if frequency == "monthly" else "📊 <b>Недельный отчёт</b>",
+        "📊 <b>Oylik hisobot</b>" if frequency == "monthly" else "📊 <b>Haftalik hisobot</b>",
+    )
+    summary = build_summary(profile, days=days, entries=payload["all_finance_entries"], logs=payload["calorie_logs"], nutrition_profile=nutrition_profile, title=title)
+    text = summary.text
+    insight = await insights.generate_insight(ai, summary.stats, summary.nutrition, currency=profile.currency, lang=profile.lang)
+    if insight:
+        text += f"\n\n{pe.IDEA} <i>{h(insight)}</i>"
+    await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang))
+    await db.save_report_preferences(telegram_id, enabled=True, frequency=frequency, last_sent_key=due_key)
+    cache.invalidate(telegram_id, "report_prefs")
+
+
+async def report_worker(bot: Bot) -> None:
+    interval = max(300, settings.weekly_report_check_seconds)
+    logger.info("Report worker started (interval=%ds)", interval)
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
-            due = await asyncio.to_thread(db.get_due_reminders, now_utc)
-            for reminder in due:
-                telegram_id = int(reminder.get("telegram_id") or 0)
-                text = str(reminder.get("reminder_text") or "").strip()
-                if not telegram_id or not text:
+            users = await db.list_users()
+            for user in users:
+                telegram_id = int(user["telegram_id"])
+                if not settings.is_allowed(telegram_id):
+                    continue
+                profile = await profile_by_id(telegram_id)
+                local_now = now_utc.astimezone(profile.tz)
+                if (local_now.hour, local_now.minute) < (settings.weekly_report_hour, settings.weekly_report_minute):
+                    continue
+                prefs = await db.get_report_preferences(telegram_id)
+                if not prefs.get("enabled", True):
+                    continue
+                frequency = str(prefs.get("frequency") or "weekly")
+                due_key = _due_key(local_now, frequency)
+                if due_key is None or prefs.get("last_sent_key") == due_key:
                     continue
                 try:
-                    await screen_mod.send_reminder(bot, telegram_id, f"⏰ {text}")
+                    await _send_report(bot, telegram_id, frequency, due_key)
                 except TelegramForbiddenError:
-                    logger.info("Skip reminder: user %s blocked the bot", telegram_id)
+                    logger.info("Report skipped: user %s blocked the bot", telegram_id)
                 except TelegramRetryAfter as exc:
-                    logger.warning("Reminder flood control: sleep %.1fs", float(exc.retry_after))
                     await asyncio.sleep(float(exc.retry_after) + 1)
                 except Exception:
-                    logger.exception("Failed to send reminder to %s", telegram_id)
+                    logger.exception("Report failed for %s", telegram_id)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Reminder worker iteration failed")
+            logger.exception("Report worker iteration failed")
         await asyncio.sleep(interval)
 
 
-__all__ = ["reminder_worker"]
+__all__ = ["report_worker"]

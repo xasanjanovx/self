@@ -1,0 +1,739 @@
+"""Финансы: панель, ввод операций (текст/голос, без AI где возможно),
+подтверждение, быстрые кнопки, операции, статистика по категориям, счета."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import date, timedelta
+from typing import Any
+
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+
+from .. import categories as cats
+from .. import charts as charts_mod
+from .. import emoji as pe
+from .. import finance as fin
+from .. import screen as screen_mod
+from .. import services
+from ..context import ai, db
+from ..keyboards import (
+    back_to_menu_keyboard,
+    finance_add_confirm_keyboard,
+    finance_category_keyboard,
+    finance_delete_confirm_keyboard,
+    finance_detail_keyboard,
+    finance_operations_keyboard,
+    finance_panel_keyboard,
+    finance_setting_input_keyboard,
+    finance_settings_keyboard,
+    finance_stats_keyboard,
+)
+from ..profile import Profile, h
+from ..states import BotStates
+from .common import (
+    answer_now,
+    get_profile,
+    remember_panel,
+    safe_delete,
+    safe_edit,
+    show_panel,
+    show_progress,
+    transcribe_audio,
+)
+
+router = Router(name="finance")
+logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------ panel
+async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, Any]]]:
+    snap = await services.finance_snapshot(profile)
+    lang, cur = profile.lang, profile.currency
+    b = snap.balances
+    month = snap.month
+    labels = [fin.quick_label(item, lang) for item in snap.quick]
+
+    if lang == "uz":
+        lines = [
+            f"{pe.WALLET} <b>Moliya</b>",
+            "",
+            f"💼 Balans: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
+            f"💳 Karta {fin.fmt_money(b['card'])}  ·  {pe.CASH} Naqd {fin.fmt_money(b['cash'])}",
+            "",
+            f"{pe.CHART} <b>Bugun</b>: {pe.INCOME} {fin.fmt_money(snap.today_income)}  {pe.EXPENSE} {fin.fmt_money(snap.today_expense)} {cur}",
+        ]
+    else:
+        lines = [
+            f"{pe.WALLET} <b>Финансы</b>",
+            "",
+            f"💼 Баланс: <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
+            f"💳 Карта {fin.fmt_money(b['card'])}  ·  {pe.CASH} Наличные {fin.fmt_money(b['cash'])}",
+            "",
+            f"{pe.CHART} <b>Сегодня</b>: {pe.INCOME} {fin.fmt_money(snap.today_income)}  {pe.EXPENSE} {fin.fmt_money(snap.today_expense)} {cur}",
+        ]
+    if month:
+        change = month.expense_change_pct()
+        change_text = ""
+        if change is not None:
+            arrow = "▲" if change > 0 else "▼"
+            change_text = f" ({arrow}{abs(change):.0f}%)"
+        top = ""
+        if month.by_category:
+            key, amount, _ = month.by_category[0]
+            top = f" · {cats.label(key, lang)} {fin.fmt_money(amount)}"
+        lines.append(
+            (f"📆 <b>{fin.period_title(month.period, lang)}</b>: {fin.fmt_money(month.expense)} {cur}{change_text}{top}")
+        )
+    extras = []
+    if b["lent"]:
+        extras.append(f"{pe.HANDSHAKE} {'Qarzga berilgan' if lang == 'uz' else 'Дал в долг'}: {fin.fmt_money(b['lent'])}")
+    if b["debt"]:
+        extras.append(f"{pe.PIN} {'Mening qarzim' if lang == 'uz' else 'Мои долги'}: {fin.fmt_money(b['debt'])}")
+    credit = float(snap.settings.get("monthly_credit_payment") or 0)
+    if credit:
+        extras.append(f"{pe.BANK} {'Kredit/oy' if lang == 'uz' else 'Кредит/мес'}: {fin.fmt_money(credit)}")
+    if extras:
+        lines.append("")
+        lines.extend(extras)
+    if snap.today_entries:
+        lines.append("")
+        lines.append("<b>Bugungi operatsiyalar:</b>" if lang == "uz" else "<b>Операции сегодня:</b>")
+        for row in snap.today_entries[:6]:
+            lines.append("• " + _entry_line(row, lang))
+    lines += [
+        "",
+        "<i>✍️ Yozing: <code>taksi 25000</code> · <code>oylik 5 mln</code> · <code>qarzga berdim 200000</code></i>"
+        if lang == "uz"
+        else "<i>✍️ Напиши: <code>такси 25000</code> · <code>зарплата 5 млн</code> · <code>дал в долг 200000</code></i>",
+    ]
+    return "\n".join(lines), labels, snap.quick
+
+
+def _entry_line(row: dict[str, Any], lang: str) -> str:
+    amount = float(row.get("amount") or 0)
+    key = fin.entry_category_key(row)
+    note = fin.clean_note(row.get("note"))
+    transfer = fin.transfer_from_note(row.get("note"))
+    if transfer:
+        return f"↔ {fin.fmt_money(amount)} · {fin.transfer_label(transfer[0], transfer[1], lang)}" + (f" · {h(note)}" if note else "")
+    sign = "+" if row.get("entry_type") == "income" else "−"
+    return f"{sign}{fin.fmt_money(amount)} · {cats.label(key, lang)}" + (f" · {h(note)}" if note else "")
+
+
+async def render_panel(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
+    text, labels, quick = await build_panel(profile)
+    if notice:
+        text += f"\n\n{notice}"
+    await state.set_state(BotStates.waiting_finance_input)
+    await state.update_data(pending_finance_items=None, pending_finance_source=None, quick_ops=quick)
+    kb = finance_panel_keyboard(labels, profile.lang)
+    if isinstance(target, CallbackQuery):
+        await remember_panel(target, state)
+        await safe_edit(target, text, kb)
+    else:
+        await show_panel(target, state, text, kb)
+
+
+@router.callback_query(F.data == "menu:finance")
+async def cb_panel(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    await render_panel(callback, state, await get_profile(callback.from_user))
+
+
+# ------------------------------------------------------------------ input
+def _format_pending(items: list[dict[str, Any]], profile: Profile, balances_before: dict[str, float]) -> str:
+    lang, cur = profile.lang, profile.currency
+    lines = ["💰 <b>Moliya / Tekshiruv</b>", ""] if lang == "uz" else ["💰 <b>Финансы / Проверка</b>", ""]
+    for item in items:
+        amount = float(item.get("amount") or 0)
+        note = h(str(item.get("note") or "").strip())
+        note_part = f" · {note}" if note else ""
+        if item.get("kind") == "transfer":
+            route = fin.transfer_label(item.get("from_bucket", "card"), item.get("to_bucket", "cash"), lang)
+            lines.append(f"↔ <b>{fin.fmt_money(amount)} {cur}</b> · {route}{note_part}")
+        else:
+            sign = "+" if item.get("kind") == "income" else "−"
+            lines.append(
+                f"{sign}<b>{fin.fmt_money(amount)} {cur}</b> · {cats.label(item.get('category'), lang)} · "
+                f"{fin.bucket_label(item.get('bucket', 'card'), lang)}{note_part}"
+            )
+    after = fin.apply_pending(balances_before, items)
+    wallet_before = balances_before["card"] + balances_before["cash"]
+    wallet_after = after["card"] + after["cash"]
+    lines += ["", f"💼 {'Balans' if lang == 'uz' else 'Баланс'}: {fin.fmt_money(wallet_before)} → <b>{fin.fmt_money(wallet_after)} {cur}</b>"]
+    for bucket in ("card", "cash", "lent", "debt"):
+        if abs(after[bucket] - balances_before[bucket]) > 0.005:
+            lines.append(f"{fin.bucket_label(bucket, lang)}: {fin.fmt_money(balances_before[bucket])} → {fin.fmt_money(after[bucket])}")
+    negative = [b for b in ("card", "cash") if after[b] < 0]
+    if negative:
+        lines.append(("⚠️ Minusga tushadi: " if lang == "uz" else "⚠️ Уходит в минус: ") + ", ".join(fin.bucket_label(b, lang) for b in negative))
+    lines += ["", "Saqlaymizmi?" if lang == "uz" else "Сохранить?"]
+    return "\n".join(lines)
+
+
+async def handle_finance_text(
+    message: Message, state: FSMContext, profile: Profile, raw_text: str, *, source: str, reroute: bool = True
+) -> None:
+    """Общая точка входа для текста/голоса: локальный парсер → AI → подтверждение.
+    Если текст явно не про деньги (еда, вакансия, вопрос) — отдаём общему роутеру."""
+    raw_text = (raw_text or "").strip()
+    if not raw_text:
+        await safe_delete(message)
+        await render_panel(message, state, profile, notice=profile.tr("Нужен текст или голос.", "Matn yoki ovoz kerak."))
+        return
+    if reroute and not fin.looks_like_finance(raw_text):
+        from .inbox import route_text  # локальный импорт: избегаем цикла
+
+        transcript = raw_text if source == "voice_ai" else None
+        if await route_text(message, state, profile, raw_text, transcript=transcript, skip_finance=True):
+            return
+    await safe_delete(message)
+
+    items = fin.parse_local(raw_text)
+    if items is None:
+        await show_progress(message, profile.tr("⏳ Разбираю операцию…", "⏳ Operatsiya tahlil qilinmoqda…"))
+        try:
+            items = await ai.parse_finance_ops(raw_text)
+        except Exception as exc:
+            logger.exception("parse_finance_ops failed")
+            await render_panel(message, state, profile, notice=f"{pe.CROSS} {profile.tr('Ошибка разбора', 'Tahlil xatosi')}: {h(str(exc)[:120])}")
+            return
+    if not items:
+        await render_panel(
+            message, state, profile,
+            notice=profile.tr("Не понял операцию. Пример: <code>такси 25000</code>", "Operatsiya tushunilmadi. Misol: <code>taksi 25000</code>"),
+        )
+        return
+
+    snap = await services.finance_snapshot(profile)
+    await state.set_state(BotStates.waiting_finance_confirm)
+    await state.update_data(pending_finance_items=items, pending_finance_source=source)
+    await show_panel(message, state, _format_pending(items, profile, snap.balances), finance_add_confirm_keyboard(profile.lang))
+
+
+async def handle_finance_voice(message: Message, state: FSMContext, profile: Profile, transcript: str | None = None) -> None:
+    if transcript is None:
+        await show_progress(message, profile.tr("⏳ Распознаю голос…", "⏳ Ovoz aniqlanmoqda…"))
+        try:
+            transcript = await transcribe_audio(message)
+        except Exception as exc:
+            logger.exception("Voice transcribe failed")
+            await safe_delete(message)
+            await render_panel(message, state, profile, notice=f"{pe.CROSS} {profile.tr('Ошибка распознавания', 'Ovozni aniqlash xatosi')}: {h(str(exc)[:120])}")
+            return
+    await handle_finance_text(message, state, profile, transcript or "", source="voice_ai")
+
+
+@router.message(BotStates.waiting_finance_input, F.voice | F.audio)
+@router.message(BotStates.waiting_finance_confirm, F.voice | F.audio)
+async def msg_input_voice(message: Message, state: FSMContext) -> None:
+    await handle_finance_voice(message, state, await get_profile(message.from_user))
+
+
+@router.message(BotStates.waiting_finance_input, F.photo)
+@router.message(BotStates.waiting_finance_confirm, F.photo)
+@router.message(BotStates.waiting_finance_settings, F.photo)
+async def msg_input_photo(message: Message, state: FSMContext) -> None:
+    # фото в разделе финансов — это всё равно еда (или вакансия с подписью)
+    from .inbox import handle_photo_message
+
+    await handle_photo_message(message, state, await get_profile(message.from_user))
+
+
+@router.message(BotStates.waiting_finance_input, F.text)
+@router.message(BotStates.waiting_finance_confirm, F.text)
+async def msg_input_text(message: Message, state: FSMContext) -> None:
+    # в состоянии подтверждения новый текст = новая операция (старая отменяется)
+    profile = await get_profile(message.from_user)
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        await safe_delete(message)
+        return
+    if _looks_like_question(text):
+        await safe_delete(message)
+        await answer_question(message, profile, text)
+        return
+    await handle_finance_text(message, state, profile, text, source="text")
+
+
+@router.message(BotStates.waiting_finance_input)
+@router.message(BotStates.waiting_finance_confirm)
+async def msg_input_other(message: Message, state: FSMContext) -> None:
+    profile = await get_profile(message.from_user)
+    await safe_delete(message)
+    await render_panel(message, state, profile, notice=profile.tr("Нужен текст или голос.", "Matn yoki ovoz kerak."))
+
+
+@router.callback_query(F.data == "finance:add_confirm")
+async def cb_add_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    data = await state.get_data()
+    items = data.get("pending_finance_items") or []
+    if not items:
+        await answer_now(callback, profile.tr("Нет данных для сохранения", "Saqlash uchun ma'lumot yo'q"), alert=True)
+        return
+    await answer_now(callback, profile.tr("Сохранено ✅", "Saqlandi ✅"))
+    try:
+        await services.add_finance_entries(profile, items, source=str(data.get("pending_finance_source") or "text"))
+    except Exception as exc:
+        logger.exception("Finance save failed")
+        await safe_edit(callback, f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}", back_to_menu_keyboard(profile.lang))
+        return
+    await render_panel(callback, state, profile)
+
+
+@router.callback_query(F.data == "finance:add_cancel")
+async def cb_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    await answer_now(callback, profile.tr("Отменено", "Bekor qilindi"))
+    await render_panel(callback, state, profile)
+
+
+@router.callback_query(F.data.startswith("finance:quick:"))
+async def cb_quick(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    try:
+        idx = int(callback.data.split(":")[-1])
+    except ValueError:
+        await answer_now(callback)
+        return
+    quick = (await state.get_data()).get("quick_ops")
+    if quick is None:
+        quick = (await services.finance_snapshot(profile)).quick
+    if idx < 0 or idx >= len(quick):
+        await answer_now(callback, profile.tr("Не найдено, обнови панель", "Topilmadi, panelni yangilang"), alert=True)
+        return
+    item = quick[idx]
+    await answer_now(callback, f"{fin.quick_label(item, profile.lang)} ✅")
+    await services.add_finance_entries(
+        profile,
+        [{"kind": item.get("entry_type"), "amount": item.get("amount"), "category": item.get("category"), "note": item.get("note"), "bucket": item.get("bucket")}],
+        source="quick",
+    )
+    await render_panel(callback, state, profile)
+
+
+# ------------------------------------------------------------------ operations list
+def _period_days(code: str) -> int:
+    return {"day": 1, "week": 7, "month": 30}.get(code, 1)
+
+
+@router.callback_query(F.data.startswith("finance:ops:"))
+async def cb_ops(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    period = callback.data.split(":")[-1]
+    period = period if period in {"day", "week", "month"} else "day"
+    entries = await services.finance_entries(profile.telegram_id)
+    today = profile.today
+    start = today - timedelta(days=_period_days(period) - 1)
+    rows = fin.entries_between(entries, start, today)
+    lang, cur = profile.lang, profile.currency
+    labels = {"day": ("День", "Kun"), "week": ("7 дней", "7 kun"), "month": ("30 дней", "30 kun")}[period]
+    lines = [
+        "📂 <b>Moliya / Operatsiyalar</b>" if lang == "uz" else "📂 <b>Финансы / Операции</b>",
+        f"<i>{'Davr' if lang == 'uz' else 'Период'}: {labels[1] if lang == 'uz' else labels[0]}</i>",
+        "",
+    ]
+    if not rows:
+        lines.append("Operatsiyalar topilmadi." if lang == "uz" else "Операции не найдены.")
+    else:
+        last_day = None
+        income = expense = 0.0
+        for row in rows[:40]:
+            day = str(row.get("entry_date") or "")[:10]
+            if day != last_day:
+                if last_day is not None:
+                    lines.append("")
+                try:
+                    lines.append(f"<b>{date.fromisoformat(day).strftime('%d.%m.%Y')}</b>")
+                except Exception:
+                    lines.append(f"<b>{day}</b>")
+                last_day = day
+            lines.append("• " + _entry_line(row, lang))
+        for row in rows:
+            if fin.is_transfer(row):
+                continue
+            if row.get("entry_type") == "income":
+                income += float(row.get("amount") or 0)
+            else:
+                expense += float(row.get("amount") or 0)
+        lines += ["", f"{pe.INCOME} {fin.fmt_money(income)}  {pe.EXPENSE} {fin.fmt_money(expense)} {cur}"]
+        if len(rows) > 40:
+            lines.append(f"<i>… {'yana' if lang == 'uz' else 'ещё'} {len(rows) - 40}</i>")
+    lines += ["", "<i>" + ("Tafsilot uchun operatsiyani tanlang." if lang == "uz" else "Выбери операцию для деталей.") + "</i>"]
+    await state.set_state(BotStates.waiting_finance_input)
+    await remember_panel(callback, state)
+    await safe_edit(callback, "\n".join(lines), finance_operations_keyboard(rows, period, lang))
+
+
+def _detail_text(entry: dict[str, Any], profile: Profile) -> str:
+    lang, cur = profile.lang, profile.currency
+    amount = float(entry.get("amount") or 0)
+    note = h(fin.clean_note(entry.get("note")) or "-")
+    day = str(entry.get("entry_date") or "")[:10]
+    transfer = fin.transfer_from_note(entry.get("note"))
+    if transfer:
+        route = fin.transfer_label(transfer[0], transfer[1], lang)
+        return (
+            f"💰 <b>{'O`tkazma' if lang == 'uz' else 'Перевод'}</b>\n\n"
+            f"{'Yo`nalish' if lang == 'uz' else 'Маршрут'}: <b>{route}</b>\n"
+            f"{'Summa' if lang == 'uz' else 'Сумма'}: <b>{fin.fmt_money(amount)} {cur}</b>\n"
+            f"{'Sana' if lang == 'uz' else 'Дата'}: {day}\n{'Izoh' if lang == 'uz' else 'Заметка'}: {note}"
+        )
+    kind = entry.get("entry_type")
+    sign = "+" if kind == "income" else "−"
+    key = fin.entry_category_key(entry)
+    if lang == "uz":
+        return (
+            f"💰 <b>{'Kirim' if kind == 'income' else 'Chiqim'}</b>\n\n"
+            f"Summa: <b>{sign}{fin.fmt_money(amount)} {cur}</b>\nKategoriya: {cats.label(key, lang)}\n"
+            f"Hisob: {fin.bucket_label(fin.bucket_from_note(entry.get('note')), lang)}\nSana: {day}\nIzoh: {note}"
+        )
+    return (
+        f"💰 <b>{'Доход' if kind == 'income' else 'Расход'}</b>\n\n"
+        f"Сумма: <b>{sign}{fin.fmt_money(amount)} {cur}</b>\nКатегория: {cats.label(key, lang)}\n"
+        f"Счёт: {fin.bucket_label(fin.bucket_from_note(entry.get('note')), lang)}\nДата: {day}\nЗаметка: {note}"
+    )
+
+
+@router.callback_query(F.data.startswith("finance:view:"))
+async def cb_view(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    entry_id = callback.data.split(":")[-1]
+    entry = await db.get_finance_entry(profile.telegram_id, entry_id)
+    if not entry:
+        await answer_now(callback, profile.tr("Операция не найдена", "Operatsiya topilmadi"), alert=True)
+        return
+    await state.set_state(BotStates.waiting_finance_input)
+    await remember_panel(callback, state)
+    await safe_edit(callback, _detail_text(entry, profile), finance_detail_keyboard(entry_id, profile.lang, transfer=fin.is_transfer(entry)))
+
+
+@router.callback_query(F.data.startswith("finance:cat:"))
+async def cb_category_pick(callback: CallbackQuery) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    entry_id = callback.data.split(":")[-1]
+    entry = await db.get_finance_entry(profile.telegram_id, entry_id)
+    if not entry:
+        await answer_now(callback, profile.tr("Операция не найдена", "Operatsiya topilmadi"), alert=True)
+        return
+    kind = "income" if entry.get("entry_type") == "income" else "expense"
+    await safe_edit(
+        callback,
+        _detail_text(entry, profile) + "\n\n" + profile.tr("Выбери категорию:", "Kategoriyani tanlang:"),
+        finance_category_keyboard(entry_id, kind, profile.lang),
+    )
+
+
+@router.callback_query(F.data.startswith("finance:setcat:"))
+async def cb_category_set(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    parts = callback.data.split(":")
+    if len(parts) < 4 or not cats.is_valid_key(parts[3]):
+        await answer_now(callback)
+        return
+    entry_id, key = parts[2], parts[3]
+    await answer_now(callback, f"{cats.label(key, profile.lang)} ✅")
+    await services.set_finance_category(profile.telegram_id, entry_id, key)
+    entry = await db.get_finance_entry(profile.telegram_id, entry_id)
+    if not entry:
+        await render_panel(callback, state, profile)
+        return
+    await safe_edit(callback, _detail_text(entry, profile), finance_detail_keyboard(entry_id, profile.lang, transfer=fin.is_transfer(entry)))
+
+
+@router.callback_query(F.data.startswith("finance:ask_del:"))
+async def cb_ask_delete(callback: CallbackQuery) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    entry_id = callback.data.split(":")[-1]
+    await safe_edit(callback, profile.tr("Удалить операцию?", "Operatsiyani o'chiraymi?"), finance_delete_confirm_keyboard(entry_id, profile.lang))
+
+
+@router.callback_query(F.data.startswith("finance:del:"))
+async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    entry_id = callback.data.split(":")[-1]
+    await answer_now(callback, profile.tr("Удалено", "O'chirildi"))
+    try:
+        await services.delete_finance_entry(profile.telegram_id, entry_id)
+    except Exception:
+        logger.exception("Finance delete failed")
+    await render_panel(callback, state, profile)
+
+
+# ------------------------------------------------------------------ stats
+def build_stats_text(stats: fin.Stats, profile: Profile) -> str:
+    lang, cur = profile.lang, profile.currency
+    p = stats.period
+    title = fin.period_title(p, lang)
+    lines = [f"📊 <b>{'Statistika' if lang == 'uz' else 'Статистика'} — {title}</b>", ""]
+
+    change = stats.expense_change_pct()
+    change_text = ""
+    if change is not None:
+        arrow = "▲" if change > 0 else "▼"
+        change_text = f"  <i>{arrow}{abs(change):.0f}% {'vs' if lang == 'uz' else 'к'} {fin.prev_period_title(p, lang)}</i>"
+    elif stats.prev_expense == 0 and stats.expense > 0 and p.code != "year":
+        change_text = f"  <i>({fin.prev_period_title(p, lang)}: 0)</i>"
+    lines.append(f"{pe.EXPENSE} {'Chiqim' if lang == 'uz' else 'Расход'}: <b>{fin.fmt_money(stats.expense)} {cur}</b>{change_text}")
+    lines.append(f"{pe.INCOME} {'Kirim' if lang == 'uz' else 'Доход'}: <b>{fin.fmt_money(stats.income)} {cur}</b>")
+    net = stats.net
+    lines.append(f"{'Natija' if lang == 'uz' else 'Итог'}: <b>{'+' if net >= 0 else '−'}{fin.fmt_money(abs(net))} {cur}</b>")
+
+    if stats.by_category:
+        lines += ["", f"<b>{'Xarajatlar toifalar bo`yicha' if lang == 'uz' else 'Расходы по категориям'}</b>"]
+        total = stats.expense or 1.0
+        for key, amount, count in stats.by_category[:12]:
+            share = amount / total
+            prev = stats.prev_by_category.get(key)
+            delta = ""
+            if prev and prev > 0:
+                pct = (amount - prev) / prev * 100
+                if abs(pct) >= 20:
+                    delta = f" {'▲' if pct > 0 else '▼'}{abs(pct):.0f}%"
+            lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {share * 100:.0f}%{delta}")
+            lines.append(f"{fin.bar(share, 12)}  <i>×{count}</i>")
+    else:
+        lines += ["", "<i>" + ("Bu davrda xarajatlar yo'q." if lang == "uz" else "Расходов за период нет.") + "</i>"]
+
+    if stats.income_by_category and len(stats.income_by_category) > 1:
+        lines += ["", f"<b>{'Kirimlar' if lang == 'uz' else 'Доходы'}</b>"]
+        for key, amount, _ in stats.income_by_category[:5]:
+            lines.append(f"{cats.label(key, lang)} — {fin.fmt_money(amount)}")
+
+    if stats.expense > 0 and p.days > 1:
+        lines.append("")
+        lines.append(f"{'Kuniga o`rtacha' if lang == 'uz' else 'В среднем в день'}: <b>{fin.fmt_money(stats.avg_per_day)} {cur}</b>")
+        if stats.top_day:
+            lines.append(f"{'Eng qimmat kun' if lang == 'uz' else 'Самый затратный день'}: {stats.top_day[0].strftime('%d.%m')} — {fin.fmt_money(stats.top_day[1])}")
+    if stats.transfers:
+        lines.append(f"{'O`tkazmalar' if lang == 'uz' else 'Переводов между счетами'}: {stats.transfers}")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("finance:stats:"))
+async def cb_stats(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    period_code = callback.data.split(":")[-1]
+    entries = await services.finance_entries(profile.telegram_id)
+    period = fin.period_for(period_code, profile.today)
+    stats = fin.compute_stats(entries, period)
+    await state.set_state(BotStates.waiting_finance_input)
+    await remember_panel(callback, state)
+    if callback.message is not None:
+        await screen_mod.drop_chart(callback.bot, callback.message.chat.id)
+    await safe_edit(callback, build_stats_text(stats, profile), finance_stats_keyboard(period.code, profile.lang))
+
+
+@router.callback_query(F.data.startswith("finance:chart:"))
+async def cb_chart(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    period_code = callback.data.split(":")[-1]
+    entries = await services.finance_entries(profile.telegram_id)
+    period = fin.period_for(period_code, profile.today)
+    stats = fin.compute_stats(entries, period)
+    if not stats.by_category:
+        await answer_now(callback, profile.tr("Нет расходов за период", "Bu davrda xarajat yo'q"), alert=True)
+        return
+    await answer_now(callback, profile.tr("Строю график…", "Grafik tayyorlanmoqda…"))
+    items = [(cats.label(k, profile.lang, with_emoji=False), a) for k, a, _ in stats.by_category]
+    title = f"{'Xarajatlar' if profile.lang == 'uz' else 'Расходы'} — {fin.period_title(period, profile.lang)}"
+    try:
+        chart = await asyncio.to_thread(charts_mod.expense_categories_chart, items, currency=profile.currency, lang=profile.lang, title=title)
+    except Exception:
+        logger.exception("category chart failed")
+        chart = None
+    if not chart or callback.message is None:
+        await answer_now(callback, profile.tr("Не удалось построить график", "Grafik chizilmadi"), alert=True)
+        return
+    await screen_mod.send_chart(callback.bot, callback.message.chat.id, BufferedInputFile(chart, filename="categories.png"), caption=title)
+
+
+# ------------------------------------------------------------------ questions
+_QUESTION_WORDS = ("сколько", "qancha", "какой", "какая", "сумм", "итог", "статист", "потратил", "sarfladim", "?", "сравн", "больше всего", "eng ko'p")
+
+
+def _looks_like_question(text: str) -> bool:
+    low = text.lower()
+    if fin.parse_local(text) is not None:
+        return False
+    return any(w in low for w in _QUESTION_WORDS) and ("?" in low or "сколько" in low or "qancha" in low or "статист" in low)
+
+
+async def build_question_context(profile: Profile) -> str:
+    entries, settings, logs, nutrition_profile = await asyncio.gather(
+        services.finance_entries(profile.telegram_id),
+        services.finance_settings(profile.telegram_id),
+        services.calorie_logs(profile, 30),
+        services.nutrition_profile(profile.telegram_id),
+    )
+    today = profile.today
+    cur = profile.currency
+    balances = fin.compute_balances(entries, settings)
+    parts = [f"Сегодня: {today.isoformat()}. Валюта: {cur}."]
+    if nutrition_profile:
+        parts.append(
+            f"Питание: цель {nutrition_profile.get('daily_calories')} ккал/день, Б/Ж/У "
+            f"{nutrition_profile.get('protein')}/{nutrition_profile.get('fat')}/{nutrition_profile.get('carbs')}."
+        )
+    if logs:
+        by_day: dict[str, float] = {}
+        for row in logs:
+            day = str(row.get("created_at") or "")[:10]
+            by_day[day] = by_day.get(day, 0.0) + float(row.get("calories") or 0)
+        parts.append("Калории по дням (UTC-дата): " + "; ".join(f"{d}={int(v)}" for d, v in sorted(by_day.items())[-30:]))
+        parts.append("Последние блюда: " + "; ".join(
+            f"{str(r.get('created_at'))[:10]} {str(r.get('meal_desc') or '')[:30]} {int(float(r.get('calories') or 0))}ккал" for r in logs[:25]
+        ))
+    parts.append("Балансы: " + ", ".join(f"{b}={fin.fmt_money(v)}" for b, v in balances.items()))
+    labels = {"day": "сегодня", "week": "последние 7 дней", "month": "этот месяц", "prev_month": "прошлый месяц", "year": "этот год"}
+    periods = [(code, fin.period_for(code, today)) for code in labels]
+    if entries:
+        first = min((fin._entry_date(r) for r in entries if fin._entry_date(r)), default=today)
+        periods.append(("all", fin.Period("all", first, today, first, first)))
+        labels["all"] = "всё время"
+    for code, period in periods:
+        st = fin.compute_stats(entries, period)
+        cats_txt = "; ".join(f"{cats.label(k, 'ru', with_emoji=False)}={fin.fmt_money(a)} (×{c})" for k, a, c in st.by_category[:12]) or "нет"
+        inc_txt = "; ".join(f"{cats.label(k, 'ru', with_emoji=False)}={fin.fmt_money(a)}" for k, a, _ in st.income_by_category[:6]) or "нет"
+        parts.append(
+            f"[{labels[code]}: {st.period.start.isoformat()}..{st.period.end.isoformat()}] расход={fin.fmt_money(st.expense)}, доход={fin.fmt_money(st.income)}, "
+            f"операций={st.ops}; расходы по категориям: {cats_txt}; доходы: {inc_txt}"
+        )
+    recent = fin.entries_between(entries, today - timedelta(days=14), today)[:40]
+    if recent:
+        parts.append("Последние операции: " + "; ".join(
+            f"{str(r.get('entry_date'))[:10]} {'+' if r.get('entry_type') == 'income' else '-'}{fin.fmt_money(float(r.get('amount') or 0))} "
+            f"{cats.label(fin.entry_category_key(r), 'ru', with_emoji=False)} {fin.clean_note(r.get('note')) or ''}".strip()
+            for r in recent
+        ))
+    return "\n".join(parts)
+
+
+async def answer_question(message: Message, profile: Profile, question: str) -> None:
+    await show_progress(message, profile.tr("⏳ Считаю…", "⏳ Hisoblanmoqda…"))
+    try:
+        context = await build_question_context(profile)
+        answer = await ai.answer_question(question, context, profile.lang)
+    except Exception:
+        logger.exception("answer_question failed")
+        answer = profile.tr("Не смог посчитать сейчас, попробуй позже.", "Hozir hisoblay olmadim, keyinroq urining.")
+    text, labels, _ = await build_panel(profile)
+    await screen_mod.show_screen(message.bot, message.chat.id, f"{pe.IDEA} {h(answer)}\n\n{text}", finance_panel_keyboard(labels, profile.lang))
+
+
+# ------------------------------------------------------------------ settings (accounts)
+_FIELDS = {"card": "card_base", "cash": "cash_base", "lent": "lent_base", "debt": "debt_base", "credit": "monthly_credit_payment"}
+
+
+def _field_label(field: str, lang: str) -> str:
+    ru = {"card": "💳 Карта", "cash": "💵 Наличные", "lent": "🤝 Дал в долг", "debt": "📌 Мои долги", "credit": "🏦 Кредит/мес"}
+    uz = {"card": "💳 Karta", "cash": "💵 Naqd", "lent": "🤝 Qarzga berilgan", "debt": "📌 Mening qarzim", "credit": "🏦 Kredit/oy"}
+    return (uz if lang == "uz" else ru).get(field, field)
+
+
+async def _settings_view(profile: Profile) -> tuple[dict[str, float], dict[str, float]]:
+    """Текущие фактические балансы (base + операции) для показа в настройках."""
+    snap = await services.finance_snapshot(profile)
+    view = {
+        "card_base": snap.balances["card"],
+        "cash_base": snap.balances["cash"],
+        "lent_base": snap.balances["lent"],
+        "debt_base": snap.balances["debt"],
+        "monthly_credit_payment": float(snap.settings.get("monthly_credit_payment") or 0),
+    }
+    live = fin.compute_balances(snap.entries)  # без base
+    return view, live
+
+
+def _settings_text(profile: Profile, view: dict[str, float]) -> str:
+    lang, cur = profile.lang, profile.currency
+    lines = [
+        "⚙️ <b>Moliya / Hisoblar</b>" if lang == "uz" else "⚙️ <b>Финансы / Счета</b>",
+        "",
+        ("Hozirgi qoldiqlar. Tuzatish uchun hisobni tanlang va yangi summani yozing." if lang == "uz" else "Текущие остатки. Чтобы поправить — выбери счёт и введи актуальную сумму."),
+        "",
+    ]
+    for field, key in _FIELDS.items():
+        lines.append(f"{_field_label(field, lang)}: <b>{fin.fmt_money(view[key])} {cur}</b>")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "finance:settings")
+async def cb_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    view, _ = await _settings_view(profile)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await remember_panel(callback, state)
+    await safe_edit(callback, _settings_text(profile, view), finance_settings_keyboard(view, profile.currency, profile.lang))
+
+
+@router.callback_query(F.data.startswith("finance:set:"))
+async def cb_setting_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    field = callback.data.split(":")[-1]
+    if field not in _FIELDS:
+        return
+    view, _ = await _settings_view(profile)
+    await state.set_state(BotStates.waiting_finance_settings_value)
+    await state.update_data(finance_setting_field=field)
+    await remember_panel(callback, state)
+    cur = profile.currency
+    await safe_edit(
+        callback,
+        profile.tr(
+            f"{_field_label(field, 'ru')}\nСейчас: <b>{fin.fmt_money(view[_FIELDS[field]])} {cur}</b>\n\nВведи актуальную сумму (число):",
+            f"{_field_label(field, 'uz')}\nHozir: <b>{fin.fmt_money(view[_FIELDS[field]])} {cur}</b>\n\nJoriy summani kiriting (raqam):",
+        ),
+        finance_setting_input_keyboard(profile.lang),
+    )
+
+
+@router.message(BotStates.waiting_finance_settings_value, F.text)
+async def msg_setting_value(message: Message, state: FSMContext) -> None:
+    profile = await get_profile(message.from_user)
+    await safe_delete(message)
+    parsed = fin.parse_amount((message.text or "").strip())
+    if parsed is None:
+        await show_panel(message, state, profile.tr("Нужно число, например <code>1500000</code> или <code>1.5 млн</code>", "Raqam kerak, masalan <code>1500000</code> yoki <code>1.5 mln</code>"), finance_setting_input_keyboard(profile.lang))
+        return
+    value = float(parsed[0])
+    field = str((await state.get_data()).get("finance_setting_field") or "")
+    if field not in _FIELDS:
+        await render_panel(message, state, profile)
+        return
+    settings = dict(await services.finance_settings(profile.telegram_id))
+    if field == "credit":
+        settings["monthly_credit_payment"] = value
+    else:
+        _, live = await _settings_view(profile)
+        # base = желаемый текущий остаток − сумма операций
+        settings[_FIELDS[field]] = value - live[field]
+    await services.save_finance_settings(profile.telegram_id, settings)
+    view, _ = await _settings_view(profile)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await show_panel(message, state, _settings_text(profile, view) + "\n\n✅", finance_settings_keyboard(view, profile.currency, profile.lang))
+
+
+@router.message(BotStates.waiting_finance_settings_value)
+@router.message(BotStates.waiting_finance_settings)
+async def msg_settings_other(message: Message, state: FSMContext) -> None:
+    profile = await get_profile(message.from_user)
+    text = (message.text or "").strip()
+    await safe_delete(message)
+    # В настройках тоже можно сразу писать операции — удобно.
+    if text and not text.startswith("/") and fin.looks_like_finance(text):
+        await handle_finance_text(message, state, profile, text, source="text")
+        return
+    view, _ = await _settings_view(profile)
+    await state.set_state(BotStates.waiting_finance_settings)
+    await show_panel(message, state, _settings_text(profile, view), finance_settings_keyboard(view, profile.currency, profile.lang))

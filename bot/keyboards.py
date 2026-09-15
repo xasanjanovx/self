@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
-
-import re
+from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from . import categories as cats
 from . import emoji as _pe
+from . import finance as fin
 
 Lang = str
 
@@ -17,10 +17,8 @@ def _btn(
     style: str | None = None,
     icon: str | None = None,
 ) -> InlineKeyboardButton:
-    """Build an inline button with optional Bot API 9.4 color style and a
-    premium-emoji icon. aiogram passes unknown fields through, so this works
-    without a library upgrade."""
-    kwargs: dict[str, object] = {"text": text}
+    """Кнопка с опциональным цветом (Bot API 9.4) и премиум-иконкой."""
+    kwargs: dict[str, object] = {"text": text[:64]}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
     if url is not None:
@@ -32,187 +30,150 @@ def _btn(
     return InlineKeyboardButton(**kwargs)
 
 
-_LEADING_SYMBOLS = re.compile(r"^[^\w(]+", re.UNICODE)
-
-
-def _label(text: str) -> str:
-    """Strip a leading unicode emoji so a button icon doesn't double up."""
-    cleaned = _LEADING_SYMBOLS.sub("", text).strip()
-    return cleaned or text
-
 TEXTS: dict[Lang, dict[str, str]] = {
     "ru": {
-        "menu_nutrition": "🍽️ Питание",
-        "menu_finance": "💰 Финансы",
-        "menu_habits": "✅ Привычки",
-        "menu_goals": "🎯 Цели",
-        "menu_trainer": "🏋️ Тренер",
-        "menu_report": "📊 Отчет",
-        "menu_vacancy": "📣 Вакансии",
-        "menu_ai": "🤖 AI",
-        "menu_language": "🌐 Язык",
-        "menu_refresh": "🔄 Обновить",
-        "menu_analytics": "📊 Аналитика",
-        "back": "⬅️ Назад",
-        "to_menu": "🏠 В меню",
-        "save": "✅ Сохранить",
-        "cancel": "✖️ Отменить",
-        "delete": "🗑️ Удалить",
+        "menu_nutrition": "Питание",
+        "menu_finance": "Финансы",
+        "menu_vacancy": "Вакансии",
+        "menu_analytics": "Аналитика",
+        "menu_language": "Язык",
+        "menu_refresh": "Обновить",
+        "back": "Назад",
+        "to_menu": "В меню",
+        "save": "Сохранить",
+        "cancel": "Отменить",
+        "delete": "Удалить",
         "yes_delete": "Да, удалить",
         "no": "Нет",
-        "add": "➕ Добавить",
-        "refresh": "🔄 Обновить",
-        "done_today": "Выполнено сегодня: {count}",
-        "meal_default": "Блюдо",
-        "kcal_none": "без ккал",
-        "finance_other": "прочее",
+        "calorie_goal": "Цель и профиль",
+        "calorie_meals": "Приёмы",
+        "finance_settings": "Счета",
+        "finance_ops": "Операции",
+        "finance_stats": "Статистика",
+        "finance_chart": "График",
+        "finance_category": "Категория",
+        "period_day": "День",
+        "period_week": "Неделя",
+        "period_month": "Месяц",
+        "period_prev_month": "Прошлый месяц",
+        "period_year": "Год",
+        "vacancy_again": "Ещё вакансия",
+        "vacancy_contact": "📩 Связаться",
+        "vacancy_publish": "Опубликовать в канал",
+        "vacancy_copy": "Чистая копия для канала",
+        "vacancy_prompt": "Промпт для картинки",
         "goal_loss": "Снижение",
         "goal_maintain": "Поддержание",
         "goal_gain": "Набор",
         "goal_muscle": "Масса",
         "goal_custom": "Ручной план",
-        "calorie_goal": "🎯 Цель и профиль",
-        "calorie_meals": "🍽️ Приемы",
-        "finance_settings": "⚙️ Настройки",
-        "finance_ops": "📂 Операции",
-        "finance_set_card": "💳 Карта",
-        "finance_set_cash": "💵 Наличные",
-        "finance_set_lent": "🤝 Дал в долг",
-        "finance_set_debt": "📌 Мои долги",
-        "finance_set_credit": "🏦 Кредит/мес",
-        "finance_set_back_settings": "⬅️ К настройкам",
-        "period_day": "📅 День",
-        "period_week": "🗓️ Неделя",
-        "period_month": "📆 Месяц",
-        "report_weekly": "🔔 Раз в неделю",
-        "report_monthly": "🗓️ Раз в месяц",
-        "report_off": "⛔ Выключить",
-        "report_view_week": "📅 Неделя",
-        "report_view_month": "🗓️ Месяц",
-        "report_view_all": "🧾 Всё",
-        "report_status_on": "Сейчас: включено",
-        "report_status_off": "Сейчас: выключено",
         "lang_ru": "Русский",
         "lang_uz": "O'zbekcha",
-        "trainer_fat": "🔥 Сжечь жир",
-        "trainer_muscle": "💪 Набор мышц",
-        "trainer_cardio": "🏃 Кардио",
-        "trainer_mobility": "🧘 Мобилити",
-        "trainer_ask": "✍️ Спросить тренера",
-        "vacancy_again": "📣 Еще вакансия",
-        "vacancy_contact": "📩 Связаться",
-        "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
-        "vacancy_mode_title": "Как оформить вакансию?",
-        "vacancy_mode_template": "Шаблон (как есть)",
-        "vacancy_mode_improve": "Грамматика + структура",
-        "vacancy_mode_enrich": "Расширить (AI)",
-        "delete_reminder": "Удалить • {time} {text}",
+        "report_weekly": "Раз в неделю",
+        "report_monthly": "Раз в месяц",
+        "report_off": "Выключить",
+        "status_on": "Авто-отчёт: включён",
+        "status_off": "Авто-отчёт: выключен",
     },
     "uz": {
-        "menu_nutrition": "🍽️ Oziqlanish",
-        "menu_finance": "💰 Moliya",
-        "menu_habits": "✅ Odatlar",
-        "menu_goals": "🎯 Maqsadlar",
-        "menu_trainer": "🏋️ Trener",
-        "menu_report": "📊 Hisobot",
-        "menu_vacancy": "📣 Vakansiya",
-        "menu_ai": "🤖 AI",
-        "menu_language": "🌐 Til",
-        "menu_refresh": "🔄 Yangilash",
-        "menu_analytics": "📊 Tahlil",
-        "back": "⬅️ Ortga",
-        "to_menu": "🏠 Menyu",
-        "save": "✅ Saqlash",
-        "cancel": "✖️ Bekor qilish",
-        "delete": "🗑️ O'chirish",
+        "menu_nutrition": "Oziqlanish",
+        "menu_finance": "Moliya",
+        "menu_vacancy": "Vakansiya",
+        "menu_analytics": "Tahlil",
+        "menu_language": "Til",
+        "menu_refresh": "Yangilash",
+        "back": "Ortga",
+        "to_menu": "Menyu",
+        "save": "Saqlash",
+        "cancel": "Bekor qilish",
+        "delete": "O'chirish",
         "yes_delete": "Ha, o'chirish",
         "no": "Yo'q",
-        "add": "➕ Qo'shish",
-        "refresh": "🔄 Yangilash",
-        "done_today": "Bugun bajarildi: {count}",
-        "meal_default": "Taom",
-        "kcal_none": "kkalsiz",
-        "finance_other": "boshqa",
+        "calorie_goal": "Maqsad va profil",
+        "calorie_meals": "Qabullar",
+        "finance_settings": "Hisoblar",
+        "finance_ops": "Operatsiyalar",
+        "finance_stats": "Statistika",
+        "finance_chart": "Grafik",
+        "finance_category": "Kategoriya",
+        "period_day": "Kun",
+        "period_week": "Hafta",
+        "period_month": "Oy",
+        "period_prev_month": "O'tgan oy",
+        "period_year": "Yil",
+        "vacancy_again": "Yana vakansiya",
+        "vacancy_contact": "📩 Bog'lanish",
+        "vacancy_publish": "Kanalga joylash",
+        "vacancy_copy": "Kanal uchun toza nusxa",
+        "vacancy_prompt": "Rasm uchun prompt",
         "goal_loss": "Kamayish",
         "goal_maintain": "Ushlab turish",
         "goal_gain": "Vazn yig'ish",
         "goal_muscle": "Mushak",
         "goal_custom": "Qo'lda reja",
-        "calorie_goal": "🎯 Maqsad va profil",
-        "calorie_meals": "🍽️ Qabullar",
-        "finance_settings": "⚙️ Sozlamalar",
-        "finance_ops": "📂 Operatsiyalar",
-        "finance_set_card": "💳 Karta",
-        "finance_set_cash": "💵 Naqd",
-        "finance_set_lent": "🤝 Qarzga berilgan",
-        "finance_set_debt": "📌 Mening qarzim",
-        "finance_set_credit": "🏦 Kredit/oy",
-        "finance_set_back_settings": "⬅️ Sozlamalarga",
-        "period_day": "📅 Kun",
-        "period_week": "🗓️ Hafta",
-        "period_month": "📆 Oy",
-        "report_weekly": "🔔 Haftada bir marta",
-        "report_monthly": "🗓️ Oyda bir marta",
-        "report_off": "⛔ O'chirish",
-        "report_view_week": "📅 Hafta",
-        "report_view_month": "🗓️ Oy",
-        "report_view_all": "🧾 Hammasi",
-        "report_status_on": "Hozir: yoqilgan",
-        "report_status_off": "Hozir: o'chirilgan",
         "lang_ru": "Русский",
         "lang_uz": "O'zbekcha",
-        "trainer_fat": "🔥 Yog' yoqish",
-        "trainer_muscle": "💪 Mushak yig'ish",
-        "trainer_cardio": "🏃 Kardio",
-        "trainer_mobility": "🧘 Mobiliti",
-        "trainer_ask": "✍️ Trenerga savol",
-        "vacancy_again": "📣 Yana vakansiya",
-        "vacancy_contact": "📩 Bog'lanish",
-        "vacancy_publish": "📢 @ishdasiz ga e'lon qilish",
-        "vacancy_mode_title": "Vakansiyani qanday rasmiylashtiramiz?",
-        "vacancy_mode_template": "Shablon (bor holicha)",
-        "vacancy_mode_improve": "Grammatika + struktura",
-        "vacancy_mode_enrich": "Kengaytirish (AI)",
-        "delete_reminder": "O'chirish • {time} {text}",
+        "report_weekly": "Haftada bir",
+        "report_monthly": "Oyda bir",
+        "report_off": "O'chirish",
+        "status_on": "Avto-hisobot: yoqilgan",
+        "status_off": "Avto-hisobot: o'chirilgan",
     },
 }
 
 
-def _t(lang: str, key: str, **kwargs: object) -> str:
+def t(lang: str, key: str) -> str:
     data = TEXTS.get(lang if lang in TEXTS else "ru", TEXTS["ru"])
-    template = data.get(key) or TEXTS["ru"].get(key) or key
-    return template.format(**kwargs)
+    return data.get(key) or TEXTS["ru"].get(key) or key
 
 
-def _money(value: float) -> str:
-    return f"{float(value):,.0f}".replace(",", " ")
+def _back(lang: str, target: str = "menu:open") -> InlineKeyboardButton:
+    return _btn(t(lang, "back"), target, icon=_pe.ID_BACK)
 
 
-# Quick-add button labels, refreshed by main.py right before a panel is rendered.
-# Stored as plain strings so the keyboard layer stays free of DB/business logic.
-_last_quick_calorie: list[str] = []
-_last_quick_finance: list[str] = []
+# ------------------------------------------------------------------ main
+def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    P = "primary"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(t(lang, "menu_nutrition"), "menu:calorie", style=P, icon=_pe.ID_NUTRITION),
+                _btn(t(lang, "menu_finance"), "menu:finance", style=P, icon=_pe.ID_FINANCE),
+            ],
+            [
+                _btn(t(lang, "menu_vacancy"), "menu:vacancy", style=P, icon=_pe.ID_VACANCY),
+                _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
+            ],
+            [
+                _btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE),
+                _btn(t(lang, "menu_refresh"), "menu:open", icon=_pe.ID_REFRESH),
+            ],
+        ]
+    )
 
 
-def set_last_quick_calorie(labels: list[str] | None) -> None:
-    global _last_quick_calorie
-    _last_quick_calorie = list(labels or [])
+def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn(t(lang, "to_menu"), "menu:open", style="primary", icon=_pe.ID_HOME)]])
 
 
-def set_last_quick_finance(labels: list[str] | None) -> None:
-    global _last_quick_finance
-    _last_quick_finance = list(labels or [])
+def language_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "lang_ru"), "lang:set:ru"), _btn(t(lang, "lang_uz"), "lang:set:uz")],
+            [_back(lang)],
+        ]
+    )
 
 
+# ------------------------------------------------------------------ quick rows
 def _quick_rows(prefix: str, labels: list[str]) -> list[list[InlineKeyboardButton]]:
-    """Build rows of quick-add buttons (2 per row), index-based callbacks."""
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for idx, label in enumerate(labels):
         text = str(label or "").strip()
         if not text:
             continue
-        row.append(_btn(text[:64], f"{prefix}:quick:{idx}"))
+        row.append(_btn(text, f"{prefix}:quick:{idx}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -221,47 +182,14 @@ def _quick_rows(prefix: str, labels: list[str]) -> list[list[InlineKeyboardButto
     return rows
 
 
-def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    P = "primary"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                _btn(_label(_t(lang, "menu_nutrition")), "menu:calorie", style=P, icon=_pe.ID_NUTRITION),
-                _btn(_label(_t(lang, "menu_finance")), "menu:finance", style=P, icon=_pe.ID_FINANCE),
-            ],
-            [
-                _btn(_label(_t(lang, "menu_habits")), "menu:habits", style=P, icon=_pe.ID_HABITS),
-                _btn(_label(_t(lang, "menu_goals")), "menu:goals", style=P, icon=_pe.ID_GOALS),
-            ],
-            [
-                _btn(_label(_t(lang, "menu_trainer")), "menu:trainer", style=P, icon=_pe.ID_TRAINER),
-                _btn(_label(_t(lang, "menu_report")), "menu:report", style=P, icon=_pe.ID_REPORT),
-            ],
-            [
-                _btn(_label(_t(lang, "menu_vacancy")), "menu:vacancy", style=P, icon=_pe.ID_VACANCY),
-                _btn(_label(_t(lang, "menu_language")), "menu:language", style=P, icon=_pe.ID_LANGUAGE),
-            ],
-            [
-                _btn(_label(_t(lang, "menu_analytics")), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
-                _btn(_label(_t(lang, "menu_refresh")), "menu:open", icon=_pe.ID_REFRESH),
-            ],
-        ]
-    )
-
-
+# ------------------------------------------------------------------ nutrition
 def nutrition_goal_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                _btn(_t(lang, "goal_loss"), "nutri:set:loss", style="primary"),
-                _btn(_t(lang, "goal_maintain"), "nutri:set:maintain", style="primary"),
-            ],
-            [
-                _btn(_t(lang, "goal_gain"), "nutri:set:gain", style="primary"),
-                _btn(_t(lang, "goal_muscle"), "nutri:set:muscle", style="primary"),
-            ],
-            [_btn(_t(lang, "goal_custom"), "nutri:set:custom", icon=_pe.ID_EDIT)],
-            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
+            [_btn(t(lang, "goal_loss"), "nutri:set:loss", style="primary"), _btn(t(lang, "goal_maintain"), "nutri:set:maintain", style="primary")],
+            [_btn(t(lang, "goal_gain"), "nutri:set:gain", style="primary"), _btn(t(lang, "goal_muscle"), "nutri:set:muscle", style="primary")],
+            [_btn(t(lang, "goal_custom"), "nutri:set:custom", icon=_pe.ID_EDIT)],
+            [_back(lang)],
         ]
     )
 
@@ -270,51 +198,51 @@ def calorie_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_label(_t(lang, "save")), "calorie:confirm", style="success", icon=_pe.ID_SAVE),
-                _btn(_label(_t(lang, "cancel")), "calorie:cancel", style="danger", icon=_pe.ID_CANCEL),
+                _btn(t(lang, "save"), "calorie:confirm", style="success", icon=_pe.ID_SAVE),
+                _btn(t(lang, "cancel"), "calorie:cancel", style="danger", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
+            [_back(lang, "calorie:panel")],
         ]
     )
 
 
-def calorie_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+def calorie_panel_keyboard(quick_labels: list[str], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.extend(_quick_rows("calorie", _last_quick_calorie))
-    rows.append([_btn(_label(_t(lang, "calorie_goal")), "calorie:goals", style="primary", icon=_pe.ID_GOAL)])
-    rows.append([_btn(_label(_t(lang, "calorie_meals")), "calorie:meals:day", style="primary", icon=_pe.ID_NUTRITION)])
-    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
+    rows.extend(_quick_rows("calorie", quick_labels))
+    rows.append(
+        [
+            _btn(t(lang, "calorie_meals"), "calorie:meals:day", style="primary", icon=_pe.ID_NUTRITION),
+            _btn(t(lang, "calorie_goal"), "calorie:goals", style="primary", icon=_pe.ID_GOAL),
+        ]
+    )
+    rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def calorie_meals_keyboard(entries: list[dict], period: str, lang: str = "ru") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(text=_t(lang, "period_day"), callback_data="calorie:meals:day"),
-            InlineKeyboardButton(text=_t(lang, "period_week"), callback_data="calorie:meals:week"),
-            InlineKeyboardButton(text=_t(lang, "period_month"), callback_data="calorie:meals:month"),
-        ]
-    ]
+    def _p(code: str, key: str) -> InlineKeyboardButton:
+        label = t(lang, key)
+        return _btn(f"✅ {label}" if code == period else label, f"calorie:meals:{code}")
 
+    rows: list[list[InlineKeyboardButton]] = [[_p("day", "period_day"), _p("week", "period_week"), _p("month", "period_month")]]
+    unit = "kkal" if lang == "uz" else "ккал"
     for entry in entries[:12]:
         entry_id = entry.get("id")
         if entry_id is None:
             continue
-        desc = str(entry.get("meal_desc") or _t(lang, "meal_default")).strip()
+        desc = str(entry.get("meal_desc") or ("Taom" if lang == "uz" else "Блюдо")).strip()
         kcal = entry.get("calories")
-        kcal_text = f"{int(float(kcal))} ккал" if kcal is not None else _t(lang, "kcal_none")
-        title = f"{desc[:28]} • {kcal_text}"[:64]
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"calorie:view:{entry_id}")])
-
-    rows.append([_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)])
+        kcal_text = f"{int(float(kcal))} {unit}" if kcal is not None else "—"
+        rows.append([_btn(f"{desc[:28]} • {kcal_text}", f"calorie:view:{entry_id}")])
+    rows.append([_back(lang, "calorie:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def calorie_detail_keyboard(log_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(_label(_t(lang, "delete")), f"calorie:ask_del:{log_id}", style="danger", icon=_pe.ID_DELETE)],
-            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
+            [_btn(t(lang, "delete"), f"calorie:ask_del:{log_id}", style="danger", icon=_pe.ID_DELETE)],
+            [_back(lang, "calorie:meals:day")],
         ]
     )
 
@@ -323,121 +251,129 @@ def calorie_delete_confirm_keyboard(log_id: str | int, lang: str = "ru") -> Inli
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_label(_t(lang, "yes_delete")), f"calorie:del:{log_id}", style="danger", icon=_pe.ID_DELETE),
-                _btn(_label(_t(lang, "no")), f"calorie:view:{log_id}", icon=_pe.ID_CANCEL),
+                _btn(t(lang, "yes_delete"), f"calorie:del:{log_id}", style="danger", icon=_pe.ID_DELETE),
+                _btn(t(lang, "no"), f"calorie:view:{log_id}", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_label(_t(lang, "back")), "calorie:panel", icon=_pe.ID_BACK)],
+            [_back(lang, "calorie:panel")],
         ]
     )
 
 
-def finance_panel_keyboard(entries: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+# ------------------------------------------------------------------ finance
+def finance_panel_keyboard(quick_labels: list[str], lang: str = "ru") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.extend(_quick_rows("finance", _last_quick_finance))
+    rows.extend(_quick_rows("finance", quick_labels))
     rows.append(
         [
-            _btn(_label(_t(lang, "finance_ops")), "finance:ops:day", style="primary", icon=_pe.ID_REPORT),
-            _btn(_label(_t(lang, "finance_settings")), "finance:settings", style="primary", icon=_pe.ID_SETTINGS),
+            _btn(t(lang, "finance_ops"), "finance:ops:day", style="primary", icon=_pe.ID_REPORT),
+            _btn(t(lang, "finance_stats"), "finance:stats:month", style="success", icon=_pe.ID_ANALYTICS),
         ]
     )
-    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
+    rows.append(
+        [
+            _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS),
+            _back(lang),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def finance_settings_keyboard(settings: dict[str, float], currency: str, lang: str = "ru") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text=f"{_t(lang, 'finance_set_card')} • {_money(float(settings.get('card_base') or 0))} {currency}"[:64],
-                callback_data="finance:set:card",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{_t(lang, 'finance_set_cash')} • {_money(float(settings.get('cash_base') or 0))} {currency}"[:64],
-                callback_data="finance:set:cash",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{_t(lang, 'finance_set_lent')} • {_money(float(settings.get('lent_base') or 0))} {currency}"[:64],
-                callback_data="finance:set:lent",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{_t(lang, 'finance_set_debt')} • {_money(float(settings.get('debt_base') or 0))} {currency}"[:64],
-                callback_data="finance:set:debt",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=(
-                    f"{_t(lang, 'finance_set_credit')} • "
-                    f"{_money(float(settings.get('monthly_credit_payment') or 0))} {currency}"
-                )[:64],
-                callback_data="finance:set:credit",
-            )
-        ],
-        [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
-    ]
+def finance_stats_keyboard(period: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    def _p(code: str, key: str) -> InlineKeyboardButton:
+        label = t(lang, key)
+        return _btn(f"✅ {label}" if code == period else label, f"finance:stats:{code}")
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_p("day", "period_day"), _p("week", "period_week"), _p("month", "period_month")],
+            [_p("prev_month", "period_prev_month"), _p("year", "period_year")],
+            [_btn(t(lang, "finance_chart"), f"finance:chart:{period}", style="primary", icon=_pe.ID_ANALYTICS)],
+            [_back(lang, "menu:finance")],
+        ]
+    )
+
+
+def finance_settings_keyboard(view: dict[str, float], currency: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    labels = {
+        "card": ("💳 Карта", "💳 Karta"),
+        "cash": ("💵 Наличные", "💵 Naqd"),
+        "lent": ("🤝 Дал в долг", "🤝 Qarzga berilgan"),
+        "debt": ("📌 Мои долги", "📌 Mening qarzim"),
+        "credit": ("🏦 Кредит/мес", "🏦 Kredit/oy"),
+    }
+    keys = {"card": "card_base", "cash": "cash_base", "lent": "lent_base", "debt": "debt_base", "credit": "monthly_credit_payment"}
+    rows = []
+    for field, (ru, uz) in labels.items():
+        value = float(view.get(keys[field]) or 0)
+        rows.append([_btn(f"{uz if lang == 'uz' else ru} • {fin.fmt_money(value)} {currency}", f"finance:set:{field}")])
+    rows.append([_back(lang, "menu:finance")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def finance_setting_input_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=_t(lang, "finance_set_back_settings"), callback_data="finance:settings")],
-            [InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")],
+            [_btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS)],
+            [_back(lang, "menu:finance")],
         ]
     )
 
 
 def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "ru") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(text=_t(lang, "period_day"), callback_data="finance:ops:day"),
-            InlineKeyboardButton(text=_t(lang, "period_week"), callback_data="finance:ops:week"),
-            InlineKeyboardButton(text=_t(lang, "period_month"), callback_data="finance:ops:month"),
-        ]
-    ]
+    def _p(code: str, key: str) -> InlineKeyboardButton:
+        label = t(lang, key)
+        return _btn(f"✅ {label}" if code == period else label, f"finance:ops:{code}")
 
+    rows: list[list[InlineKeyboardButton]] = [[_p("day", "period_day"), _p("week", "period_week"), _p("month", "period_month")]]
     for entry in entries[:12]:
         entry_id = entry.get("id")
         if entry_id is None:
             continue
         amount = float(entry.get("amount") or 0)
-        category = str(entry.get("category") or _t(lang, "finance_other")).strip()
-        note_raw = str(entry.get("note") or "").strip().lower()
-        transfer_match = re.match(r"^\[x:(card|cash|lent|debt)>(card|cash|lent|debt)\]\s*", note_raw)
-        if transfer_match:
-            title = f"↔ {amount:,.0f} {category}".replace(",", " ")
+        key = fin.entry_category_key(entry)
+        cat_label = cats.label(key, lang, with_emoji=True)
+        if fin.is_transfer(entry):
+            title = f"↔ {fin.fmt_money(amount)} {cats.label(key, lang, with_emoji=False)}"
         else:
             sign = "+" if str(entry.get("entry_type")) == "income" else "-"
-            title = f"{sign}{amount:,.0f} {category}".replace(",", " ")
-        rows.append([InlineKeyboardButton(text=title[:64], callback_data=f"finance:view:{entry_id}")])
-
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:finance")])
+            note = fin.clean_note(entry.get("note"))
+            title = f"{sign}{fin.fmt_money(amount)} {cat_label}" + (f" · {note}" if note else "")
+        rows.append([_btn(title, f"finance:view:{entry_id}")])
+    rows.append([_back(lang, "menu:finance")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def finance_detail_keyboard(entry_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_btn(_label(_t(lang, "delete")), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)],
-            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
-        ]
-    )
+def finance_detail_keyboard(entry_id: str | int, lang: str = "ru", *, transfer: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if not transfer:
+        rows.append([_btn(t(lang, "finance_category"), f"finance:cat:{entry_id}", style="primary", icon=_pe.ID_EDIT)])
+    rows.append([_btn(t(lang, "delete"), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)])
+    rows.append([_back(lang, "finance:ops:day")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_category_keyboard(entry_id: str | int, kind: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for cat in cats.categories_for(kind):
+        row.append(_btn(cat.title(lang), f"finance:setcat:{entry_id}:{cat.key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_back(lang, f"finance:view:{entry_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def finance_delete_confirm_keyboard(entry_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_label(_t(lang, "yes_delete")), f"finance:del:{entry_id}", style="danger", icon=_pe.ID_DELETE),
-                _btn(_label(_t(lang, "no")), f"finance:view:{entry_id}", icon=_pe.ID_CANCEL),
+                _btn(t(lang, "yes_delete"), f"finance:del:{entry_id}", style="danger", icon=_pe.ID_DELETE),
+                _btn(t(lang, "no"), f"finance:view:{entry_id}", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
+            [_back(lang, "menu:finance")],
         ]
     )
 
@@ -446,173 +382,72 @@ def finance_add_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn(_label(_t(lang, "save")), "finance:add_confirm", style="success", icon=_pe.ID_SAVE),
-                _btn(_label(_t(lang, "cancel")), "finance:add_cancel", style="danger", icon=_pe.ID_CANCEL),
+                _btn(t(lang, "save"), "finance:add_confirm", style="success", icon=_pe.ID_SAVE),
+                _btn(t(lang, "cancel"), "finance:add_cancel", style="danger", icon=_pe.ID_CANCEL),
             ],
-            [_btn(_label(_t(lang, "back")), "menu:finance", icon=_pe.ID_BACK)],
+            [_back(lang, "menu:finance")],
         ]
     )
 
 
-def habits_keyboard(habits: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-
-    pending = [habit for habit in habits if not habit.get("completed_today")]
-    done = [habit for habit in habits if habit.get("completed_today")]
-
-    for habit in pending[:8]:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=str(habit.get("name") or "").strip()[:48] or "Habit",
-                    callback_data=f"habit:done:{habit['id']}",
-                )
-            ]
-        )
-
-    if done:
-        rows.append([InlineKeyboardButton(text=_t(lang, "done_today", count=len(done)), callback_data="noop")])
-
-    rows.append(
-        [
-            _btn(_label(_t(lang, "add")), "habit:add", style="success", icon=_pe.ID_ADD),
-            _btn(_label(_t(lang, "refresh")), "menu:habits", icon=_pe.ID_REFRESH),
-        ]
-    )
-    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def reminders_keyboard(reminders: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-
-    for reminder in reminders[:8]:
-        rid = reminder.get("id")
-        rtime = str(reminder.get("reminder_time") or "")[:5]
-        text = str(reminder.get("reminder_text") or "").strip()
-        title = _t(lang, "delete_reminder", time=rtime, text=text)[:60]
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"rem:del:{rid}")])
-
-    rows.append(
-        [
-            InlineKeyboardButton(text=_t(lang, "add"), callback_data="rem:add"),
-            InlineKeyboardButton(text=_t(lang, "refresh"), callback_data="menu:reminders"),
-        ]
-    )
-    rows.append([InlineKeyboardButton(text=_t(lang, "back"), callback_data="menu:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def report_settings_keyboard(
-    lang: str = "ru",
-    *,
-    frequency: str = "weekly",
-    enabled: bool = True,
-    period: str = "week",
-) -> InlineKeyboardMarkup:
-    if enabled:
-        current_label = _t(lang, "report_weekly") if frequency == "weekly" else _t(lang, "report_monthly")
-        status = f"{_t(lang, 'report_status_on')} · {current_label}"
-    else:
-        status = _t(lang, "report_status_off")
-
-    period = period if period in {"week", "month", "all"} else "week"
-    week_text = _t(lang, "report_view_week")
-    month_text = _t(lang, "report_view_month")
-    all_text = _t(lang, "report_view_all")
-    if period == "week":
-        week_text = f"✅ {week_text}"
-    elif period == "month":
-        month_text = f"✅ {month_text}"
-    else:
-        all_text = f"✅ {all_text}"
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=week_text, callback_data="report:view:week"),
-                InlineKeyboardButton(text=month_text, callback_data="report:view:month"),
-                InlineKeyboardButton(text=all_text, callback_data="report:view:all"),
-            ],
-            [InlineKeyboardButton(text=status, callback_data="noop")],
-            [
-                _btn(_label(_t(lang, "report_weekly")), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
-                _btn(_label(_t(lang, "report_monthly")), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
-            ],
-            [_btn(_label(_t(lang, "report_off")), "report:set:off", style="danger", icon=_pe.ID_CANCEL)],
-            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
-        ]
-    )
-
-
-def language_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=_t(lang, "lang_ru"), callback_data="lang:set:ru"),
-                InlineKeyboardButton(text=_t(lang, "lang_uz"), callback_data="lang:set:uz"),
-            ],
-            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
-        ]
-    )
-
-
-def trainer_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                _btn(_label(_t(lang, "trainer_fat")), "trainer:plan:fat", style="primary", icon=_pe.ID_FIRE),
-                _btn(_label(_t(lang, "trainer_muscle")), "trainer:plan:muscle", style="primary", icon=_pe.ID_TRAINER),
-            ],
-            [_btn(_label(_t(lang, "trainer_ask")), "trainer:ask", icon=_pe.ID_EDIT)],
-            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
-        ]
-    )
-
-
+# ------------------------------------------------------------------ vacancy
 def vacancy_panel_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)]]
-    )
-
-
-def vacancy_mode_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_btn(_t(lang, "vacancy_mode_template"), "vacancy:mode:template", style="primary", icon=_pe.ID_REPORT)],
-            [_btn(_t(lang, "vacancy_mode_improve"), "vacancy:mode:improve", style="primary", icon=_pe.ID_EDIT)],
-            [_btn(_t(lang, "vacancy_mode_enrich"), "vacancy:mode:enrich", style="success", icon=_pe.ID_STAR)],
-            [_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)],
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[_back(lang)]])
 
 
 def vacancy_result_keyboard(
     lang: str = "ru",
     contact_url: str | None = None,
     *,
-    show_publish: bool = False,
+    can_publish: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if contact_url:
-        rows.append([_btn(_label(_t(lang, "vacancy_contact")), url=contact_url, style="primary")])
-    if show_publish:
-        rows.append([_btn(_label(_t(lang, "vacancy_publish")), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
-    rows.append([_btn(_label(_t(lang, "vacancy_again")), "vacancy:again", icon=_pe.ID_REFRESH)])
-    rows.append([_btn(_label(_t(lang, "back")), "menu:open", icon=_pe.ID_BACK)])
+        rows.append([_btn(t(lang, "vacancy_contact"), url=contact_url, style="primary")])
+    publish_key = "vacancy_publish" if can_publish else "vacancy_copy"
+    rows.append([_btn(t(lang, publish_key), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
+    rows.append(
+        [
+            _btn(t(lang, "vacancy_prompt"), "vacancy:prompt", icon=_pe.ID_STAR),
+            _btn(t(lang, "vacancy_again"), "vacancy:again", icon=_pe.ID_REFRESH),
+        ]
+    )
+    rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def vacancy_channel_keyboard(lang: str = "ru", contact_url: str | None = None) -> InlineKeyboardMarkup | None:
     if not contact_url:
         return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(lang, "vacancy_contact"), url=contact_url)]])
+
+
+# ------------------------------------------------------------------ analytics
+def dashboard_keyboard(active: str, lang: str = "ru", *, enabled: bool = True, frequency: str = "weekly") -> InlineKeyboardMarkup:
+    def _p(code: str, label: str) -> InlineKeyboardButton:
+        return _btn(f"✅ {label}" if code == active else label, f"dash:{code}")
+
+    labels = {"7d": ("7 дней", "7 kun"), "30d": ("30 дней", "30 kun"), "90d": ("90 дней", "90 kun")}
+    idx = 1 if lang == "uz" else 0
+    status = t(lang, "status_on") if enabled else t(lang, "status_off")
+    if enabled:
+        status += " · " + (t(lang, "report_weekly") if frequency == "weekly" else t(lang, "report_monthly"))
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=_t(lang, "vacancy_contact"), url=contact_url)]]
+        inline_keyboard=[
+            [_p("7d", labels["7d"][idx]), _p("30d", labels["30d"][idx]), _p("90d", labels["90d"][idx])],
+            [
+                _btn("🍱 " + ("Kaloriya" if lang == "uz" else "Калории"), f"dash:kcal:{active}"),
+                _btn("🏷 " + ("Toifalar" if lang == "uz" else "Категории"), f"dash:cats:{active}"),
+            ],
+            [_btn(status, "noop")],
+            [
+                _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
+                _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
+                _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
+            ],
+            [_back(lang)],
+        ]
     )
 
 
-def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_btn(_label(_t(lang, "to_menu")), "menu:open", style="primary", icon=_pe.ID_HOME)]]
-    )
+__all__ = [name for name in dir() if name.endswith("_keyboard") or name == "t"]

@@ -1,15 +1,17 @@
 """Single "live screen" message management.
 
 Keeps the chat clean by maintaining one main screen message that is edited in
-place during navigation, while transient messages (hints, AI answers, reminders,
-charts, vacancy posts) are auto-removed so they don't accumulate.
+place during navigation, while transient messages (hints, AI answers, charts,
+vacancy prompts) are auto-removed so they don't accumulate.
 
-State is kept in-memory per chat. The bot runs as a single Railway replica, so
-this is sufficient; after a restart old ids are simply forgotten (those messages
-just won't be auto-cleaned, which is harmless).
+State is kept in-memory per chat (single process). The screen message id is
+additionally persisted through optional load/save callbacks (sync or async) so
+the menu survives restarts without duplicates.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from collections import defaultdict
 from typing import Any
@@ -24,13 +26,11 @@ _screen: dict[int, int] = {}
 _ephemerals: dict[int, list[int]] = defaultdict(list)
 # chat_id -> last chart (photo) message id; we keep at most one alive
 _chart: dict[int, int] = {}
-# chat_id -> last reminder message id; keep at most one alive
-_reminder: dict[int, int] = {}
 
-# Optional persistence so the single screen survives restarts.
-# load(chat_id) -> int | None ; save(chat_id, message_id) -> None
+# load(chat_id) -> int | None ; save(chat_id, message_id) -> None  (sync or async)
 _load_screen = None
 _save_screen = None
+_loaded: set[int] = set()
 
 
 def configure_persistence(load=None, save=None) -> None:
@@ -39,12 +39,19 @@ def configure_persistence(load=None, save=None) -> None:
     _save_screen = save
 
 
-def _get_screen(chat_id: int) -> int | None:
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _get_screen(chat_id: int) -> int | None:
     if chat_id in _screen:
         return _screen[chat_id]
-    if _load_screen is not None:
+    if _load_screen is not None and chat_id not in _loaded:
+        _loaded.add(chat_id)
         try:
-            mid = _load_screen(chat_id)
+            mid = await _maybe_await(_load_screen(chat_id))
         except Exception:
             mid = None
         if mid:
@@ -56,9 +63,13 @@ def _get_screen(chat_id: int) -> int | None:
 def _set_screen(chat_id: int, message_id: int) -> None:
     prev = _screen.get(chat_id)
     _screen[chat_id] = message_id
+    _loaded.add(chat_id)
     if message_id != prev and _save_screen is not None:
         try:
-            _save_screen(chat_id, message_id)
+            result = _save_screen(chat_id, message_id)
+            if inspect.isawaitable(result):
+                # persist in background so the user is not kept waiting
+                asyncio.ensure_future(result)
         except Exception:
             pass
 
@@ -75,9 +86,7 @@ async def _safe_delete(bot: Bot, chat_id: int, message_id: int | None) -> None:
 def track_screen(chat_id: int, message_id: int | None) -> None:
     """Remember a message (e.g. one edited by a callback) as the live screen.
 
-    Also removes it from the ephemeral list so it is not deleted as transient
-    (e.g. when a callback button lives on a previously-ephemeral message).
-    """
+    Also removes it from the ephemeral list so it is not deleted as transient."""
     if not message_id:
         return
     _set_screen(chat_id, message_id)
@@ -87,8 +96,10 @@ def track_screen(chat_id: int, message_id: int | None) -> None:
 
 
 async def clear_ephemerals(bot: Bot, chat_id: int) -> None:
-    for message_id in _ephemerals.pop(chat_id, []):
-        await _safe_delete(bot, chat_id, message_id)
+    ids = _ephemerals.pop(chat_id, [])
+    if not ids:
+        return
+    await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
 
 
 async def show_screen(
@@ -104,21 +115,17 @@ async def show_screen(
 
     force_new=True always sends a fresh message (deleting the old one). Use it
     for explicit /start, /menu, /help so the menu always appears even after the
-    user cleared the chat history (a cleared message can still be edited
-    server-side, which would otherwise leave the user seeing nothing)."""
+    user cleared the chat history."""
     await clear_ephemerals(bot, chat_id)
 
-    old = _get_screen(chat_id)
+    old = await _get_screen(chat_id)
     if old and not force_new:
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=old, text=text, reply_markup=reply_markup
-            )
+            await bot.edit_message_text(chat_id=chat_id, message_id=old, text=text, reply_markup=reply_markup)
             return old
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 return old
-            # Not editable (deleted, or was a media message) -> replace it.
             await _safe_delete(bot, chat_id, old)
     elif old and force_new:
         await _safe_delete(bot, chat_id, old)
@@ -133,9 +140,12 @@ async def send_ephemeral(
     chat_id: int,
     text: str,
     reply_markup: Any | None = None,
+    *,
+    keep_previous: bool = False,
 ) -> int:
     """Send a transient message that will be removed on the next interaction."""
-    await clear_ephemerals(bot, chat_id)
+    if not keep_previous:
+        await clear_ephemerals(bot, chat_id)
     msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
     _ephemerals[chat_id].append(msg.message_id)
     return msg.message_id
@@ -156,12 +166,8 @@ async def send_chart(
     return msg.message_id
 
 
-async def send_reminder(bot: Bot, chat_id: int, text: str) -> int:
-    """Send a reminder, removing the previous reminder so they don't pile up."""
-    await _safe_delete(bot, chat_id, _reminder.pop(chat_id, None))
-    msg = await bot.send_message(chat_id, text)
-    _reminder[chat_id] = msg.message_id
-    return msg.message_id
+async def drop_chart(bot: Bot, chat_id: int) -> None:
+    await _safe_delete(bot, chat_id, _chart.pop(chat_id, None))
 
 
 async def drop_message(message: Any) -> None:

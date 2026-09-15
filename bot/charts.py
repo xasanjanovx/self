@@ -13,7 +13,6 @@ matplotlib.use("Agg")  # headless для серверного окружения
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import ListedColormap
 
 logger = logging.getLogger(__name__)
 
@@ -117,81 +116,14 @@ def finance_daily_chart(
     return _fig_to_bytes(fig)
 
 
-# ---- 2) Привычки: heatmap последних N дней ----
-def habits_heatmap(
-    habit_logs: Iterable[dict[str, Any]],
-    habits: Iterable[dict[str, Any]],
-    *,
-    end_date: date,
-    days: int = 30,
-    lang: str = "ru",
-) -> bytes | None:
-    """Матрица привычки × день. Зелёная клетка = выполнено."""
-    habits_list = [h for h in habits if h.get("active", True) is not False]
-    if not habits_list:
-        return None
-
-    habits_list.sort(key=lambda h: str(h.get("created_at") or ""))
-    habit_id_to_idx = {str(h["id"]): i for i, h in enumerate(habits_list)}
-    dates = [end_date - timedelta(days=days - 1 - i) for i in range(days)]
-    date_to_idx = {d.isoformat(): i for i, d in enumerate(dates)}
-
-    matrix = np.zeros((len(habits_list), days), dtype=int)
-    any_log = False
-    for log in habit_logs:
-        h_idx = habit_id_to_idx.get(str(log.get("habit_id")))
-        d_idx = date_to_idx.get(str(log.get("log_date")))
-        if h_idx is None or d_idx is None:
-            continue
-        if log.get("completed"):
-            matrix[h_idx, d_idx] = 1
-            any_log = True
-
-    if not any_log:
-        return None
-
-    fig, ax = plt.subplots(figsize=(max(7, days * 0.28), max(2, len(habits_list) * 0.42 + 1)), dpi=140)
-    cmap = ListedColormap([_COLOR_MISS, _COLOR_DONE])
-    ax.imshow(matrix, aspect="auto", cmap=cmap, vmin=0, vmax=1)
-
-    # Подписи строк (имена привычек, обрезка)
-    row_labels = []
-    for h in habits_list:
-        name = str(h.get("name") or "")
-        if len(name) > 22:
-            name = name[:20] + "…"
-        row_labels.append(name)
-    ax.set_yticks(range(len(habits_list)))
-    ax.set_yticklabels(row_labels, fontsize=9, color=_COLOR_TEXT)
-
-    step = max(1, days // 7)
-    ax.set_xticks(list(range(0, days, step)))
-    ax.set_xticklabels([dates[i].strftime("%d.%m") for i in range(0, days, step)], fontsize=8, color=_COLOR_TEXT)
-
-    # Сетка между клетками
-    ax.set_xticks(np.arange(-0.5, days, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, len(habits_list), 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=2)
-    ax.tick_params(which="minor", length=0)
-    ax.tick_params(which="major", length=0)
-    for s in ax.spines.values():
-        s.set_visible(False)
-
-    title = "Привычки: последние 30 дней" if lang != "uz" else "Odatlar: soʻnggi 30 kun"
-    ax.set_title(title, fontsize=11, pad=8, color=_COLOR_TEXT)
-
-    fig.tight_layout()
-    return _fig_to_bytes(fig)
-
-
-# ---- 3) Калории: тренд по дням ----
+# ---- 2) Калории по дням ----
 def calorie_trend_chart(
     calorie_logs: Iterable[dict[str, Any]],
     *,
     end_date: date,
     days: int = 14,
     target: int | None = None,
-    tz_offset_hours: float = 5.0,  # Asia/Tashkent default
+    tz: Any = None,
     lang: str = "ru",
 ) -> bytes | None:
     """Линейный график калорий по дням (по локальной дате юзера)."""
@@ -206,7 +138,7 @@ def calorie_trend_chart(
             continue
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        local = dt + timedelta(hours=tz_offset_hours)
+        local = dt.astimezone(tz) if tz is not None else dt
         key = local.date().isoformat()
         kcal = log.get("calories")
         if kcal is None:
@@ -232,76 +164,22 @@ def calorie_trend_chart(
     return _fig_to_bytes(fig)
 
 
-# ---- 4) Mood / Energy ----
-def mood_energy_chart(
-    checkins: Iterable[dict[str, Any]],
-    *,
-    end_date: date,
-    days: int = 14,
-    lang: str = "ru",
-) -> bytes | None:
-    by_day: dict[str, tuple[float | None, float | None]] = {}
-    for c in checkins:
-        d = c.get("checkin_date")
-        if not d:
-            continue
-        m = c.get("mood")
-        e = c.get("energy")
-        by_day[str(d)] = (
-            float(m) if m is not None else None,
-            float(e) if e is not None else None,
-        )
-
-    dates = [end_date - timedelta(days=days - 1 - i) for i in range(days)]
-    mood_vals = [by_day.get(d.isoformat(), (None, None))[0] for d in dates]
-    energy_vals = [by_day.get(d.isoformat(), (None, None))[1] for d in dates]
-
-    if not any(v is not None for v in mood_vals + energy_vals):
-        return None
-
-    fig, ax = _setup_fig(figsize=(max(7, days * 0.38), 3.0))
-    mood_label = "Настроение" if lang != "uz" else "Kayfiyat"
-    energy_label = "Энергия" if lang != "uz" else "Energiya"
-    # matplotlib умеет показывать None как разрывы, если использовать masked array
-    mood_masked = np.array([v if v is not None else np.nan for v in mood_vals], dtype=float)
-    energy_masked = np.array([v if v is not None else np.nan for v in energy_vals], dtype=float)
-    ax.plot(dates, mood_masked, marker="o", linewidth=2.0, color="#9b59b6", markersize=4, label=mood_label, zorder=3)
-    ax.plot(dates, energy_masked, marker="s", linewidth=2.0, color="#f39c12", markersize=4, label=energy_label, zorder=3)
-    ax.set_ylim(0, 10.5)
-    ax.set_yticks(range(0, 11, 2))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, days // 7)))
-    ax.set_title(("Самочувствие" if lang != "uz" else "Kayfiyat va energiya"), fontsize=11, pad=10)
-    ax.legend(loc="lower right", frameon=False, fontsize=9)
-    fig.tight_layout()
-    return _fig_to_bytes(fig)
-
-
-# ---- 5) Категории расходов: горизонтальный bar ----
+# ---- 3) Расходы по категориям ----
 def expense_categories_chart(
-    finance_entries: Iterable[dict[str, Any]],
+    items: list[tuple[str, float]],
     *,
-    top_n: int = 7,
+    top_n: int = 10,
     currency: str = "UZS",
     lang: str = "ru",
+    title: str | None = None,
 ) -> bytes | None:
-    totals: dict[str, Decimal] = {}
-    for entry in finance_entries:
-        if entry.get("entry_type") != "expense":
-            continue
-        note = str(entry.get("note") or "").strip().lower()
-        if note.startswith("[x:"):
-            continue
-        category = str(entry.get("category") or "—").strip() or "—"
-        amount = Decimal(str(entry.get("amount") or 0))
-        totals[category] = totals.get(category, Decimal("0")) + amount
-
-    if not totals:
+    """Горизонтальный bar chart: [(название категории, сумма)] — уже агрегировано."""
+    items = [(str(n), float(v)) for n, v in items if float(v) > 0][:top_n]
+    if not items:
         return None
-
-    items = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:top_n]
     names = [n for n, _ in items]
-    values = [float(v) for _, v in items]
+    values = [v for _, v in items]
+    total = sum(values) or 1.0
 
     fig, ax = plt.subplots(figsize=(7, max(2.4, 0.5 * len(items) + 1)), dpi=140)
     bars = ax.barh(range(len(items)), values, color=_COLOR_EXPENSE, alpha=0.85, zorder=2)
@@ -315,18 +193,13 @@ def expense_categories_chart(
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{int(v):,}".replace(",", " ")))
     for bar, val in zip(bars, values):
         ax.text(val, bar.get_y() + bar.get_height() / 2,
-                f"  {int(val):,}".replace(",", " "),
+                f"  {int(val):,} ({val / total * 100:.0f}%)".replace(",", " "),
                 va="center", ha="left", fontsize=8, color=_COLOR_TEXT)
-    title = ("Топ расходов по категориям" if lang != "uz" else "Asosiy xarajat toifalari")
+    ax.set_xlim(0, max(values) * 1.35)
+    title = title or ("Расходы по категориям" if lang != "uz" else "Xarajatlar toifalar bo'yicha")
     ax.set_title(f"{title} ({currency})", fontsize=11, pad=10, color=_COLOR_TEXT)
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
 
-__all__ = [
-    "finance_daily_chart",
-    "habits_heatmap",
-    "calorie_trend_chart",
-    "mood_energy_chart",
-    "expense_categories_chart",
-]
+__all__ = ["finance_daily_chart", "calorie_trend_chart", "expense_categories_chart"]

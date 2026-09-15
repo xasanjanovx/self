@@ -1,35 +1,42 @@
-﻿from __future__ import annotations
+"""Gemini: асинхронный клиент + все AI-задачи бота.
 
+Принципы:
+- `httpx.AsyncClient` — ни один вызов не блокирует event loop;
+- JSON-режим ответа (`responseMimeType`) — модель не «болтает» вокруг JSON;
+- `thinkingBudget=0` для простых задач разбора — ответ за ~1 с вместо 5–10;
+- короткий retry (3 попытки, ≤ ~6 с суммарно) — ошибка видна быстро.
+"""
+from __future__ import annotations
+
+import asyncio
 import base64
 import json
 import logging
 import random
 import re
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from . import categories as cats
 from .config import Settings
 
 logger = logging.getLogger(__name__)
 
-
-# ---- Retry config for Gemini API ----
-_GEMINI_RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-_GEMINI_MAX_ATTEMPTS = 4
-_GEMINI_BASE_DELAY = 1.0   # секунды для экспоненциального backoff
-_GEMINI_MAX_DELAY = 16.0
+_RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_BASE_DELAY = 0.8
+_MAX_DELAY = 4.0
 
 
-def _gemini_backoff_delay(attempt: int) -> float:
-    """Экспоненциальный backoff с лёгким jitter, чтобы не синхронизировать retry."""
-    delay = min(_GEMINI_BASE_DELAY * (2 ** (attempt - 1)), _GEMINI_MAX_DELAY)
+def _backoff(attempt: int) -> float:
+    delay = min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
     return delay + random.uniform(0, delay * 0.25)
 
 
+# ----------------------------------------------------------------- dataclasses
 @dataclass
 class CalorieEstimate:
     meal_desc: str
@@ -38,126 +45,88 @@ class CalorieEstimate:
     fat: float | None
     carbs: float | None
     confidence: float | None
-    advice: str | None
-
-
-@dataclass
-class VacancyTemplateData:
-    titles: list[str]
-    region_tag: str
-    address: str
-    salary: str
-    schedule: str
-    requirements: list[str]
-    benefits: list[str]
-    duties: list[str]
-    details: list[str]
-    phone: str | None
-    telegram: str | None
-    headline: str | None = None
-    company: str | None = None
+    advice: str | None = None
 
 
 @dataclass
 class InboxIntent:
-    module: str
-    mode: str
+    module: str  # finance | calorie | vacancy | question | menu | unknown
+    mode: str  # process | open | answer | unknown
     confidence: float
     cleaned_text: str | None = None
 
 
-_VACANCY_REGION_MAP = {
-    "tashkent": "#TOSHKENT",
-    "toshkent": "#TOSHKENT",
-    "ташкент": "#TOSHKENT",
-    "ташкенте": "#TOSHKENT",
-    "andijon": "#ANDIJON",
-    "андижан": "#ANDIJON",
-    "andijan": "#ANDIJON",
-    "samarqand": "#SAMARQAND",
-    "самарканд": "#SAMARQAND",
-    "buxoro": "#BUXORO",
-    "бухара": "#BUXORO",
-    "fergana": "#FARGONA",
-    "fargona": "#FARGONA",
-    "фаргана": "#FARGONA",
-    "namangan": "#NAMANGAN",
-    "наманган": "#NAMANGAN",
-    "jizzax": "#JIZZAX",
-    "джизак": "#JIZZAX",
-    "sirdayo": "#SIRDARYO",
-    "sirdaryo": "#SIRDARYO",
-    "сырдар": "#SIRDARYO",
-    "qashqadaryo": "#QASHQADARYO",
-    "кашкадар": "#QASHQADARYO",
-    "surxondaryo": "#SURXONDARYO",
-    "сурхандар": "#SURXONDARYO",
-    "xorazm": "#XORAZM",
-    "хорезм": "#XORAZM",
-    "navoiy": "#NAVOIY",
-    "навои": "#NAVOIY",
-    "nukus": "#NUKUS",
-    "қорақалпоқ": "#QORAQALPOQISTON",
-    "каракалпак": "#QORAQALPOQISTON",
-}
-
-_VACANCY_PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
-_VACANCY_TELEGRAM_RE = re.compile(r"(https?://t\.me/[A-Za-z0-9_]{3,}|@[A-Za-z0-9_]{3,})", re.IGNORECASE)
-_VACANCY_AD_TOKENS = (
-    "ishdasiz",
-    "join",
-    "join our",
-    "подпис",
-    "subscribe",
-    "follow our channel",
-    "our channel",
-    "telegram channel",
-    "obuna",
-    "kanal",
-    "канал",
-    "adminni ogohlantiring",
-    "ma'muriyati javobgar emas",
-)
+@dataclass
+class VacancySection:
+    title: str
+    items: list[str] = field(default_factory=list)
 
 
-def _normalize_text_value(value: Any, default: str = "-", max_len: int = 220) -> str:
+@dataclass
+class VacancyData:
+    headline: str
+    intro: str | None
+    company: str | None
+    region_tag: str
+    address: str | None
+    salary: str | None
+    schedule: str | None
+    requirements: list[str] = field(default_factory=list)
+    benefits: list[str] = field(default_factory=list)
+    duties: list[str] = field(default_factory=list)
+    extra_sections: list[VacancySection] = field(default_factory=list)
+    phone: str | None = None
+    telegram: str | None = None
+    image_prompt: str | None = None
+
+
+# ---------------------------------------------------------------- json utils
+def extract_json(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        return json.loads(cleaned)
+    for opener, closer in (("{", "}"), ("[", "]")):
+        first = cleaned.find(opener)
+        last = cleaned.rfind(closer)
+        if first != -1 and last > first:
+            return json.loads(cleaned[first : last + 1])
+    raise ValueError("JSON not found in model response")
+
+
+def _num(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_text(value: Any, *, max_len: int = 300) -> str | None:
     if value is None:
-        return default
-    text = re.sub(r"\s+", " ", str(value).strip())
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip(" -–—")
+    if not text or text == "-" or text.lower() in {"null", "none", "yo'q", "нет"}:
+        return None
     if len(text) > max_len:
         text = text[: max_len - 1].rstrip() + "…"
-    return text or default
-
-
-def _normalize_optional_text(value: Any, *, max_len: int = 220) -> str | None:
-    text = _normalize_text_value(value, default="", max_len=max_len).strip()
-    if not text or text == "-":
-        return None
     return text
 
 
-def _normalize_list_value(value: Any, *, max_items: int = 6, max_len: int = 180) -> list[str]:
+def _clean_list(value: Any, *, max_items: int = 30, max_len: int = 240) -> list[str]:
     if value is None:
         return []
-
-    if isinstance(value, str):
-        chunks = re.split(r"[\n;]+", value)
-    elif isinstance(value, list):
-        chunks = value
-    else:
-        chunks = [value]
-
+    chunks = re.split(r"[\n;]+", value) if isinstance(value, str) else (value if isinstance(value, list) else [value])
     result: list[str] = []
     seen: set[str] = set()
-
     for chunk in chunks:
-        text = str(chunk or "").strip()
-        text = re.sub(r"^[\-*•\u2022]+\s*", "", text)
-        text = re.sub(r"\s+", " ", text).strip(" -")
-        if not text or text == "-":
+        text = re.sub(r"^[\-*•·▪️✅❗️⚠️📌👉➡️]+\s*", "", str(chunk or "").strip())
+        text = _clean_text(text, max_len=max_len)
+        if not text:
             continue
-        if len(text) > max_len:
-            text = text[: max_len - 1].rstrip() + "…"
         key = text.casefold()
         if key in seen:
             continue
@@ -165,629 +134,7 @@ def _normalize_list_value(value: Any, *, max_items: int = 6, max_len: int = 180)
         result.append(text)
         if len(result) >= max_items:
             break
-
     return result
-
-
-def _normalize_telegram_value(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text or text == "-":
-        return None
-
-    match = re.search(r"t\.me/([A-Za-z0-9_]{3,})", text, flags=re.IGNORECASE)
-    if match:
-        return f"@{match.group(1)}"
-
-    match = re.search(r"@([A-Za-z0-9_]{3,})", text)
-    if match:
-        return f"@{match.group(1)}"
-
-    return None
-
-
-def _extract_phone_from_text(text: str) -> str | None:
-    for match in _VACANCY_PHONE_RE.finditer(text or ""):
-        raw = re.sub(r"\s+", " ", match.group(0)).strip()
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) < 9:
-            continue
-        if len(digits) <= 10 and not raw.startswith("+") and not digits.startswith("998"):
-            continue
-        return raw
-    return None
-
-
-def _extract_all_phones_from_text(text: str) -> list[str]:
-    """Extract every valid phone number, de-duplicated by digits, order preserved."""
-    found: list[str] = []
-    seen: set[str] = set()
-    for match in _VACANCY_PHONE_RE.finditer(text or ""):
-        raw = re.sub(r"\s+", " ", match.group(0)).strip()
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) < 9:
-            continue
-        # Узбекские номера: 9 цифр (после кода) или 12 (с 998). Длиннее — это суммы/диапазоны.
-        if len(digits) > 12:
-            continue
-        if len(digits) <= 10 and not raw.startswith("+") and not digits.startswith("998"):
-            continue
-        # Compare by the last 9 digits so "+998 90..." and "90..." are one number.
-        key = digits[-9:]
-        if key in seen:
-            continue
-        seen.add(key)
-        found.append(raw)
-    return found
-
-
-_CONTACT_HINTS = (
-    "tel",
-    "phone",
-    "telefon",
-    "aloqa",
-    "bog'lan",
-    "bog‘lan",
-    "контакт",
-    "телефон",
-    "whatsapp",
-    "📞",
-    "☎",
-    "📱",
-)
-
-
-def _extract_contact_phones(text: str) -> list[str]:
-    """Collect phone numbers only from contact-like lines to avoid salary/year noise."""
-    lines: list[str] = []
-    for line in (text or "").splitlines():
-        low = line.lower()
-        if "+998" in line or any(hint in low for hint in _CONTACT_HINTS):
-            lines.append(line)
-    return _extract_all_phones_from_text("\n".join(lines))
-
-
-def _normalize_phone_value(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text or text == "-":
-        return None
-    phones = _extract_all_phones_from_text(text)
-    if not phones:
-        return None
-    return " | ".join(phones)
-
-
-def _normalize_region_tag(value: Any, raw_text: str, default_region_tag: str) -> str:
-    text = str(value or "").strip()
-    if text and text != "-":
-        if not text.startswith("#"):
-            text = f"#{text}"
-        return text.upper().replace(" ", "_")
-
-    lower = raw_text.lower()
-    for token, tag in _VACANCY_REGION_MAP.items():
-        if token in lower:
-            return tag
-
-    hashtag_match = re.search(r"#([A-Za-zА-Яа-яЁё_]+)", raw_text)
-    if hashtag_match:
-        return f"#{hashtag_match.group(1).upper()}"
-
-    return default_region_tag
-
-
-def _is_vacancy_ad_line(line: str) -> bool:
-    lower = line.lower()
-    return any(token in lower for token in _VACANCY_AD_TOKENS)
-
-
-_SLOGAN_TOKENS = (
-    "karyera",
-    "karera",
-    "biz bilan",
-    "boshlang",
-    "boshlaymiz",
-    "qo'shil",
-    "qoshil",
-    "orzu",
-    "kelajagi",
-    "kelajak",
-    "muvaffaqiyat",
-    "jamoamizga qo",
-    "начни карьеру",
-    "карьер",
-    "присоедин",
-    "мечт",
-    "будущ",
-    "успех",
-    "join our team",
-    "your career",
-    "dream",
-)
-
-_JOB_INDICATOR_TOKENS = (
-    "vakans",
-    "вакан",
-    "kerak",
-    "kere",
-    "требует",
-    "ishga",
-    "lavozim",
-    "bo'sh ish",
-    "bo‘sh ish",
-    "xodim",
-    "ish o'rni",
-    "ish o‘rni",
-    "taklif",
-    "qabul qil",
-    "приглаша",
-    "ищем",
-    "talab",
-    "hiring",
-    "job",
-    "position",
-    "operator",
-    "оператор",
-    "sotuvchi",
-    "продавец",
-    "menejer",
-    "manager",
-    "менеджер",
-    "mutaxassis",
-    "специалист",
-    "usta",
-    "haydovchi",
-    "oshpaz",
-    "kassir",
-    "ofitsiant",
-)
-
-
-def _is_generic_slogan(text: str | None) -> bool:
-    """A headline is a useless slogan if it sells the dream/channel but names no job."""
-    low = (text or "").strip().lower()
-    if not low:
-        return True
-    if any(token in low for token in _SLOGAN_TOKENS):
-        return True
-    if not any(token in low for token in _JOB_INDICATOR_TOKENS):
-        return True
-    return False
-
-
-def _pick_headline(ai_headline: str | None, fallback_headline: str | None) -> str | None:
-    """Prefer a headline that names the position over a generic motivational slogan."""
-    if ai_headline and not _is_generic_slogan(ai_headline):
-        return ai_headline
-    if fallback_headline and not _is_generic_slogan(fallback_headline):
-        return fallback_headline
-    return ai_headline or fallback_headline
-
-
-def _extract_vacancy_details_fallback(raw_text: str) -> list[str]:
-    known_prefixes = (
-        "hudud",
-        "manzil",
-        "адрес",
-        "location",
-        "maosh",
-        "зарплат",
-        "oklad",
-        "salary",
-        "ish vaqti",
-        "график",
-        "schedule",
-        "talablar",
-        "треб",
-        "requirements",
-        "qulayliklar",
-        "услов",
-        "benefit",
-        "vazifalar",
-        "обязан",
-        "duties",
-        "aloqa",
-        "контакт",
-        "telegram",
-        "телеграм",
-        "kompaniya",
-        "компания",
-        "ish beruvchi",
-        "работодатель",
-        "bo'sh ish o'rinlari",
-        "bo‘sh ish o'rinlari",
-        "kerak",
-        "vacancy",
-        "vakansiya",
-    )
-
-    details: list[str] = []
-    seen: set[str] = set()
-
-    for raw_line in raw_text.splitlines():
-        line = re.sub(r"^[\-*•\u2022]+\s*", "", raw_line).strip()
-        line = re.sub(r"\s+", " ", line)
-        if not line or line == "-":
-            continue
-        if _is_vacancy_ad_line(line):
-            continue
-        if line.startswith("#"):
-            continue
-
-        lower = line.lower()
-        if lower in {"...", "—", "-", "━━━━━━━━━━━━━━━"}:
-            continue
-        if any(lower.startswith(prefix) for prefix in known_prefixes):
-            continue
-        if ":" in lower:
-            key = lower.split(":", 1)[0].strip()
-            if any(key.startswith(prefix) for prefix in known_prefixes):
-                continue
-
-        if len(line) < 3:
-            continue
-
-        normalized = line.casefold()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        details.append(line)
-        if len(details) >= 12:
-            break
-
-    return _normalize_list_value(details, max_items=12, max_len=180)
-
-
-def _strip_ad_lines(items: list[str]) -> list[str]:
-    return [item for item in items if not _is_vacancy_ad_line(item)]
-
-
-def _vacancy_section_lines(raw_text: str, keywords: tuple[str, ...]) -> list[str]:
-    lines = [line.strip() for line in raw_text.splitlines()]
-    result: list[str] = []
-    collecting = False
-
-    for line in lines:
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
-        lower = clean.lower()
-
-        if any(keyword in lower for keyword in keywords):
-            collecting = True
-            tail = clean.split(":", 1)[1].strip() if ":" in clean else ""
-            if tail and tail != "-":
-                result.append(tail)
-            continue
-
-        if collecting:
-            if not clean:
-                break
-            if ":" in clean and any(
-                marker in lower
-                for marker in (
-                    "talab",
-                    "треб",
-                    "qulay",
-                    "услов",
-                    "vazifa",
-                    "обязан",
-                    "aloqa",
-                    "контакт",
-                    "telegram",
-                    "телеграм",
-                    "hudud",
-                    "адрес",
-                    "manzil",
-                    "ish vaqti",
-                    "график",
-                    "maosh",
-                    "зарплат",
-                )
-            ):
-                break
-            result.append(clean)
-
-    return _normalize_list_value(result, max_items=30, max_len=220)
-
-
-def _vacancy_fallback_titles(raw_text: str) -> list[str]:
-    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
-    openings = _vacancy_openings_block(raw_text)
-    if openings:
-        return _normalize_list_value(openings, max_items=20)
-
-    prioritized: list[str] = []
-
-    for line in lines:
-        if not line:
-            continue
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
-        lower = clean.lower()
-        if any(token in lower for token in ("вакан", "vakans", "требует", "kerak", "bo'sh ish", "bo‘sh ish")):
-            tail = clean.split(":", 1)[1].strip() if ":" in clean else clean
-            tail = re.sub(r"^(вакансия|vakansiya|требуется|kerak)\s*", "", tail, flags=re.IGNORECASE).strip(" -")
-            if tail:
-                prioritized.append(tail)
-
-    if prioritized:
-        return _normalize_list_value(prioritized, max_items=20)
-
-    fallback: list[str] = []
-    for line in lines:
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip()
-        lower = clean.lower()
-        if not clean or clean.startswith("#"):
-            continue
-        if any(
-            token in lower
-            for token in (
-                "aloqa",
-                "контакт",
-                "telegram",
-                "телеграм",
-                "hudud",
-                "manzil",
-                "адрес",
-                "talab",
-                "треб",
-                "qulay",
-                "услов",
-                "vazifa",
-                "обязан",
-                "maosh",
-                "зарплат",
-                "grafik",
-                "график",
-                "ish vaqti",
-                "📞",
-                "💰",
-            )
-        ):
-            continue
-        if len(clean) < 3:
-            continue
-        fallback.append(clean)
-        if len(fallback) >= 20:
-            break
-    return _normalize_list_value(fallback, max_items=20)
-
-
-def _vacancy_openings_block(raw_text: str) -> list[str]:
-    lines = [line.strip() for line in raw_text.splitlines()]
-    result: list[str] = []
-    collecting = False
-
-    for line in lines:
-        clean = re.sub(r"^[\-*•\u2022✅]+\s*", "", line).strip()
-        lower = clean.lower()
-        if not clean:
-            if collecting and result:
-                break
-            continue
-
-        if any(token in lower for token in ("bo'sh ish o'rinlari", "bo‘sh ish o'rinlari", "вакансии", "bo'sh ish")):
-            collecting = True
-            tail = clean.split(":", 1)[1].strip() if ":" in clean else ""
-            if tail and tail != "-":
-                result.append(tail)
-            continue
-
-        if not collecting:
-            continue
-
-        if ":" in clean and any(
-            marker in lower
-            for marker in (
-                "hudud",
-                "manzil",
-                "maosh",
-                "ish vaqti",
-                "talab",
-                "qulay",
-                "vazifa",
-                "aloqa",
-                "telegram",
-                "kompaniya",
-                "ish beruvchi",
-                "адрес",
-                "зарплат",
-                "график",
-                "компания",
-                "работодатель",
-                "контакт",
-            )
-        ):
-            break
-
-        result.append(clean)
-        if len(result) >= 20:
-            break
-
-    return _normalize_list_value(result, max_items=20, max_len=90)
-
-
-def _extract_company_fallback(raw_text: str) -> str | None:
-    for raw_line in raw_text.splitlines():
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", raw_line).strip()
-        clean = re.sub(r"\s+", " ", clean)
-        if not clean or _is_vacancy_ad_line(clean):
-            continue
-        lower = clean.lower()
-
-        if ":" in clean:
-            key, value = clean.split(":", 1)
-            key_lower = key.strip().lower()
-            value = value.strip()
-            if value and any(token in key_lower for token in ("kompaniya", "компания", "ish beruvchi", "работодатель", "firma", "фирма")):
-                return _normalize_text_value(value, default="-", max_len=120)
-
-        if re.search(r"\b(ooo|ооо|mchj|llc|inc|aj|jsc)\b", lower):
-            return _normalize_text_value(clean, default="-", max_len=120)
-    return None
-
-
-def _extract_headline_fallback(
-    raw_text: str,
-    titles: list[str],
-    region_tag: str,
-    company: str | None,
-) -> str | None:
-    section_tokens = (
-        "hudud",
-        "manzil",
-        "maosh",
-        "ish vaqti",
-        "talab",
-        "qulaylik",
-        "vazifa",
-        "aloqa",
-        "telegram",
-        "адрес",
-        "зарплат",
-        "график",
-        "контакт",
-    )
-    headline_tokens = (
-        "vakans",
-        "вакан",
-        "kerak",
-        "требуется",
-        "ishga",
-        "ishga ol",
-        "bo'sh ish",
-        "bo‘sh ish",
-        "lavozim",
-    )
-
-    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
-
-    for line in lines:
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip(" -")
-        lower = clean.lower()
-        if not clean or _is_vacancy_ad_line(clean):
-            continue
-        if len(clean) < 4:
-            continue
-        if "bo'sh ish o'rinlari" in lower or "bo‘sh ish o'rinlari" in lower:
-            continue
-        if any(token in lower for token in headline_tokens):
-            return _normalize_text_value(clean, default="-", max_len=140)
-
-    for line in lines:
-        clean = re.sub(r"^[\-*•\u2022]+\s*", "", line).strip(" -")
-        lower = clean.lower()
-        if not clean or _is_vacancy_ad_line(clean):
-            continue
-        if len(clean) < 4:
-            continue
-        if any(token in lower for token in section_tokens):
-            continue
-        if "bo'sh ish o'rinlari" in lower or "bo‘sh ish o'rinlari" in lower:
-            continue
-        if clean.startswith("#"):
-            continue
-        return _normalize_text_value(clean, default="-", max_len=140)
-
-    first_title = titles[0] if titles else "Xodim"
-    region = str(region_tag or "").strip().upper().lstrip("#")
-    if region and company:
-        return f"{region}ga {first_title} ({company})"
-    if region:
-        return f"{region}ga {first_title} kerak"
-    if company:
-        return f"{first_title} ({company})"
-    return f"{first_title} kerak"
-
-
-def _extract_vacancy_fallback(raw_text: str, default_region_tag: str) -> VacancyTemplateData:
-    salary = "-"
-    schedule = "-"
-    address = "-"
-
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    for line in lines:
-        lower = line.lower()
-        if salary == "-" and any(token in lower for token in ("зарплат", "оклад", "maosh", "ish haqi", "salary", "оплата")):
-            salary = line.split(":", 1)[1].strip() if ":" in line else line
-        if schedule == "-" and any(token in lower for token in ("график", "смен", "ish vaqti", "рабоч", "schedule")):
-            schedule = line.split(":", 1)[1].strip() if ":" in line else line
-        if address == "-" and any(token in lower for token in ("адрес", "manzil", "локац", "location")):
-            address = line.split(":", 1)[1].strip() if ":" in line else line
-
-    phones = _extract_contact_phones(raw_text)
-    phone = " | ".join(phones) if phones else None
-
-    telegram = None
-    telegram_match = _VACANCY_TELEGRAM_RE.search(raw_text)
-    if telegram_match:
-        telegram = _normalize_telegram_value(telegram_match.group(0))
-
-    details = _extract_vacancy_details_fallback(raw_text)
-    titles = _strip_ad_lines(_vacancy_fallback_titles(raw_text))
-    region_tag = _normalize_region_tag(None, raw_text, default_region_tag)
-    company = _extract_company_fallback(raw_text)
-    headline = _extract_headline_fallback(raw_text, titles, region_tag, company)
-
-    return VacancyTemplateData(
-        titles=titles,
-        region_tag=region_tag,
-        address=_normalize_text_value(address),
-        salary=_normalize_text_value(salary),
-        schedule=_normalize_text_value(schedule),
-        requirements=_strip_ad_lines(_vacancy_section_lines(raw_text, ("talab", "треб", "requirements"))),
-        benefits=_strip_ad_lines(_vacancy_section_lines(raw_text, ("qulay", "услов", "benefit"))),
-        duties=_strip_ad_lines(_vacancy_section_lines(raw_text, ("vazifa", "обязан", "duties"))),
-        details=_strip_ad_lines(details),
-        phone=phone,
-        telegram=telegram,
-        headline=headline,
-        company=company,
-    )
-
-
-def _normalize_vacancy_payload(payload: Any, raw_text: str, default_region_tag: str) -> VacancyTemplateData:
-    data = payload if isinstance(payload, dict) else {}
-    titles = _strip_ad_lines(_normalize_list_value(data.get("titles"), max_items=25, max_len=120))
-    requirements = _strip_ad_lines(_normalize_list_value(data.get("requirements"), max_items=30, max_len=220))
-    benefits = _strip_ad_lines(_normalize_list_value(data.get("benefits"), max_items=30, max_len=220))
-    duties = _strip_ad_lines(_normalize_list_value(data.get("duties"), max_items=30, max_len=220))
-    details = _strip_ad_lines(_normalize_list_value(data.get("details"), max_items=30, max_len=220))
-
-    return VacancyTemplateData(
-        titles=titles,
-        region_tag=_normalize_region_tag(data.get("region_tag"), raw_text, default_region_tag),
-        address=_normalize_text_value(data.get("address")),
-        salary=_normalize_text_value(data.get("salary")),
-        schedule=_normalize_text_value(data.get("schedule")),
-        requirements=requirements,
-        benefits=benefits,
-        duties=duties,
-        details=details,
-        phone=_normalize_phone_value(data.get("phone")),
-        telegram=_normalize_telegram_value(data.get("telegram")),
-        headline=_normalize_optional_text(data.get("headline"), max_len=140),
-        company=_normalize_optional_text(data.get("company"), max_len=120),
-    )
-
-def _extract_json(text: str) -> Any:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:].strip()
-
-    if cleaned.startswith("{") or cleaned.startswith("["):
-        return json.loads(cleaned)
-
-    first_obj = cleaned.find("{")
-    last_obj = cleaned.rfind("}")
-    if first_obj != -1 and last_obj != -1 and last_obj > first_obj:
-        return json.loads(cleaned[first_obj : last_obj + 1])
-
-    first_arr = cleaned.find("[")
-    last_arr = cleaned.rfind("]")
-    if first_arr != -1 and last_arr != -1 and last_arr > first_arr:
-        return json.loads(cleaned[first_arr : last_arr + 1])
-
-    raise ValueError("JSON not found in model response")
 
 
 class AIService:
@@ -797,53 +144,41 @@ class AIService:
         self.vision_model = settings.gemini_vision_model
         self.transcribe_model = settings.gemini_transcribe_model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
-        self._client = httpx.Client(
-            timeout=httpx.Timeout(120.0, connect=20.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(90.0, connect=15.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            headers={"x-goog-api-key": self.api_key},
         )
 
-    def close(self) -> None:
+    async def close(self) -> None:
         try:
-            self._client.close()
+            await self._client.aclose()
         except Exception:
             pass
 
-    def list_available_models(self) -> set[str]:
-        """Return model names (short form) that support generateContent."""
-        response = self._client.get(self.base_url, headers={"x-goog-api-key": self.api_key})
+    # ------------------------------------------------------------- models
+    async def list_available_models(self) -> set[str]:
+        response = await self._client.get(self.base_url, params={"pageSize": 200})
         response.raise_for_status()
-        models = response.json().get("models", []) or []
         names: set[str] = set()
-        for item in models:
-            methods = item.get("supportedGenerationMethods", []) or []
-            if "generateContent" not in methods:
+        for item in response.json().get("models", []) or []:
+            if "generateContent" not in (item.get("supportedGenerationMethods") or []):
                 continue
             name = str(item.get("name") or "").split("/")[-1]
             if name:
                 names.add(name)
         return names
 
-    def ensure_models(self) -> None:
-        """Self-heal model selection at startup.
-
-        If a configured model is not available for this API key (e.g. an old
-        name left in env vars), fall back to the first working alternative so
-        AI features keep functioning instead of failing with 404.
-        """
+    async def ensure_models(self) -> None:
+        """Если модель из env недоступна для ключа — подменяем на рабочую."""
         try:
-            available = self.list_available_models()
+            available = await self.list_available_models()
         except Exception as exc:
             logger.warning("Could not list Gemini models, keeping configured ones: %s", exc)
             return
         if not available:
             return
-
-        preferred = [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-flash-latest",
-            "gemini-2.0-flash",
-        ]
+        preferred = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]
 
         def pick(current: str) -> str:
             if current in available:
@@ -858,43 +193,35 @@ class AIService:
         self.text_model = pick(self.text_model)
         self.vision_model = pick(self.vision_model)
         self.transcribe_model = pick(self.transcribe_model)
-        logger.info(
-            "Gemini models resolved: text=%s vision=%s transcribe=%s",
-            self.text_model,
-            self.vision_model,
-            self.transcribe_model,
-        )
+        logger.info("Gemini models: text=%s vision=%s transcribe=%s", self.text_model, self.vision_model, self.transcribe_model)
 
-    def _estimate_from_payload(self, data: dict[str, Any], fallback_desc: str = "Блюдо") -> CalorieEstimate:
-        return CalorieEstimate(
-            meal_desc=str(data.get("meal_desc") or fallback_desc).strip() or fallback_desc,
-            calories=int(data["calories"]) if data.get("calories") is not None else None,
-            protein=float(data["protein"]) if data.get("protein") is not None else None,
-            fat=float(data["fat"]) if data.get("fat") is not None else None,
-            carbs=float(data["carbs"]) if data.get("carbs") is not None else None,
-            confidence=float(data["confidence"]) if data.get("confidence") is not None else None,
-            advice=None,
-        )
-
-    def _generate_content(self, model: str, parts: list[dict[str, Any]], temperature: float = 0.2) -> str:
+    # ------------------------------------------------------------- core call
+    async def generate(
+        self,
+        parts: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+        json_mode: bool = True,
+        thinking_budget: int | None = 0,
+        max_tokens: int = 2048,
+    ) -> str:
+        model = model or self.text_model
+        gen_config: dict[str, Any] = {"temperature": temperature, "maxOutputTokens": max_tokens}
+        if json_mode:
+            gen_config["responseMimeType"] = "application/json"
+        if thinking_budget is not None and "2.5" in model:
+            gen_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
+        payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": gen_config}
         url = f"{self.base_url}/{model}:generateContent"
-        payload = {
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"temperature": temperature},
-        }
 
-        headers = {
-            "x-goog-api-key": self.api_key,
-            "Content-Type": "application/json",
-        }
-
-        last_exc: Exception | None = None
-        for attempt in range(1, _GEMINI_MAX_ATTEMPTS + 1):
+        data: dict[str, Any] | None = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                response = self._client.post(url, headers=headers, json=payload)
-                if response.status_code in _GEMINI_RETRY_STATUSES:
+                response = await self._client.post(url, json=payload)
+                if response.status_code in _RETRY_STATUSES:
                     raise httpx.HTTPStatusError(
-                        f"Gemini transient {response.status_code}",
+                        f"Gemini transient {response.status_code}: {response.text[:200]}",
                         request=response.request,
                         response=response,
                     )
@@ -902,244 +229,175 @@ class AIService:
                 data = response.json()
                 break
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_exc = exc
-                if attempt >= _GEMINI_MAX_ATTEMPTS:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and status not in _RETRY_STATUSES:
+                    logger.error("Gemini request rejected (%s): %s", status, exc)
+                    raise
+                if attempt >= _MAX_ATTEMPTS:
                     logger.error("Gemini call failed after %d attempts (%s): %s", attempt, model, exc)
                     raise
-                delay = _gemini_backoff_delay(attempt)
-                logger.warning(
-                    "Gemini transient error on attempt %d/%d (%s): %s — retrying in %.2fs",
-                    attempt, _GEMINI_MAX_ATTEMPTS, model, exc, delay,
-                )
-                time.sleep(delay)
-        else:  # pragma: no cover — break без присвоения data
-            raise last_exc or RuntimeError("Gemini failed without exception")
+                delay = _backoff(attempt)
+                logger.warning("Gemini transient error %d/%d (%s): %s — retry in %.1fs", attempt, _MAX_ATTEMPTS, model, exc, delay)
+                await asyncio.sleep(delay)
 
+        assert data is not None
         candidates = data.get("candidates") or []
         if not candidates:
-            raise ValueError(f"Gemini response has no candidates: {data}")
-
-        content_parts = candidates[0].get("content", {}).get("parts", [])
-        texts = [part.get("text", "") for part in content_parts if isinstance(part, dict) and "text" in part]
-        text = "\n".join(filter(None, texts)).strip()
+            reason = (data.get("promptFeedback") or {}).get("blockReason")
+            raise ValueError(f"Gemini returned no candidates (block={reason})")
+        candidate = candidates[0]
+        content_parts = (candidate.get("content") or {}).get("parts") or []
+        text = "\n".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and p.get("text")).strip()
         if not text:
-            raise ValueError(f"Gemini returned empty text: {data}")
-
+            raise ValueError(f"Gemini returned empty text (finish={candidate.get('finishReason')})")
+        if candidate.get("finishReason") == "MAX_TOKENS":
+            logger.warning("Gemini hit MAX_TOKENS for model %s", model)
         return text
 
-    def estimate_calories_by_photo(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> CalorieEstimate:
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
+        text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)
+        return extract_json(text)
 
-        prompt = (
-            "Определи блюдо и приблизительные КБЖУ. "
-            "Ответ только JSON без пояснений: "
-            '{"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}'
+    # ------------------------------------------------------------- nutrition
+    @staticmethod
+    def _estimate_from_payload(data: dict[str, Any], fallback_desc: str = "Блюдо") -> CalorieEstimate:
+        calories = _num(data.get("calories"))
+        return CalorieEstimate(
+            meal_desc=str(data.get("meal_desc") or fallback_desc).strip() or fallback_desc,
+            calories=int(round(calories)) if calories is not None else None,
+            protein=_num(data.get("protein")),
+            fat=_num(data.get("fat")),
+            carbs=_num(data.get("carbs")),
+            confidence=_num(data.get("confidence")),
         )
 
-        text = self._generate_content(
+    async def estimate_calories_by_photo(
+        self, image_bytes: bytes, mime_type: str = "image/jpeg", *, hint: str | None = None
+    ) -> CalorieEstimate:
+        prompt = (
+            "Определи блюдо на фото и оцени порцию: калории, белки, жиры, углеводы (граммы). "
+            "Название блюда — коротко, по-русски. confidence 0..1. "
+            'Ответ только JSON: {"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}'
+        )
+        if hint:
+            prompt += f"\nПодсказка пользователя: {hint}"
+        text = await self.generate(
+            [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}}],
             model=self.vision_model,
-            parts=[
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            ],
+            temperature=0.1,
         )
-        data = _extract_json(text)
+        data = extract_json(text)
+        if isinstance(data, list) and data:
+            data = data[0]
+        return self._estimate_from_payload(data if isinstance(data, dict) else {}, fallback_desc="Блюдо")
 
-        return self._estimate_from_payload(data, fallback_desc="Блюдо")
-
-    def estimate_calories_by_text(self, food_text: str) -> CalorieEstimate:
+    async def parse_nutrition_items(self, raw_text: str) -> list[CalorieEstimate]:
         prompt = (
-            "Оцени калорийность и КБЖУ по текстовому описанию еды. "
-            "Ответ только JSON без пояснений: "
-            '{"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}'
+            "Разбери сообщение о еде на отдельные блюда/приёмы пищи и оцени КБЖУ каждого (типичная порция, "
+            "если размер не указан). meal_desc — короткое название по-русски. "
+            "Верни только JSON-массив объектов: "
+            '[{"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}]\n\n'
+            f"Текст: {raw_text}"
         )
-
-        text = self._generate_content(
-            model=self.text_model,
-            parts=[{"text": f"{prompt}\n\nОписание: {food_text}"}],
-            temperature=0.2,
-        )
-        data = _extract_json(text)
-
-        return self._estimate_from_payload(data, fallback_desc=food_text.strip() or "Блюдо")
-
-    def parse_nutrition_items(self, raw_text: str) -> list[CalorieEstimate]:
-        prompt = (
-            "Ты разбираешь сообщение о еде на отдельные приемы пищи и оцениваешь КБЖУ. "
-            "Если в тексте несколько блюд или приемов пищи, верни массив объектов по каждому элементу. "
-            "Если один прием пищи, верни массив из одного объекта. "
-            "Ответ только JSON-массив без пояснений. "
-            'Формат каждого элемента: {"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}.'
-        )
-
-        parsed_items: list[CalorieEstimate] = []
+        items: list[CalorieEstimate] = []
         try:
-            text = self._generate_content(
-                model=self.text_model,
-                parts=[{"text": f"{prompt}\n\nТекст: {raw_text}"}],
-                temperature=0.1,
-            )
-            parsed = _extract_json(text)
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            if isinstance(parsed, list):
-                for item in parsed[:6]:
-                    if not isinstance(item, dict):
-                        continue
-                    estimate = self._estimate_from_payload(item, fallback_desc=str(item.get("meal_desc") or "Блюдо"))
-                    if estimate.calories is None and estimate.protein is None and estimate.fat is None and estimate.carbs is None:
-                        continue
-                    parsed_items.append(estimate)
+            parsed = await self.generate_json(prompt, temperature=0.1)
         except Exception:
-            parsed_items = []
+            logger.exception("parse_nutrition_items failed")
+            parsed = []
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        for item in parsed[:8] if isinstance(parsed, list) else []:
+            if not isinstance(item, dict):
+                continue
+            est = self._estimate_from_payload(item, fallback_desc=str(item.get("meal_desc") or "Блюдо"))
+            if est.calories is None and est.protein is None and est.fat is None and est.carbs is None:
+                continue
+            items.append(est)
+        return items
 
-        if parsed_items:
-            return parsed_items
-
-        fallback_parts = [
-            chunk.strip(" .")
-            for chunk in re.split(r"[\n,;]+", raw_text)
-            if chunk and chunk.strip()
-        ]
-        if 1 < len(fallback_parts) <= 5:
-            estimates: list[CalorieEstimate] = []
-            for part in fallback_parts:
-                try:
-                    estimates.append(self.estimate_calories_by_text(part))
-                except Exception:
-                    continue
-            if estimates:
-                return estimates
-
-        return [self.estimate_calories_by_text(raw_text)]
-
-    def transcribe_voice(self, file_path: str | Path) -> str:
-        file_path = Path(file_path)
-        audio_bytes = file_path.read_bytes()
-
-        mime_map = {
-            ".ogg": "audio/ogg",
-            ".oga": "audio/ogg",
-            ".mp3": "audio/mpeg",
-            ".wav": "audio/wav",
-            ".m4a": "audio/mp4",
-            ".mp4": "audio/mp4",
-            ".webm": "audio/webm",
-        }
-        mime_type = mime_map.get(file_path.suffix.lower(), "audio/ogg")
-
-        prompt = "Сделай точную транскрибацию аудио. Ответ только текстом без пояснений."
-        text = self._generate_content(
+    # ------------------------------------------------------------- voice
+    async def transcribe_voice(self, file_path: str | Path) -> str:
+        audio_b64 = base64.b64encode(Path(file_path).read_bytes()).decode()
+        prompt = (
+            "Расшифруй аудио дословно. Язык — русский или узбекский (латиница). "
+            "Верни только текст без комментариев."
+        )
+        text = await self.generate(
+            [{"text": prompt}, {"inline_data": {"mime_type": "audio/ogg", "data": audio_b64}}],
             model=self.transcribe_model,
-            parts=[
-                {"text": prompt},
-                {
-                    "inline_data": {
-                        "mime_type": mime_type,
-                        "data": base64.b64encode(audio_bytes).decode("utf-8"),
-                    }
-                },
-            ],
             temperature=0.0,
+            json_mode=False,
+            max_tokens=1024,
         )
         return text.strip()
 
-    def classify_inbox_intent(self, raw_text: str, *, has_photo: bool = False, has_voice: bool = False) -> InboxIntent:
+    # ------------------------------------------------------------- routing
+    async def classify_inbox_intent(self, raw_text: str, *, has_photo: bool = False, has_voice: bool = False) -> InboxIntent:
         prompt = (
-            "Определи, к какому модулю Telegram-бота относится входящее сообщение пользователя. "
-            "Допустимые module: finance, calorie, vacancy, trainer, report, goals, habits, menu, unknown. "
-            "Допустимые mode: process, open, answer, unknown. "
-            "process = сообщение уже содержит данные для обработки, "
-            "open = пользователь просит открыть/показать раздел, "
-            "answer = пользователь задает содержательный вопрос тренеру/аналитике. "
-            "Ответ только JSON: "
-            '{"module":"unknown","mode":"unknown","confidence":0.0,"cleaned_text":"..."}'
+            "Определи, к какому разделу личного Telegram-бота относится сообщение.\n"
+            "module: finance (деньги: расход/доход/долг/перевод), calorie (еда, что съел), "
+            "vacancy (текст вакансии), question (вопрос о своих данных: сколько потратил, сколько съел и т.п.), "
+            "menu (просит меню/старт), unknown.\n"
+            "mode: process (в сообщении уже есть данные для записи), open (просит открыть раздел), "
+            "answer (вопрос, нужен ответ), unknown.\n"
+            'Ответ только JSON: {"module":"...","mode":"...","confidence":0.0,"cleaned_text":"..."}\n\n'
+            f"has_photo={str(has_photo).lower()}, has_voice={str(has_voice).lower()}\nmessage: {raw_text}"
         )
-
         try:
-            text = self._generate_content(
-                model=self.text_model,
-                parts=[
-                    {
-                        "text": (
-                            f"{prompt}\n\n"
-                            f"has_photo={str(has_photo).lower()}, has_voice={str(has_voice).lower()}\n"
-                            f"message={raw_text}"
-                        )
-                    }
-                ],
-                temperature=0.0,
-            )
-            data = _extract_json(text)
-            module = str(data.get("module") or "unknown").strip().lower()
-            mode = str(data.get("mode") or "unknown").strip().lower()
-            confidence = float(data.get("confidence") or 0.0)
-            cleaned_text = _normalize_optional_text(data.get("cleaned_text"), max_len=1200)
+            data = await self.generate_json(prompt, temperature=0.0, max_tokens=512)
         except Exception:
-            module = "unknown"
-            mode = "unknown"
-            confidence = 0.0
-            cleaned_text = None
-
-        if module not in {"finance", "calorie", "vacancy", "trainer", "report", "goals", "habits", "menu", "unknown"}:
+            logger.exception("classify_inbox_intent failed")
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        module = str(data.get("module") or "unknown").strip().lower()
+        mode = str(data.get("mode") or "unknown").strip().lower()
+        if module not in {"finance", "calorie", "vacancy", "question", "menu", "unknown"}:
             module = "unknown"
         if mode not in {"process", "open", "answer", "unknown"}:
             mode = "unknown"
-        confidence = max(0.0, min(1.0, confidence))
-        return InboxIntent(module=module, mode=mode, confidence=confidence, cleaned_text=cleaned_text)
+        confidence = max(0.0, min(1.0, _num(data.get("confidence")) or 0.0))
+        return InboxIntent(module=module, mode=mode, confidence=confidence, cleaned_text=_clean_text(data.get("cleaned_text"), max_len=1200))
 
-    def parse_finance_ops(self, raw_text: str) -> list[dict[str, Any]]:
-        """Smart unified finance parser.
-
-        Returns a list of normalized operations ready to store:
-          income/expense: {"type","amount","category","note","bucket"(card|cash|lent|debt)}
-          transfer:       {"kind":"transfer","amount","from_bucket","to_bucket","category","note"}
-
-        Understands debts, lending, paying for a friend, repayments, account
-        transfers and multi-operation sentences. Returns [] if nothing parsed.
-        """
+    # ------------------------------------------------------------- finance
+    async def parse_finance_ops(self, raw_text: str) -> list[dict[str, Any]]:
+        """Возвращает список операций:
+        income/expense: {"kind","amount","category"(ключ),"note","account"(card|cash)}
+        transfer:       {"kind":"transfer","amount","from","to","note"}"""
         prompt = (
             "Ты — финансовый ассистент. Разбери сообщение на список операций и верни ТОЛЬКО JSON-массив.\n\n"
-            "Счета: \"card\" (карта), \"cash\" (наличные).\n"
-            "Виртуальные счета: \"lent\" (мне должны / я дал в долг), \"debt\" (я должен / мои долги/кредит).\n\n"
-            "Типы (kind):\n"
-            "- \"income\": доход. Поля: amount, category, note, account(card|cash).\n"
-            "- \"expense\": расход. Поля: amount, category, note, account(card|cash).\n"
-            "- \"transfer\": перемещение между счетами. Поля: amount, from, to, category, note.\n\n"
-            "ПРАВИЛА ДОЛГОВ (важно):\n"
-            "- дал в долг / оплатил за друга / занял кому-то (с карты) → transfer from=card(или cash) to=lent.\n"
-            "- мне вернули долг / друг вернул (на наличные) → transfer from=lent to=cash(или card).\n"
-            "- я взял в долг / занял у кого-то (на карту) → transfer from=debt to=card(или cash).\n"
-            "- я вернул свой долг / погасил кредит (картой) → transfer from=card(или cash) to=debt.\n"
-            "- снял с карты / положил на карту → transfer card<->cash.\n\n"
-            "В одном сообщении может быть несколько операций — верни все по порядку.\n"
-            "Суммы — числа без пробелов. Если счёт не указан — по умолчанию card.\n\n"
+            "Счета: \"card\" (карта), \"cash\" (наличные). Виртуальные: \"lent\" (мне должны), \"debt\" (я должен).\n"
+            "kind: \"expense\" | \"income\" | \"transfer\".\n"
+            "Поля expense/income: amount (число), category (ключ из списка ниже), note (коротко, 1–4 слова, о чём операция), account (card|cash; по умолчанию card).\n"
+            "Поля transfer: amount, from, to (card|cash|lent|debt), note.\n\n"
+            f"Категории расходов (category): {cats.prompt_catalog('expense')}.\n"
+            f"Категории доходов (category): {cats.prompt_catalog('income')}.\n\n"
+            "ПРАВИЛА ДОЛГОВ:\n"
+            "- дал в долг / оплатил за друга → transfer from=card|cash to=lent\n"
+            "- мне вернули долг → transfer from=lent to=card|cash\n"
+            "- взял в долг / занял у кого-то → transfer from=debt to=card|cash\n"
+            "- вернул свой долг / погасил кредит → transfer from=card|cash to=debt\n"
+            "- снял с карты → transfer card→cash; положил на карту → cash→card\n\n"
+            "Суммы: «25к»=25000, «1.5 млн»=1500000, «300 000»=300000. Слова «сум/uzs/сўм» — валюта, не число.\n"
+            "В сообщении может быть несколько операций — верни все по порядку. Если ничего нет — [].\n\n"
             "Примеры:\n"
-            "\"расход 25000 еда, доход 300000 зарплата\" -> "
-            '[{"kind":"expense","amount":25000,"category":"еда","note":"еда","account":"card"},'
-            '{"kind":"income","amount":300000,"category":"зарплата","note":"зарплата","account":"card"}]\n'
-            "\"я сам вернул свои долги картой 100000\" -> "
-            '[{"kind":"transfer","amount":100000,"from":"card","to":"debt","category":"Погашение долга","note":"вернул свой долг картой"}]\n'
-            "\"оплатил за друга картой 50000, а он вернул мне наличными\" -> "
-            '[{"kind":"transfer","amount":50000,"from":"card","to":"lent","category":"Оплата за друга","note":"оплатил за друга"},'
-            '{"kind":"transfer","amount":50000,"from":"lent","to":"cash","category":"Возврат долга","note":"друг вернул наличными"}]\n'
-            "\"снял с карты 200000\" -> "
-            '[{"kind":"transfer","amount":200000,"from":"card","to":"cash","category":"Снятие наличных","note":"снял с карты"}]\n'
-            "\"взял в долг 500000 на карту\" -> "
-            '[{"kind":"transfer","amount":500000,"from":"debt","to":"card","category":"Взял в долг","note":"взял в долг"}]\n'
-            "Если ничего не извлечь — верни []."
+            "«такси 25000, обед 40к» → "
+            '[{"kind":"expense","amount":25000,"category":"transport","note":"такси","account":"card"},'
+            '{"kind":"expense","amount":40000,"category":"food","note":"обед","account":"card"}]\n'
+            "«зарплата 5 млн на карту» → "
+            '[{"kind":"income","amount":5000000,"category":"salary","note":"зарплата","account":"card"}]\n'
+            "«дал Алишеру в долг 200000 наличными» → "
+            '[{"kind":"transfer","amount":200000,"from":"cash","to":"lent","note":"Алишер"}]\n'
+            "«снял с карты 300000» → "
+            '[{"kind":"transfer","amount":300000,"from":"card","to":"cash","note":"снял наличные"}]\n\n'
+            f"Сообщение: {raw_text}"
         )
-
         try:
-            text = self._generate_content(
-                model=self.text_model,
-                parts=[{"text": f"{prompt}\n\nСообщение: {raw_text}"}],
-                temperature=0.0,
-            )
-            parsed = _extract_json(text)
+            parsed = await self.generate_json(prompt, temperature=0.0, max_tokens=1024)
         except Exception:
+            logger.exception("parse_finance_ops failed")
             return []
-
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
@@ -1150,341 +408,120 @@ class AIService:
         for item in parsed:
             if not isinstance(item, dict):
                 continue
-            try:
-                amount = float(item.get("amount"))
-            except Exception:
+            amount = _num(item.get("amount"))
+            if amount is None or amount <= 0:
                 continue
-            if amount <= 0:
-                continue
-            kind = str(item.get("kind") or "").strip().lower()
-            note = str(item.get("note") or "").strip() or None
-            category = str(item.get("category") or "").strip()
-
+            kind = str(item.get("kind") or "expense").strip().lower()
+            note = _clean_text(item.get("note"), max_len=80)
             if kind == "transfer":
-                from_bucket = str(item.get("from") or "").strip().lower()
-                to_bucket = str(item.get("to") or "").strip().lower()
-                if from_bucket not in buckets or to_bucket not in buckets or from_bucket == to_bucket:
+                src = str(item.get("from") or "").strip().lower()
+                dst = str(item.get("to") or "").strip().lower()
+                if src not in buckets or dst not in buckets or src == dst:
                     continue
-                result.append(
-                    {
-                        "kind": "transfer",
-                        "amount": amount,
-                        "from_bucket": from_bucket,
-                        "to_bucket": to_bucket,
-                        "category": category or "Перевод",
-                        "note": note,
-                    }
-                )
-            else:
-                entry_type = "income" if kind == "income" else "expense"
-                account = str(item.get("account") or "card").strip().lower()
-                if account not in {"card", "cash"}:
-                    account = "card"
-                result.append(
-                    {
-                        "type": entry_type,
-                        "amount": amount,
-                        "category": category or ("доход" if entry_type == "income" else "прочее"),
-                        "note": note,
-                        "bucket": account,
-                    }
-                )
-        return result
-
-    def parse_finance_items(self, raw_text: str) -> list[dict[str, Any]]:
-        prompt = (
-            "Ты извлекаешь финансовые операции из текста. "
-            "Верни только JSON-массив. Каждый элемент: "
-            '{"type":"income|expense","amount":12345,"category":"еда","note":"обед","bucket":"card|cash|lent|debt"}. '
-            "Если не удалось извлечь, верни []"
-        )
-        normalized: list[dict[str, Any]] = []
-
-        try:
-            text = self._generate_content(
-                model=self.text_model,
-                parts=[{"text": f"{prompt}\n\nТекст: {raw_text}"}],
-                temperature=0.0,
-            )
-
-            parsed = _extract_json(text)
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            if isinstance(parsed, list):
-                for item in parsed:
-                    entry_type = str(item.get("type", "expense")).lower().strip()
-                    if entry_type not in {"income", "expense"}:
-                        entry_type = "expense"
-
-                    amount = item.get("amount")
-                    try:
-                        amount = float(amount)
-                    except Exception:
-                        continue
-
-                    if amount <= 0:
-                        continue
-
-                    category = str(item.get("category") or ("доход" if entry_type == "income" else "прочее")).strip()
-                    note = str(item.get("note") or "").strip() or None
-                    bucket = str(item.get("bucket") or "").strip().lower()
-                    if bucket not in {"card", "cash", "lent", "debt"}:
-                        bucket = self._infer_finance_bucket(f"{category} {note or ''}", entry_type)
-
-                    normalized.append(
-                        {
-                            "type": entry_type,
-                            "amount": amount,
-                            "category": category,
-                            "note": note,
-                            "bucket": bucket,
-                        }
-                    )
-        except Exception:
-            normalized = []
-
-        if normalized:
-            return normalized
-        return self._parse_finance_items_fallback(raw_text)
-
-    def _parse_finance_items_fallback(self, raw_text: str) -> list[dict[str, Any]]:
-        chunks = [
-            chunk.strip()
-            for chunk in raw_text.replace("\n", ",").split(",")
-            if chunk.strip()
-        ]
-        if not chunks:
-            chunks = [raw_text.strip()]
-
-        result: list[dict[str, Any]] = []
-        pattern = r"(?P<type>доход|income|расход|трата|expense)\s*(?P<amount>\d[\d\s]*)\s*(?P<rest>.*)"
-
-        for chunk in chunks:
-            match = re.search(pattern, chunk, flags=re.IGNORECASE)
-            if not match:
+                result.append({"kind": "transfer", "amount": amount, "from_bucket": src, "to_bucket": dst, "note": note})
                 continue
-
-            raw_type = match.group("type").lower()
-            entry_type = "income" if raw_type in {"доход", "income"} else "expense"
-
-            raw_amount = match.group("amount").replace(" ", "")
-            try:
-                amount = float(raw_amount)
-            except Exception:
-                continue
-            if amount <= 0:
-                continue
-
-            rest = (match.group("rest") or "").strip()
-            if not rest:
-                category = "доход" if entry_type == "income" else "прочее"
-                note = None
-            else:
-                parts = rest.split(maxsplit=1)
-                category = parts[0].strip()
-                note = parts[1].strip() if len(parts) > 1 else None
-            bucket = self._infer_finance_bucket(chunk, entry_type)
-
+            entry_type = "income" if kind == "income" else "expense"
+            account = str(item.get("account") or "card").strip().lower()
+            if account not in {"card", "cash"}:
+                account = "card"
             result.append(
                 {
-                    "type": entry_type,
+                    "kind": entry_type,
                     "amount": amount,
-                    "category": category,
+                    "category": cats.normalize(item.get("category"), entry_type, note=f"{note or ''} {raw_text}"),
                     "note": note,
-                    "bucket": bucket,
+                    "bucket": account,
                 }
             )
-
         return result
 
-    def _infer_finance_bucket(self, text: str, entry_type: str) -> str:
-        lower = text.lower()
-        if any(token in lower for token in ["нал", "налич"]):
-            return "cash"
-
-        if "долг" in lower or "в долг" in lower:
-            if any(token in lower for token in ["дал", "одолжил"]):
-                return "lent"
-            if any(token in lower for token in ["вернули", "получил обратно"]):
-                return "lent"
-            if any(token in lower for token in ["занял", "взял"]):
-                return "debt"
-            if any(token in lower for token in ["вернул", "погасил"]):
-                return "debt"
-            if entry_type == "income":
-                return "debt"
-            return "lent"
-
-        return "card"
-
-    def build_recommendations(self, context: dict[str, Any]) -> str:
+    async def answer_question(self, question: str, context: str, language: str = "ru") -> str:
+        lang_name = "узбекском (латиница)" if language == "uz" else "русском"
         prompt = (
-            "Ты AI-коуч для личного развития. "
-            "На основе данных пользователя дай 5 коротких, практичных советов на русском. "
-            "Формат: каждая строка начинается с '- '. Без воды."
+            "Ты — личный ассистент пользователя. Ответь на его вопрос по данным ниже коротко и по делу "
+            f"(2–5 строк, на {lang_name} языке, без markdown-разметки, суммы с разделителями тысяч).\n"
+            "Если данных для точного ответа нет — скажи об этом честно.\n\n"
+            f"ДАННЫЕ:\n{context}\n\nВОПРОС: {question}"
         )
+        text = await self.generate([{"text": prompt}], temperature=0.3, json_mode=False, max_tokens=700)
+        return text.strip()
 
-        return self._generate_content(
-            model=self.text_model,
-            parts=[{"text": f"{prompt}\n\nДанные: {json.dumps(context, ensure_ascii=False)}"}],
-            temperature=0.4,
-        ).strip()
+    async def generate_text(self, prompt: str, *, temperature: float = 0.4, max_tokens: int = 600) -> str:
+        return (await self.generate([{"text": prompt}], temperature=temperature, json_mode=False, max_tokens=max_tokens)).strip()
 
-    def assistant_reply(self, question: str, context: dict[str, Any]) -> str:
+    # ------------------------------------------------------------- vacancy
+    async def rewrite_vacancy(self, raw_text: str, *, default_region_tag: str = "#TOSHKENT") -> VacancyData:
         prompt = (
-            "Ты короткий и практичный AI-помощник в Telegram. "
-            "Отвечай по-русски, максимум 6 строк, с опорой на данные пользователя. "
-            "Если данных мало, скажи что добавить."
+            "Ты — редактор Telegram-канала вакансий по Узбекистану. Из сырого текста вакансии сделай "
+            "структурированный пост.\n\n"
+            "ЯЗЫК: все текстовые поля — на узбекском языке ЛАТИНИЦЕЙ (o', g', sh, ch). Русский текст и узбекскую "
+            "кириллицу переводи на узбекскую латиницу естественно, как пишут носители. Названия компаний, брендов, "
+            "адреса, телефоны, @ники, суммы — не переводи и не меняй.\n\n"
+            "СТИЛЬ: исправь опечатки и грамматику, сделай формулировки чёткими и понятными, но живыми — как в хороших "
+            "вакансиях, без канцелярита и излишней литературности. НЕ выдумывай факты и цифры. НЕ теряй факты: каждая "
+            "содержательная деталь исходника должна попасть в пост. Убери рекламу чужих каналов, призывы подписаться, "
+            "дисклеймеры и мусорные хештеги.\n\n"
+            "СЕКЦИИ — каждый факт клади в САМУЮ ПОДХОДЯЩУЮ секцию:\n"
+            "- headline: короткая приглашающая строка с должностью (например «Call-center operatori kerak», "
+            "«Sotuvchi-maslahatchi lavozimiga taklif qilamiz»). Не общие слоганы.\n"
+            "- intro: 1–2 живых предложения о компании/вакансии, если в исходнике есть о чём; иначе null.\n"
+            "- company: название работодателя или null.\n"
+            "- region_tag: хештег региона вида #TOSHKENT, #SAMARQAND, #ANDIJON, #FARGONA, #NAMANGAN, #BUXORO, "
+            f"#XORAZM, #QASHQADARYO, #SURXONDARYO, #JIZZAX, #SIRDARYO, #NAVOIY, #QORAQALPOGISTON. По умолчанию {default_region_tag}.\n"
+            "- address: адрес/ориентир/район или null.\n"
+            "- salary: всё про оплату (сумма, диапазон, %, бонусы, KPI, частота выплат) одной строкой или null.\n"
+            "- schedule: график, смены, часы, дни, формат (ofis/masofaviy) или null.\n"
+            "- requirements: требования к кандидату (возраст, пол, опыт, языки, навыки, образование, документы).\n"
+            "- duties: что нужно делать на работе.\n"
+            "- benefits: что даёт работодатель (обеды, транспорт, обучение, рост, оформление, форма, жильё).\n"
+            "- extra_sections: если факт НЕ подходит ни к одной секции выше — создай отдельную секцию с осмысленным "
+            "заголовком на узбекском (например «Sinov muddati», «Ish joyi haqida», «Kimlarga mos keladi», "
+            "«Bonuslar», «Hujjatlar»). ЗАПРЕЩЕНО сваливать факты в безымянный раздел «Qo'shimcha ma'lumotlar».\n"
+            "- phone: ВСЕ телефоны через « | » (например «+998901112233 | +998935556677») или null.\n"
+            "- telegram: @username или ссылка t.me для связи или null.\n"
+            "- image_prompt: промпт НА РУССКОМ для генерации картинки к посту в ChatGPT: сочная, привлекательная, "
+            "реалистичная сцена по профессии/сфере работы (обстановка, люди за работой, атмосфера, свет, цвета). "
+            "Без текста на картинке, без телефонов, адресов, зарплат и названий компаний — только визуал. "
+            "2–3 предложения, в конце обязательно: «Горизонтальный формат 16:9, фотореалистично, без текста и логотипов».\n\n"
+            "Ответ — ТОЛЬКО JSON такого вида:\n"
+            '{"headline":"...","intro":null,"company":null,"region_tag":"#TOSHKENT","address":null,"salary":null,'
+            '"schedule":null,"requirements":[],"duties":[],"benefits":[],"extra_sections":[{"title":"...","items":["..."]}],'
+            '"phone":null,"telegram":null,"image_prompt":"..."}\n\n'
+            f"ТЕКСТ ВАКАНСИИ:\n{raw_text}"
         )
-
-        return self._generate_content(
-            model=self.text_model,
-            parts=[
-                {
-                    "text": (
-                        f"{prompt}\n\n"
-                        f"Контекст пользователя: {json.dumps(context, ensure_ascii=False)}\n"
-                        f"Вопрос: {question}"
-                    )
-                }
-            ],
+        text = await self.generate(
+            [{"text": prompt}],
             temperature=0.3,
-        ).strip()
-
-    def assistant_reply(self, question: str, context: dict[str, Any], language: str = "ru") -> str:
-        """Answer a question about the user's own data (finance, nutrition, habits)."""
-        lang = "uzbek" if (language or "").strip().lower() == "uz" else "russian"
-        prompt = (
-            "Ты — персональный ассистент в Telegram-боте по финансам, питанию и привычкам. "
-            "Ответь на вопрос пользователя, опираясь ТОЛЬКО на данные из контекста за последние ~30 дней. "
-            "Аккуратно считай суммы. Если данных не хватает — честно скажи об этом. "
-            f"Пиши на {lang}. Кратко, до 8 строк, с конкретными числами; при необходимости короткий список."
+            json_mode=True,
+            thinking_budget=1024,
+            max_tokens=4096,
         )
-        return self._generate_content(
-            model=self.text_model,
-            parts=[
-                {
-                    "text": (
-                        f"{prompt}\n\n"
-                        f"Данные пользователя: {json.dumps(context, ensure_ascii=False, default=str)}\n"
-                        f"Вопрос: {question}"
-                    )
-                }
-            ],
-            temperature=0.2,
-        ).strip()
+        data = extract_json(text)
+        if not isinstance(data, dict):
+            raise ValueError("Vacancy response is not a JSON object")
 
-    def trainer_reply(self, question: str, context: dict[str, Any], language: str = "ru") -> str:
-        lang = "uzbek" if (language or "").strip().lower() == "uz" else "russian"
-        prompt = (
-            "Ты персональный фитнес-тренер в Telegram. "
-            "Дай безопасный и практичный ответ: структура тренировки, повторения/подходы, отдых, "
-            "вариант для новичка и короткое предупреждение по технике. "
-            f"Пиши на {lang}. Формат: до 8 строк, четко и без воды."
-        )
+        sections: list[VacancySection] = []
+        for raw in data.get("extra_sections") or []:
+            if not isinstance(raw, dict):
+                continue
+            title = _clean_text(raw.get("title"), max_len=80)
+            items = _clean_list(raw.get("items"))
+            if title and items:
+                sections.append(VacancySection(title=title, items=items))
 
-        return self._generate_content(
-            model=self.text_model,
-            parts=[
-                {
-                    "text": (
-                        f"{prompt}\n\n"
-                        f"Контекст пользователя: {json.dumps(context, ensure_ascii=False)}\n"
-                        f"Запрос: {question}"
-                    )
-                }
-            ],
-            temperature=0.3,
-        ).strip()
-
-    def extract_vacancy_template_data(
-        self,
-        raw_text: str,
-        *,
-        default_region_tag: str = "#TOSHKENT",
-        mode: str = "template",
-    ) -> VacancyTemplateData:
-        mode = mode if mode in {"template", "improve", "enrich"} else "template"
-
-        common_format = (
-            "Ответ только JSON без пояснений. "
-            'Формат: {"headline":"...","company":"...","titles":["..."],"region_tag":"#TOSHKENT","address":"...","salary":"...",'
-            '"schedule":"...","requirements":["..."],"benefits":["..."],"duties":["..."],'
-            '"details":["..."],"phone":"+998... | +998...","telegram":"@username"}. '
-            "headline: бери строку-приглашение с должностью (например «QIZLARNI CALL-CENTER OPERATORI "
-            "LAVOZIMIGA ISHGA TAKLIF QILAMIZ» или «Требуется продавец-консультант»). "
-            "НЕ бери общие мотивационные слоганы канала типа «Karyerangizni biz bilan boshlang», "
-            "«Начни карьеру с нами», «Присоединяйся к команде», «Orzungizdagi ish» — они запрещены как headline. "
-            "company: название компании/работодателя, если указано, иначе '-'. "
-            "Сохрани ВСЕ контакты. phone: укажи ВСЕ телефонные номера через ' | ' (например '+998901112233 | +998935556677'). "
-            "Нельзя переносить рекламу чужого канала, призывы подписаться, ссылки на канал-источник, общие дисклеймеры. "
-            "Если данных нет — '-' для строк и [] для списков. "
-            "region_tag: только uppercase hashtag вида #TOSHKENT."
-        )
-
-        if mode == "improve":
-            policy = (
-                "Ты редактор вакансий. ИСПРАВЬ грамматические и орфографические ошибки, "
-                "улучши формулировки и структуру каждого пункта, сделай текст чище и профессиональнее. "
-                "Сохрани ВСЕ пункты и факты, НЕ придумывай новых фактов. "
-                "Вступительный абзац и важные уточнения положи в details. "
-            )
-            temperature = 0.3
-        elif mode == "enrich":
-            policy = (
-                "Ты эксперт по найму. Если в вакансии мало данных — ДОПОЛНИ её типичными разумными пунктами "
-                "(требования, обязанности, условия), уместными именно для этой должности, чтобы вакансия выглядела полной и привлекательной. "
-                "Исправь ошибки и улучши формулировки. Определи тон вакансии: деловой/строгий или яркий/привлекающий, "
-                "и адаптируй headline и формулировки под этот тон. "
-                "НЕ выдумывай конкретные факты (точный адрес, телефон, название компании, цифры зарплаты), если их нет в тексте — "
-                "для них ставь '-' или [] . Можно добавлять общие правдоподобные пункты. "
-            )
-            temperature = 0.6
-        else:  # template
-            policy = (
-                "Ты извлекаешь данные из текста вакансии максимально ДОСЛОВНО. Нельзя придумывать факты. "
-                "Сохраняй ВСЕ пункты списков, не сокращай и не объединяй. Переноси формулировки близко к оригиналу, "
-                "только убери лишние эмодзи/маркеры в начале строк. Вступительный абзац положи в details. "
-            )
-            temperature = 0.0
-
-        prompt = (
-            f"{policy}Текст может быть на русском или узбекском, с шумом, эмодзи, пересланным оформлением. {common_format}"
-        )
-
-        parsed: Any = {}
-        try:
-            response_text = self._generate_content(
-                model=self.text_model,
-                parts=[{"text": f"{prompt}\n\nТекст вакансии:\n{raw_text}"}],
-                temperature=temperature,
-            )
-            parsed = _extract_json(response_text)
-        except Exception:
-            parsed = {}
-
-        ai_data = _normalize_vacancy_payload(parsed, raw_text, default_region_tag)
-        fallback = _extract_vacancy_fallback(raw_text, default_region_tag)
-
-        # Объединяем номера из ответа AI и из контактных строк, чтобы не потерять второй
-        # номер и не зацепить суммы зарплаты.
-        phone_sources = [ai_data.phone or ""]
-        phone_sources.extend(_extract_contact_phones(raw_text))
-        merged_phones = _extract_all_phones_from_text(" | ".join(p for p in phone_sources if p))
-        merged_phone = " | ".join(merged_phones) if merged_phones else (ai_data.phone or fallback.phone)
-
-        return VacancyTemplateData(
-            titles=ai_data.titles or fallback.titles,
-            region_tag=ai_data.region_tag or fallback.region_tag,
-            address=ai_data.address if ai_data.address != "-" else fallback.address,
-            salary=ai_data.salary if ai_data.salary != "-" else fallback.salary,
-            schedule=ai_data.schedule if ai_data.schedule != "-" else fallback.schedule,
-            requirements=ai_data.requirements or fallback.requirements,
-            benefits=ai_data.benefits or fallback.benefits,
-            duties=ai_data.duties or fallback.duties,
-            details=ai_data.details or fallback.details,
-            phone=merged_phone,
-            telegram=ai_data.telegram or fallback.telegram,
-            headline=_pick_headline(ai_data.headline, fallback.headline),
-            company=ai_data.company or fallback.company,
+        return VacancyData(
+            headline=_clean_text(data.get("headline"), max_len=160) or "",
+            intro=_clean_text(data.get("intro"), max_len=500),
+            company=_clean_text(data.get("company"), max_len=120),
+            region_tag=str(data.get("region_tag") or default_region_tag),
+            address=_clean_text(data.get("address"), max_len=240),
+            salary=_clean_text(data.get("salary"), max_len=300),
+            schedule=_clean_text(data.get("schedule"), max_len=300),
+            requirements=_clean_list(data.get("requirements")),
+            duties=_clean_list(data.get("duties")),
+            benefits=_clean_list(data.get("benefits")),
+            extra_sections=sections,
+            phone=_clean_text(data.get("phone"), max_len=200),
+            telegram=_clean_text(data.get("telegram"), max_len=120),
+            image_prompt=_clean_text(data.get("image_prompt"), max_len=900),
         )

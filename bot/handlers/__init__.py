@@ -1,0 +1,20 @@
+"""Роутеры бота. Порядок важен: inbox (fallback) — последним."""
+from __future__ import annotations
+
+from aiogram import Router
+
+from . import analytics, finance, inbox, menu, nutrition, vacancy
+
+
+def build_router() -> Router:
+    root = Router(name="root")
+    root.include_router(menu.router)
+    root.include_router(nutrition.router)
+    root.include_router(finance.router)
+    root.include_router(vacancy.router)
+    root.include_router(analytics.router)
+    root.include_router(inbox.router)
+    return root
+
+
+__all__ = ["build_router"]
