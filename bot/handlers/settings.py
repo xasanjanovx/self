@@ -26,7 +26,7 @@ async def report_prefs(uid: int) -> dict:
 
 async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
     lang = profile.lang
-    if db.available("user_settings"):
+    if await db.ensure_available("user_settings"):
         us, prefs = await asyncio.gather(services.user_settings(profile.telegram_id), report_prefs(profile.telegram_id))
         hint = ""
     else:
@@ -74,7 +74,7 @@ async def cb_settings(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_brief_toggle(callback: CallbackQuery) -> None:
     profile = await get_profile(callback.from_user)
     which = callback.data.split(":")[-1]
-    if not db.available("user_settings"):
+    if not await db.ensure_available("user_settings"):
         await answer_now(callback, profile.tr("Сначала выполни миграцию 004", "Avval 004 migratsiyasini bajaring"), alert=True)
         return
     us = await services.user_settings(profile.telegram_id)

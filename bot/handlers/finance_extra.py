@@ -57,7 +57,7 @@ def _budgets_text(profile: Profile, statuses: list[fin.BudgetStatus], limits: di
 
 
 async def render_budgets(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
-    if not db.available("budgets"):
+    if not await db.ensure_available("budgets"):
         text = "⚠️ " + profile.tr(*MIGRATION_HINT)
         limits, statuses = {}, []
     else:
@@ -155,7 +155,7 @@ def _recurring_text(profile: Profile, items: list[dict[str, Any]]) -> str:
 
 
 async def render_recurring(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
-    if not db.available("recurring_payments"):
+    if not await db.ensure_available("recurring_payments"):
         text, items = "⚠️ " + profile.tr(*MIGRATION_HINT), []
     else:
         items = await services.recurring(profile.telegram_id)
@@ -210,7 +210,7 @@ async def msg_recurring_input(message: Message, state: FSMContext) -> None:
             return
         await render_recurring(message, state, profile, notice=profile.tr("Не понял. Формат: <code>интернет 150000 5</code>", "Tushunmadim. Format: <code>internet 150000 5</code>"))
         return
-    if not db.available("recurring_payments"):
+    if not await db.ensure_available("recurring_payments"):
         await render_recurring(message, state, profile)
         return
     await db.add_recurring(profile.telegram_id, title=parsed["title"], amount=parsed["amount"], category=parsed["category"],

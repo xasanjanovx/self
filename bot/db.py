@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as time_mod
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -48,6 +49,7 @@ class Database:
         self.default_timezone = settings.app_timezone
         self.table_prefix = settings.db_table_prefix
         self.missing_tables: set[str] = set()
+        self._last_recheck = 0.0
 
     async def connect(self) -> None:
         options = AsyncClientOptions(postgrest_client_timeout=25)
@@ -101,6 +103,18 @@ class Database:
 
     def available(self, name: str) -> bool:
         return self._t(name) not in self.missing_tables
+
+    async def ensure_available(self, name: str) -> bool:
+        """Если таблицы не было при старте — перепроверить (не чаще раза в 30 с):
+        миграцию могли выполнить только что."""
+        if self.available(name):
+            return True
+        now = time_mod.monotonic()
+        if now - self._last_recheck < 30:
+            return False
+        self._last_recheck = now
+        await self.health_check()
+        return self.available(name)
 
     # ------------------------------------------------------------------ users
     async def get_user(self, telegram_id: int) -> dict[str, Any] | None:
