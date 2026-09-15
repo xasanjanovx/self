@@ -8,8 +8,10 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.methods import EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto, TelegramMethod
 from aiogram.types import BotCommand
 
+from . import emoji as pe
 from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
@@ -18,6 +20,20 @@ from .workers import brief_worker, report_worker
 
 logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
+
+
+class PremiumBot(Bot):
+    """Подменяет обычные эмодзи на премиум во всех исходящих текстах/подписях."""
+
+    async def __call__(self, method: TelegramMethod[Any], request_timeout: int | None = None) -> Any:
+        try:
+            if isinstance(method, (SendMessage, EditMessageText)) and method.text:
+                method.text = pe.premiumize(method.text)
+            elif isinstance(method, (SendPhoto, SendDocument, EditMessageCaption)) and method.caption:
+                method.caption = pe.premiumize(method.caption)
+        except Exception:
+            logger.debug("premiumize failed", exc_info=True)
+        return await super().__call__(method, request_timeout=request_timeout)
 
 
 async def on_startup(bot: Bot) -> None:
@@ -64,7 +80,7 @@ async def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    bot = Bot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
+    bot = PremiumBot(token=settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     dp = Dispatcher()
 
     access = AccessMiddleware(settings)

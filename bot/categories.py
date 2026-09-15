@@ -89,7 +89,7 @@ INCOME: tuple[Category, ...] = (
     Category("salary", "💼", "Зарплата", "Oylik", "income", (
         "зарплат", "оклад", "аванс", "зп", "премия", "oylik", "maosh", "avans", "mukofot", "ish haqi",
     )),
-    Category("side", "🧑‍💻", "Подработка", "Qo'shimcha daromad", "income", (
+    Category("side", "💻", "Подработка", "Qo'shimcha daromad", "income", (
         "подработ", "фриланс", "заказ", "халтур", "проект", "продал", "продажа", "клиент",
         "qo'shimcha", "qoshimcha", "frilans", "buyurtma", "loyiha", "sotdim", "mijoz",
     )),

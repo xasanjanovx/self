@@ -159,6 +159,17 @@ def t(lang: str, key: str) -> str:
     return data.get(key) or TEXTS["ru"].get(key) or key
 
 
+def _cat_btn(key: str, lang: str, callback_data: str, *, style: str | None = None, suffix: str = "") -> InlineKeyboardButton:
+    """Кнопка категории: премиум-иконка вместо обычного эмодзи, если она есть в паке."""
+    cat = cats.get(key)
+    if cat is None:
+        return _btn(cats.label(key, lang) + suffix, callback_data, style=style)
+    icon = _pe.id_for(cat.emoji)
+    if icon:
+        return _btn(cat.label(lang) + suffix, callback_data, style=style, icon=icon)
+    return _btn(cat.title(lang) + suffix, callback_data, style=style)
+
+
 def _back(lang: str, target: str = "menu:open") -> InlineKeyboardButton:
     return _btn(t(lang, "back"), target, icon=_pe.ID_BACK)
 
@@ -341,8 +352,7 @@ def finance_budgets_keyboard(limits: dict[str, float], lang: str = "ru") -> Inli
     row: list[InlineKeyboardButton] = []
     for cat in cats.EXPENSE:
         limit = limits.get(cat.key)
-        label = f"{cat.title(lang)} · {fin.fmt_money(limit)}" if limit else cat.title(lang)
-        row.append(_btn(label, f"finance:budget:{cat.key}", style="primary" if limit else None))
+        row.append(_cat_btn(cat.key, lang, f"finance:budget:{cat.key}", style="primary" if limit else None, suffix=f" · {fin.fmt_money(limit)}" if limit else ""))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -395,7 +405,7 @@ def amount_category_keyboard(kind: str, recent: list[str], lang: str = "ru") -> 
         if key in seen:
             continue
         seen.add(key)
-        row.append(_btn(cats.label(key, lang), f"finance:amtcat:{key}", style="primary" if key in recent else None))
+        row.append(_cat_btn(key, lang, f"finance:amtcat:{key}", style="primary" if key in recent else None))
         if len(row) == 3:
             rows.append(row)
             row = []
@@ -487,7 +497,7 @@ def finance_category_keyboard(entry_id: str | int, kind: str, lang: str = "ru") 
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for cat in cats.categories_for(kind):
-        row.append(_btn(cat.title(lang), f"finance:setcat:{entry_id}:{cat.key}"))
+        row.append(_cat_btn(cat.key, lang, f"finance:setcat:{entry_id}:{cat.key}"))
         if len(row) == 2:
             rows.append(row)
             row = []
