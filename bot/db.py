@@ -47,6 +47,7 @@ class Database:
         self.client: AsyncClient | None = None
         self.default_timezone = settings.app_timezone
         self.table_prefix = settings.db_table_prefix
+        self.missing_tables: set[str] = set()
 
     async def connect(self) -> None:
         options = AsyncClientOptions(postgrest_client_timeout=25)
@@ -81,7 +82,10 @@ class Database:
 
     async def health_check(self) -> list[str]:
         """Проверяет наличие таблиц из миграций; возвращает список отсутствующих."""
-        names = ("users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences")
+        names = (
+            "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
+            "user_settings", "budgets", "recurring_payments",
+        )
 
         async def probe(name: str) -> str | None:
             try:
@@ -92,7 +96,11 @@ class Database:
                 return self._t(name)
 
         results = await asyncio.gather(*(probe(n) for n in names))
-        return [r for r in results if r]
+        self.missing_tables = {r for r in results if r}
+        return sorted(self.missing_tables)
+
+    def available(self, name: str) -> bool:
+        return self._t(name) not in self.missing_tables
 
     # ------------------------------------------------------------------ users
     async def get_user(self, telegram_id: int) -> dict[str, Any] | None:
@@ -365,3 +373,70 @@ class Database:
             on_conflict="telegram_id",
         ).execute()
         return {"enabled": bool(enabled), "frequency": freq, "last_sent_key": last_sent_key or None}
+
+    # ---------------------------------------------------------- v2: settings
+    async def get_user_settings(self, telegram_id: int) -> dict[str, Any]:
+        res = await self._table("user_settings").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        rows = res.data or []
+        row = rows[0] if rows else {}
+        return {
+            "brief_morning": bool(row.get("brief_morning", True)),
+            "brief_evening": bool(row.get("brief_evening", True)),
+            "brief_morning_time": str(row.get("brief_morning_time") or "08:00")[:5],
+            "brief_evening_time": str(row.get("brief_evening_time") or "21:00")[:5],
+            "last_morning_key": row.get("last_morning_key"),
+            "last_evening_key": row.get("last_evening_key"),
+        }
+
+    async def save_user_settings(self, telegram_id: int, fields: dict[str, Any]) -> None:
+        payload = {"telegram_id": telegram_id, "updated_at": datetime.now(timezone.utc).isoformat(), **fields}
+        await self._table("user_settings").upsert(payload, on_conflict="telegram_id").execute()
+
+    # ---------------------------------------------------------- v2: budgets
+    async def list_budgets(self, telegram_id: int) -> dict[str, float]:
+        res = await self._table("budgets").select("category,monthly_limit").eq("telegram_id", telegram_id).execute()
+        return {str(r["category"]): float(r["monthly_limit"]) for r in (res.data or []) if r.get("category")}
+
+    async def set_budget(self, telegram_id: int, category: str, monthly_limit: float) -> None:
+        if monthly_limit <= 0:
+            await self._table("budgets").delete().eq("telegram_id", telegram_id).eq("category", category).execute()
+            return
+        await self._table("budgets").upsert(
+            {"telegram_id": telegram_id, "category": category, "monthly_limit": float(monthly_limit)},
+            on_conflict="telegram_id,category",
+        ).execute()
+
+    # ---------------------------------------------------------- v2: recurring
+    async def list_recurring(self, telegram_id: int) -> list[dict[str, Any]]:
+        res = await self._table("recurring_payments").select("*").eq("telegram_id", telegram_id).order("day_of_month").execute()
+        return res.data or []
+
+    async def list_recurring_all(self) -> list[dict[str, Any]]:
+        res = await self._table("recurring_payments").select("*").eq("enabled", True).execute()
+        return res.data or []
+
+    async def add_recurring(self, telegram_id: int, *, title: str, amount: float, category: str, bucket: str, day_of_month: int) -> dict[str, Any]:
+        res = await self._table("recurring_payments").insert(
+            {
+                "telegram_id": telegram_id,
+                "title": title,
+                "amount": float(amount),
+                "category": category,
+                "bucket": bucket,
+                "day_of_month": int(day_of_month),
+                "enabled": True,
+            }
+        ).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def update_recurring(self, telegram_id: int, rec_id: str | int, fields: dict[str, Any]) -> None:
+        await self._table("recurring_payments").update(fields).eq("telegram_id", telegram_id).eq("id", rec_id).execute()
+
+    async def get_recurring(self, telegram_id: int, rec_id: str | int) -> dict[str, Any] | None:
+        res = await self._table("recurring_payments").select("*").eq("telegram_id", telegram_id).eq("id", rec_id).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def delete_recurring(self, telegram_id: int, rec_id: str | int) -> None:
+        await self._table("recurring_payments").delete().eq("telegram_id", telegram_id).eq("id", rec_id).execute()

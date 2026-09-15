@@ -175,7 +175,15 @@ def top_operations(entries: list[dict[str, Any]], *, limit: int = 8, since: date
         else:
             existing["count"] += 1
     ranked = sorted(groups.values(), key=lambda g: (-g["count"], g["first_idx"]))
-    return ranked[:limit]
+    top = ranked[:limit]
+    # самая свежая операция — всегда первой кнопкой («повторить последнее»)
+    latest = min(groups.values(), key=lambda g: g["first_idx"], default=None)
+    if latest is not None and latest not in top:
+        top = [latest] + top[: max(0, limit - 1)]
+    elif latest is not None:
+        top.remove(latest)
+        top.insert(0, latest)
+    return top
 
 
 def quick_label(item: dict[str, Any], lang: str = "ru") -> str:
@@ -409,6 +417,24 @@ def _has_money_marker(low: str) -> bool:
     return any(w in low for w in _INCOME_WORDS + _EXPENSE_WORDS) or bool(_CURRENCY_WORDS.search(low))
 
 
+def bare_amount(text: str) -> tuple[str, float] | None:
+    """«25000» / «+300000» / «доход 5 млн» без описания → (kind, amount), иначе None."""
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 40:
+        return None
+    parsed = parse_amount(raw)
+    if parsed is None:
+        return None
+    amount, rest = parsed
+    low = raw.lower()
+    kind = "income" if raw.startswith("+") or any(w in low for w in _INCOME_WORDS) else "expense"
+    rest = re.sub(r"\b(расход|доход|chiqim|kirim|xarajat|daromad|потратил|sarfladim|получил|oldim)\b", "", rest, flags=re.IGNORECASE)
+    rest = _BUCKET_HINT_RE.sub("", rest).strip(" +-,.;:")
+    if rest or amount < 100:
+        return None
+    return kind, amount
+
+
 def parse_local(text: str) -> list[dict[str, Any]] | None:
     """Быстрый разбор простых операций без AI: «такси 25000», «расход 40к обед, доход 5 млн зарплата».
     Возвращает None, если хоть один фрагмент непонятен или встречаются долги/переводы (это — к AI)."""
@@ -456,3 +482,123 @@ def looks_like_finance(text: str) -> bool:
     if parsed[0] < _MIN_IMPLICIT_AMOUNT:
         return False
     return cats.guess_from_text(low, "expense") is not None or cats.guess_from_text(low, "income") is not None
+
+
+# ------------------------------------------------------------ budgets
+@dataclass
+class BudgetStatus:
+    category: str
+    limit: float
+    spent: float
+
+    @property
+    def ratio(self) -> float:
+        return self.spent / self.limit if self.limit > 0 else 0.0
+
+    @property
+    def left(self) -> float:
+        return self.limit - self.spent
+
+
+def budget_statuses(stats: Stats, budgets: dict[str, float]) -> list[BudgetStatus]:
+    """Статус лимитов за период (обычно — текущий месяц), самые «горячие» сверху."""
+    spent = {k: a for k, a, _ in stats.by_category}
+    out = [BudgetStatus(cat, float(limit), float(spent.get(cat, 0.0))) for cat, limit in budgets.items() if limit > 0]
+    out.sort(key=lambda b: -b.ratio)
+    return out
+
+
+def budget_warnings(statuses: list[BudgetStatus], keys: set[str] | None = None, *, lang: str = "ru") -> list[str]:
+    """Строки-предупреждения для категорий, где потрачено ≥ 80% лимита."""
+    lines = []
+    for b in statuses:
+        if keys is not None and b.category not in keys:
+            continue
+        if b.ratio >= 1.0:
+            over = b.spent - b.limit
+            lines.append(
+                f"🚫 {cats.label(b.category, lang)}: {'limitdan oshdi' if lang == 'uz' else 'лимит превышен'} +{fmt_money(over)}"
+                f" ({fmt_money(b.spent)} / {fmt_money(b.limit)})"
+            )
+        elif b.ratio >= 0.8:
+            lines.append(
+                f"⚠️ {cats.label(b.category, lang)}: {'qoldi' if lang == 'uz' else 'осталось'} {fmt_money(b.left)}"
+                f" {'dan' if lang == 'uz' else 'из'} {fmt_money(b.limit)}"
+            )
+    return lines
+
+
+# ------------------------------------------------------------ recurring payments
+_DAY_RE = re.compile(
+    r"(?:(?:каждое|каждого|every|har oyning|har oy)\s*)?(\d{1,2})\s*(?:-?(?:го|е|е\s*число|числа|число|sanasida|sana|kuni|chi|nchi|th)\b)",
+    re.IGNORECASE,
+)
+_DAY_TAIL_RE = re.compile(r"(?:^|\s)(\d{1,2})\s*$")
+
+
+def parse_recurring(text: str) -> dict[str, Any] | None:
+    """«интернет 150000 5» / «аренда 2 млн 1 числа» / «kredit 1.2 mln har oyning 15» →
+    {title, amount, day_of_month, category, bucket}."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return None
+    day: int | None = None
+    match = _DAY_RE.search(raw)
+    if match:
+        day = int(match.group(1))
+        raw = (raw[: match.start()] + " " + raw[match.end():]).strip()
+    parsed = parse_amount(raw)
+    if parsed is None:
+        return None
+    amount, rest = parsed
+    if day is None:
+        tail = _DAY_TAIL_RE.search(rest)
+        if tail and 1 <= int(tail.group(1)) <= 31:
+            day = int(tail.group(1))
+            rest = rest[: tail.start()].strip()
+    if day is None or not (1 <= day <= 31) or amount <= 0:
+        return None
+    bucket = bucket_hint(rest.lower())
+    title = _BUCKET_HINT_RE.sub("", rest)
+    title = re.sub(r"\b(каждый месяц|ежемесячно|har oyning|har oy|oyiga|в месяц)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s+", " ", title).strip(" ,.;:-–—")
+    if len(title) < 2:
+        return None
+    category = cats.guess_from_text(title, "expense") or "home"
+    return {"title": title[:60], "amount": amount, "day_of_month": day, "category": category, "bucket": bucket}
+
+
+def recurring_due_day(day_of_month: int, year: int, month: int) -> int:
+    """31-е в коротком месяце → последний день месяца."""
+    import calendar
+
+    return min(int(day_of_month), calendar.monthrange(year, month)[1])
+
+
+def recurring_remaining(items: list[dict[str, Any]], today: date) -> tuple[float, list[dict[str, Any]]]:
+    """Сумма ещё не оплаченных в этом месяце регулярных платежей и их список."""
+    key = today.strftime("%Y-%m")
+    pending = []
+    total = 0.0
+    for item in items:
+        if not item.get("enabled", True):
+            continue
+        if str(item.get("last_done_key") or "") == key:
+            continue
+        pending.append(item)
+        total += float(item.get("amount") or 0)
+    pending.sort(key=lambda i: recurring_due_day(int(i.get("day_of_month") or 1), today.year, today.month))
+    return total, pending
+
+
+def recurring_due_today(items: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+    key = today.strftime("%Y-%m")
+    due = []
+    for item in items:
+        if not item.get("enabled", True):
+            continue
+        if str(item.get("last_done_key") or "") == key or str(item.get("last_asked_key") or "") == key:
+            continue
+        if recurring_due_day(int(item.get("day_of_month") or 1), today.year, today.month) <= today.day:
+            due.append(item)
+    return due

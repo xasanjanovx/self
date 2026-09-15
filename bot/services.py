@@ -180,3 +180,42 @@ async def period_payload(profile: Profile, days: int) -> dict[str, Any]:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ------------------------------------------------------------------ v2: settings / budgets / recurring
+async def user_settings(uid: int) -> dict[str, Any]:
+    return await cache.remember(uid, ("user_settings",), 600, lambda: db.get_user_settings(uid))
+
+
+async def save_user_settings(uid: int, fields: dict[str, Any]) -> None:
+    await db.save_user_settings(uid, fields)
+    cache.invalidate(uid, "user_settings")
+
+
+async def budgets(uid: int) -> dict[str, float]:
+    if not db.available("budgets"):
+        return {}
+    return await cache.remember(uid, ("budgets",), 600, lambda: db.list_budgets(uid))
+
+
+async def set_budget(uid: int, category: str, limit: float) -> None:
+    await db.set_budget(uid, category, limit)
+    cache.invalidate(uid, "budgets")
+
+
+async def recurring(uid: int) -> list[dict[str, Any]]:
+    if not db.available("recurring_payments"):
+        return []
+    return await cache.remember(uid, ("recurring",), 600, lambda: db.list_recurring(uid))
+
+
+def invalidate_recurring(uid: int) -> None:
+    cache.invalidate(uid, "recurring")
+
+
+async def month_budget_statuses(profile: Profile) -> list[fin.BudgetStatus]:
+    entries, limits = await asyncio.gather(finance_entries(profile.telegram_id), budgets(profile.telegram_id))
+    if not limits:
+        return []
+    stats = fin.compute_stats(entries, fin.period_for("month", profile.today))
+    return fin.budget_statuses(stats, limits)

@@ -37,7 +37,23 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_vacancy": "Вакансии",
         "menu_analytics": "Аналитика",
         "menu_language": "Язык",
+        "menu_settings": "Настройки",
         "menu_refresh": "Обновить",
+        "finance_budgets": "Лимиты",
+        "finance_recurring": "Регулярные",
+        "finance_excel": "Excel",
+        "brief_morning_on": "🌅 Утро 08:00: вкл",
+        "brief_morning_off": "🌅 Утро 08:00: выкл",
+        "brief_evening_on": "🌙 Вечер 21:00: вкл",
+        "brief_evening_off": "🌙 Вечер 21:00: выкл",
+        "rec_add": "Добавить платёж",
+        "rec_pay_now": "Записать оплату",
+        "rec_pause": "Пауза",
+        "rec_resume": "Включить",
+        "rec_done": "✅ Да, записать",
+        "rec_skip": "⏭ Пропустить в этом месяце",
+        "amt_income": "➕ Это доход",
+        "amt_expense": "➖ Это расход",
         "back": "Назад",
         "to_menu": "В меню",
         "save": "Сохранить",
@@ -81,7 +97,23 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_vacancy": "Vakansiya",
         "menu_analytics": "Tahlil",
         "menu_language": "Til",
+        "menu_settings": "Sozlamalar",
         "menu_refresh": "Yangilash",
+        "finance_budgets": "Limitlar",
+        "finance_recurring": "Doimiy to'lovlar",
+        "finance_excel": "Excel",
+        "brief_morning_on": "🌅 Ertalab 08:00: yoq",
+        "brief_morning_off": "🌅 Ertalab 08:00: o'chiq",
+        "brief_evening_on": "🌙 Kechqurun 21:00: yoq",
+        "brief_evening_off": "🌙 Kechqurun 21:00: o'chiq",
+        "rec_add": "To'lov qo'shish",
+        "rec_pay_now": "To'lovni yozish",
+        "rec_pause": "Pauza",
+        "rec_resume": "Yoqish",
+        "rec_done": "✅ Ha, yozish",
+        "rec_skip": "⏭ Bu oy o'tkazib yuborish",
+        "amt_income": "➕ Bu kirim",
+        "amt_expense": "➖ Bu chiqim",
         "back": "Ortga",
         "to_menu": "Menyu",
         "save": "Saqlash",
@@ -145,9 +177,29 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
             [
-                _btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE),
+                _btn(t(lang, "menu_settings"), "menu:settings", icon=_pe.ID_SETTINGS),
                 _btn(t(lang, "menu_refresh"), "menu:open", icon=_pe.ID_REFRESH),
             ],
+        ]
+    )
+
+
+def settings_keyboard(lang: str, *, morning: bool, evening: bool, report_enabled: bool, report_frequency: str) -> InlineKeyboardMarkup:
+    status = t(lang, "status_on") if report_enabled else t(lang, "status_off")
+    if report_enabled:
+        status += " · " + (t(lang, "report_weekly") if report_frequency == "weekly" else t(lang, "report_monthly"))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "brief_morning_on" if morning else "brief_morning_off"), "settings:brief:morning", style="success" if morning else None)],
+            [_btn(t(lang, "brief_evening_on" if evening else "brief_evening_off"), "settings:brief:evening", style="success" if evening else None)],
+            [_btn(status, "noop")],
+            [
+                _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
+                _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
+                _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
+            ],
+            [_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)],
+            [_back(lang)],
         ]
     )
 
@@ -160,7 +212,7 @@ def language_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_btn(t(lang, "lang_ru"), "lang:set:ru"), _btn(t(lang, "lang_uz"), "lang:set:uz")],
-            [_back(lang)],
+            [_back(lang, "menu:settings")],
         ]
     )
 
@@ -271,10 +323,86 @@ def finance_panel_keyboard(quick_labels: list[str], lang: str = "ru") -> InlineK
     )
     rows.append(
         [
+            _btn(t(lang, "finance_budgets"), "finance:budgets", icon=_pe.ID_GOAL),
+            _btn(t(lang, "finance_recurring"), "finance:recurring", icon=_pe.ID_CALENDAR),
+        ]
+    )
+    rows.append(
+        [
             _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS),
             _back(lang),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_budgets_keyboard(limits: dict[str, float], lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for cat in cats.EXPENSE:
+        limit = limits.get(cat.key)
+        label = f"{cat.title(lang)} · {fin.fmt_money(limit)}" if limit else cat.title(lang)
+        row.append(_btn(label, f"finance:budget:{cat.key}", style="primary" if limit else None))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_back(lang, "menu:finance")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_recurring_keyboard(items: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in items[:15]:
+        mark = "✅" if item.get("enabled", True) else "⏸"
+        label = f"{mark} {int(item.get('day_of_month') or 1):02d} · {str(item.get('title') or '')[:20]} · {fin.fmt_money(float(item.get('amount') or 0))}"
+        rows.append([_btn(label, f"finance:rec:{item.get('id')}")])
+    rows.append([_btn(t(lang, "rec_add"), "finance:rec_add", style="success", icon=_pe.ID_ADD)])
+    rows.append([_back(lang, "menu:finance")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_recurring_detail_keyboard(rec_id: str | int, enabled: bool, lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "rec_pay_now"), f"finance:rec_pay:{rec_id}", style="success", icon=_pe.ID_SAVE)],
+            [
+                _btn(t(lang, "rec_pause" if enabled else "rec_resume"), f"finance:rec_toggle:{rec_id}"),
+                _btn(t(lang, "delete"), f"finance:rec_del:{rec_id}", style="danger", icon=_pe.ID_DELETE),
+            ],
+            [_back(lang, "finance:recurring")],
+        ]
+    )
+
+
+def recurring_prompt_keyboard(rec_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "rec_done"), f"rec:done:{rec_id}", style="success")],
+            [_btn(t(lang, "rec_skip"), f"rec:skip:{rec_id}")],
+        ]
+    )
+
+
+def amount_category_keyboard(kind: str, recent: list[str], lang: str = "ru") -> InlineKeyboardMarkup:
+    """Выбор категории для «голой» суммы: сначала недавние, потом все."""
+    rows: list[list[InlineKeyboardButton]] = []
+    seen: set[str] = set()
+    row: list[InlineKeyboardButton] = []
+    ordered = [k for k in recent if cats.get(k) and cats.get(k).kind == kind] + [c.key for c in cats.categories_for(kind)]
+    for key in ordered:
+        if key in seen:
+            continue
+        seen.add(key)
+        row.append(_btn(cats.label(key, lang), f"finance:amtcat:{key}", style="primary" if key in recent else None))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_btn(t(lang, "amt_income" if kind == "expense" else "amt_expense"), f"finance:amtkind:{'income' if kind == 'expense' else 'expense'}")])
+    rows.append([_btn(t(lang, "cancel"), "menu:finance", style="danger", icon=_pe.ID_CANCEL)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -287,7 +415,10 @@ def finance_stats_keyboard(period: str, lang: str = "ru") -> InlineKeyboardMarku
         inline_keyboard=[
             [_p("day", "period_day"), _p("week", "period_week"), _p("month", "period_month")],
             [_p("prev_month", "period_prev_month"), _p("year", "period_year")],
-            [_btn(t(lang, "finance_chart"), f"finance:chart:{period}", style="primary", icon=_pe.ID_ANALYTICS)],
+            [
+                _btn(t(lang, "finance_chart"), f"finance:chart:{period}", style="primary", icon=_pe.ID_ANALYTICS),
+                _btn(t(lang, "finance_excel"), f"finance:excel:{period}", style="primary", icon=_pe.ID_REPORT),
+            ],
             [_back(lang, "menu:finance")],
         ]
     )
@@ -423,15 +554,12 @@ def vacancy_channel_keyboard(lang: str = "ru", contact_url: str | None = None) -
 
 
 # ------------------------------------------------------------------ analytics
-def dashboard_keyboard(active: str, lang: str = "ru", *, enabled: bool = True, frequency: str = "weekly") -> InlineKeyboardMarkup:
+def dashboard_keyboard(active: str, lang: str = "ru") -> InlineKeyboardMarkup:
     def _p(code: str, label: str) -> InlineKeyboardButton:
         return _btn(f"✅ {label}" if code == active else label, f"dash:{code}")
 
     labels = {"7d": ("7 дней", "7 kun"), "30d": ("30 дней", "30 kun"), "90d": ("90 дней", "90 kun")}
     idx = 1 if lang == "uz" else 0
-    status = t(lang, "status_on") if enabled else t(lang, "status_off")
-    if enabled:
-        status += " · " + (t(lang, "report_weekly") if frequency == "weekly" else t(lang, "report_monthly"))
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_p("7d", labels["7d"][idx]), _p("30d", labels["30d"][idx]), _p("90d", labels["90d"][idx])],
@@ -439,13 +567,7 @@ def dashboard_keyboard(active: str, lang: str = "ru", *, enabled: bool = True, f
                 _btn("🍱 " + ("Kaloriya" if lang == "uz" else "Калории"), f"dash:kcal:{active}"),
                 _btn("🏷 " + ("Toifalar" if lang == "uz" else "Категории"), f"dash:cats:{active}"),
             ],
-            [_btn(status, "noop")],
-            [
-                _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
-                _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
-                _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
-            ],
-            [_back(lang)],
+            [_btn(t(lang, "menu_settings"), "menu:settings", icon=_pe.ID_SETTINGS), _back(lang)],
         ]
     )
 

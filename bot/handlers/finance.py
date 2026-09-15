@@ -17,6 +17,7 @@ from .. import emoji as pe
 from .. import finance as fin
 from .. import screen as screen_mod
 from .. import services
+from .. import vacancy as vac
 from ..context import ai, db
 from ..keyboards import (
     back_to_menu_keyboard,
@@ -49,7 +50,9 @@ logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ panel
 async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, Any]]]:
-    snap = await services.finance_snapshot(profile)
+    snap, limits, recurring = await asyncio.gather(
+        services.finance_snapshot(profile), services.budgets(profile.telegram_id), services.recurring(profile.telegram_id)
+    )
     lang, cur = profile.lang, profile.currency
     b = snap.balances
     month = snap.month
@@ -87,6 +90,20 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
             (f"📆 <b>{fin.period_title(month.period, lang)}</b>: {fin.fmt_money(month.expense)} {cur}{change_text}{top}")
         )
     extras = []
+    if recurring:
+        remaining, pending = fin.recurring_remaining(recurring, snap.today)
+        if remaining > 0:
+            free = snap.wallet - remaining
+            nxt = pending[0]
+            nxt_day = fin.recurring_due_day(int(nxt.get("day_of_month") or 1), snap.today.year, snap.today.month)
+            extras.append(
+                f"🔁 {'To`lovlar qoldi' if lang == 'uz' else 'Обязательные до конца месяца'}: {fin.fmt_money(remaining)} "
+                f"→ {'erkin' if lang == 'uz' else 'свободно'} <b>{fin.fmt_money(free)} {cur}</b>"
+            )
+            extras.append(f"   {'keyingi' if lang == 'uz' else 'ближайший'}: {nxt_day:02d} · {h(nxt.get('title'))} · {fin.fmt_money(float(nxt.get('amount') or 0))}")
+    if limits and month:
+        for line in fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:3]:
+            extras.append(line)
     if b["lent"]:
         extras.append(f"{pe.HANDSHAKE} {'Qarzga berilgan' if lang == 'uz' else 'Дал в долг'}: {fin.fmt_money(b['lent'])}")
     if b["debt"]:
@@ -189,6 +206,13 @@ async def handle_finance_text(
         transcript = raw_text if source == "voice_ai" else None
         if await route_text(message, state, profile, raw_text, transcript=transcript, skip_finance=True):
             return
+    bare = fin.bare_amount(raw_text)
+    if bare is not None:
+        from .finance_extra import ask_category_for_amount
+
+        await safe_delete(message)
+        await ask_category_for_amount(message, state, profile, bare[0], bare[1], bucket=fin.bucket_hint(raw_text.lower()))
+        return
     await safe_delete(message)
 
     items = fin.parse_local(raw_text)
@@ -236,10 +260,17 @@ async def msg_input_voice(message: Message, state: FSMContext) -> None:
 @router.message(BotStates.waiting_finance_confirm, F.photo)
 @router.message(BotStates.waiting_finance_settings, F.photo)
 async def msg_input_photo(message: Message, state: FSMContext) -> None:
-    # фото в разделе финансов — это всё равно еда (или вакансия с подписью)
-    from .inbox import handle_photo_message
+    # фото в разделе финансов = чек/квитанция (подпись-вакансия — исключение)
+    profile = await get_profile(message.from_user)
+    caption = (message.caption or "").strip()
+    if caption and vac.looks_like_vacancy(caption):
+        from .vacancy import process_vacancy
 
-    await handle_photo_message(message, state, await get_profile(message.from_user))
+        await process_vacancy(message, state, profile, caption)
+        return
+    from .finance_extra import handle_receipt_photo
+
+    await handle_receipt_photo(message, state, profile)
 
 
 @router.message(BotStates.waiting_finance_input, F.text)
@@ -281,7 +312,11 @@ async def cb_add_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         logger.exception("Finance save failed")
         await safe_edit(callback, f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}", back_to_menu_keyboard(profile.lang))
         return
-    await render_panel(callback, state, profile)
+    from .finance_extra import budget_notice
+
+    keys = {str(i.get("category")) for i in items if i.get("kind") == "expense"}
+    notice = await budget_notice(profile, keys) if keys else None
+    await render_panel(callback, state, profile, notice=notice)
 
 
 @router.callback_query(F.data == "finance:add_cancel")
@@ -468,8 +503,9 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ------------------------------------------------------------------ stats
-def build_stats_text(stats: fin.Stats, profile: Profile) -> str:
+def build_stats_text(stats: fin.Stats, profile: Profile, limits: dict[str, float] | None = None) -> str:
     lang, cur = profile.lang, profile.currency
+    limits = limits or {}
     p = stats.period
     title = fin.period_title(p, lang)
     lines = [f"📊 <b>{'Statistika' if lang == 'uz' else 'Статистика'} — {title}</b>", ""]
@@ -497,8 +533,15 @@ def build_stats_text(stats: fin.Stats, profile: Profile) -> str:
                 pct = (amount - prev) / prev * 100
                 if abs(pct) >= 20:
                     delta = f" {'▲' if pct > 0 else '▼'}{abs(pct):.0f}%"
-            lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {share * 100:.0f}%{delta}")
-            lines.append(f"{fin.bar(share, 12)}  <i>×{count}</i>")
+            limit = limits.get(key) if limits and p.code in {"month", "prev_month"} else None
+            if limit:
+                ratio = amount / limit
+                flag = "🚫 " if ratio >= 1 else "⚠️ " if ratio >= 0.8 else ""
+                lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> / {fin.fmt_money(limit)} · {ratio * 100:.0f}%{delta}")
+                lines.append(f"{flag}{fin.bar(min(ratio, 1.0), 12)}  <i>×{count}</i>")
+            else:
+                lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {share * 100:.0f}%{delta}")
+                lines.append(f"{fin.bar(share, 12)}  <i>×{count}</i>")
     else:
         lines += ["", "<i>" + ("Bu davrda xarajatlar yo'q." if lang == "uz" else "Расходов за период нет.") + "</i>"]
 
@@ -522,14 +565,14 @@ async def cb_stats(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
     profile = await get_profile(callback.from_user)
     period_code = callback.data.split(":")[-1]
-    entries = await services.finance_entries(profile.telegram_id)
+    entries, limits = await asyncio.gather(services.finance_entries(profile.telegram_id), services.budgets(profile.telegram_id))
     period = fin.period_for(period_code, profile.today)
     stats = fin.compute_stats(entries, period)
     await state.set_state(BotStates.waiting_finance_input)
     await remember_panel(callback, state)
     if callback.message is not None:
         await screen_mod.drop_chart(callback.bot, callback.message.chat.id)
-    await safe_edit(callback, build_stats_text(stats, profile), finance_stats_keyboard(period.code, profile.lang))
+    await safe_edit(callback, build_stats_text(stats, profile, limits), finance_stats_keyboard(period.code, profile.lang))
 
 
 @router.callback_query(F.data.startswith("finance:chart:"))

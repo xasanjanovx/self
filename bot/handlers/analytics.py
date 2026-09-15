@@ -1,4 +1,4 @@
-"""Аналитика: сводка за 7/30/90 дней, графики, настройка авто-отчёта."""
+"""Аналитика: сводка за 7/30/90 дней и графики."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +17,7 @@ from .. import finance as fin
 from .. import insights
 from .. import screen as screen_mod
 from .. import services
-from ..context import ai, db
+from ..context import ai
 from ..keyboards import dashboard_keyboard
 from ..profile import Profile, h
 from ..reports import build_summary
@@ -29,16 +29,11 @@ logger = logging.getLogger(__name__)
 _PERIODS = {"7d": 7, "30d": 30, "90d": 90}
 
 
-async def _report_prefs(uid: int) -> dict:
-    return await cache.remember(uid, ("report_prefs",), 600, lambda: db.get_report_preferences(uid))
-
-
 async def render_dashboard(target: Message | CallbackQuery, profile: Profile, period_code: str) -> None:
     days = _PERIODS.get(period_code, 7)
-    payload, nutrition_profile, prefs = await asyncio.gather(
+    payload, nutrition_profile = await asyncio.gather(
         services.period_payload(profile, days),
         services.nutrition_profile(profile.telegram_id),
-        _report_prefs(profile.telegram_id),
     )
     title = profile.tr(f"📊 <b>Аналитика — {days} дн.</b>", f"📊 <b>Tahlil — {days} kun</b>")
     summary = build_summary(
@@ -49,7 +44,7 @@ async def render_dashboard(target: Message | CallbackQuery, profile: Profile, pe
         nutrition_profile=nutrition_profile,
         title=title,
     )
-    kb = dashboard_keyboard(period_code, profile.lang, enabled=bool(prefs.get("enabled", True)), frequency=str(prefs.get("frequency") or "weekly"))
+    kb = dashboard_keyboard(period_code, profile.lang)
     bot = target.bot
     chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
     await screen_mod.drop_chart(bot, chat_id)
@@ -115,19 +110,3 @@ async def cb_chart(callback: CallbackQuery) -> None:
         return
     await screen_mod.send_chart(callback.bot, callback.message.chat.id, BufferedInputFile(chart, filename=f"{kind}.png"), caption=caption)
 
-
-@router.callback_query(F.data.startswith("report:set:"))
-async def cb_report_set(callback: CallbackQuery) -> None:
-    profile = await get_profile(callback.from_user)
-    mode = callback.data.split(":")[-1]
-    prefs = await _report_prefs(profile.telegram_id)
-    if mode == "off":
-        enabled, frequency = False, str(prefs.get("frequency") or "weekly")
-        note = profile.tr("Авто-отчёт выключен", "Avto-hisobot o'chirildi")
-    else:
-        enabled, frequency = True, ("monthly" if mode == "monthly" else "weekly")
-        note = profile.tr("Отчёт раз в месяц ✅" if frequency == "monthly" else "Отчёт раз в неделю ✅", "Oyda bir ✅" if frequency == "monthly" else "Haftada bir ✅")
-    await answer_now(callback, note)
-    await db.save_report_preferences(profile.telegram_id, enabled=enabled, frequency=frequency, last_sent_key=prefs.get("last_sent_key"))
-    cache.invalidate(profile.telegram_id, "report_prefs")
-    await render_dashboard(callback, profile, "7d")

@@ -435,6 +435,40 @@ class AIService:
             )
         return result
 
+    async def parse_receipt(self, image_bytes: bytes, mime_type: str = "image/jpeg", *, hint: str | None = None) -> dict[str, Any] | None:
+        """Фото чека/квитанции/скриншота оплаты → {"amount","category","note","account","kind"}."""
+        prompt = (
+            "На фото — чек, квитанция или скриншот оплаты. Извлеки ИТОГОВУЮ сумму к оплате (число, без валюты), "
+            "название магазина/получателя (коротко, 1–3 слова) и подбери категорию.\n"
+            f"Категории расходов (category): {cats.prompt_catalog('expense')}.\n"
+            "account: \"card\" если оплата картой/переводом/через приложение, \"cash\" если наличными; по умолчанию card.\n"
+            "Если это не чек и суммы нет — верни {\"amount\": null}.\n"
+            'Ответ только JSON: {"amount":0,"category":"other","note":"...","account":"card","is_receipt":true}'
+        )
+        if hint:
+            prompt += f"\nПодсказка пользователя: {hint}"
+        text = await self.generate(
+            [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}}],
+            model=self.vision_model,
+            temperature=0.0,
+            max_tokens=512,
+        )
+        data = extract_json(text)
+        if not isinstance(data, dict):
+            return None
+        amount = _num(data.get("amount"))
+        if amount is None or amount <= 0:
+            return None
+        note = _clean_text(data.get("note"), max_len=60)
+        account = str(data.get("account") or "card").strip().lower()
+        return {
+            "kind": "expense",
+            "amount": amount,
+            "category": cats.normalize(data.get("category"), "expense", note=f"{note or ''} {hint or ''}"),
+            "note": note,
+            "bucket": account if account in {"card", "cash"} else "card",
+        }
+
     async def answer_question(self, question: str, context: str, language: str = "ru") -> str:
         lang_name = "узбекском (латиница)" if language == "uz" else "русском"
         prompt = (

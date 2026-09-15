@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from . import analytics, finance, inbox, menu, nutrition, vacancy
+from . import analytics, finance, finance_extra, inbox, menu, nutrition, settings, vacancy
 
 
 def build_router() -> Router:
@@ -11,6 +11,8 @@ def build_router() -> Router:
     root.include_router(menu.router)
     root.include_router(nutrition.router)
     root.include_router(finance.router)
+    root.include_router(finance_extra.router)
+    root.include_router(settings.router)
     root.include_router(vacancy.router)
     root.include_router(analytics.router)
     root.include_router(inbox.router)
