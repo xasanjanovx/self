@@ -18,5 +18,8 @@ class BotStates(StatesGroup):
     waiting_recurring_input = State()
     waiting_debt_note = State()
     waiting_note_value = State()
+    # «джарвис»
+    waiting_reminder_time = State()
+    waiting_agent_pick = State()
     # вакансии
     waiting_vacancy_input = State()

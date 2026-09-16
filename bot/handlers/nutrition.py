@@ -305,6 +305,11 @@ async def handle_text(
         await safe_delete(message)
         await render_panel(message, state, profile, notice=profile.tr("Нужен текст блюда или фото.", "Taom matni yoki rasmi kerak."))
         return
+    if reroute:
+        from .agent import handle_command, looks_like_command
+
+        if looks_like_command(raw_text) and await handle_command(message, state, profile, raw_text):
+            return
     if reroute and (fin.looks_like_finance(raw_text) or vac.looks_like_vacancy(raw_text)):
         from .inbox import route_text  # локальный импорт: избегаем цикла
 

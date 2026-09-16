@@ -187,6 +187,11 @@ async def handle_finance_text(
         await safe_delete(message)
         await render_panel(message, state, profile, notice=profile.tr("Нужен текст или голос.", "Matn yoki ovoz kerak."))
         return
+    if reroute:
+        from .agent import handle_command, looks_like_command
+
+        if looks_like_command(raw_text) and await handle_command(message, state, profile, raw_text):
+            return
     if reroute and not fin.looks_like_finance(raw_text):
         from .inbox import route_text  # локальный импорт: избегаем цикла
 

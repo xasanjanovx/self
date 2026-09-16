@@ -201,24 +201,28 @@ def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
-def settings_keyboard(lang: str, *, morning: bool, evening: bool, report_enabled: bool, report_frequency: str) -> InlineKeyboardMarkup:
+def settings_keyboard(
+    lang: str, *, morning: bool, evening: bool, report_enabled: bool, report_frequency: str,
+    reminders: list[tuple[str, str]] | None = None,
+) -> InlineKeyboardMarkup:
     status = t(lang, "status_on") if report_enabled else t(lang, "status_off")
     if report_enabled:
         status += " · " + (t(lang, "report_weekly") if report_frequency == "weekly" else t(lang, "report_monthly"))
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_btn(t(lang, "brief_morning_on" if morning else "brief_morning_off"), "settings:brief:morning", style="success" if morning else None)],
-            [_btn(t(lang, "brief_evening_on" if evening else "brief_evening_off"), "settings:brief:evening", style="success" if evening else None)],
-            [_btn(status, "noop")],
-            [
-                _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
-                _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
-                _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
-            ],
-            [_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)],
-            [_back(lang)],
-        ]
-    )
+    rows = [
+        [_btn(t(lang, "brief_morning_on" if morning else "brief_morning_off"), "settings:brief:morning", style="success" if morning else None)],
+        [_btn(t(lang, "brief_evening_on" if evening else "brief_evening_off"), "settings:brief:evening", style="success" if evening else None)],
+        [_btn(status, "noop")],
+        [
+            _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
+            _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
+            _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
+        ],
+    ]
+    for rem_id, title in (reminders or [])[:8]:
+        rows.append([_btn(f"🗑 {title}", f"settings:rem_del:{rem_id}", icon=_pe.ID_DELETE)])
+    rows.append([_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)])
+    rows.append([_back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:

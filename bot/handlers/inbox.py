@@ -17,6 +17,7 @@ from .. import screen as screen_mod
 from .. import vacancy as vac
 from ..context import ai
 from ..profile import Profile, h
+from . import agent
 from . import finance as finance_h
 from . import nutrition as nutrition_h
 from . import vacancy as vacancy_h
@@ -67,6 +68,9 @@ async def route_text(
         await safe_delete(message)
         await send_main_menu(message, profile, force_new=True)
         return True
+    if agent.looks_like_command(text) and not vac.looks_like_vacancy(text):
+        if await agent.handle_command(message, state, profile, text):
+            return True
     if vac.looks_like_vacancy(text):
         await vacancy_h.process_vacancy(message, state, profile, text)
         return True
@@ -87,7 +91,7 @@ async def route_text(
     except Exception:
         return False
     if intent.confidence < 0.55 or intent.module == "unknown":
-        return False
+        return await agent.handle_command(message, state, profile, text)
     cleaned = (intent.cleaned_text or text).strip() or text
     if intent.module == "menu":
         await safe_delete(message)

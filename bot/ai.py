@@ -294,7 +294,9 @@ class AIService:
     async def parse_nutrition_items(self, raw_text: str) -> list[CalorieEstimate]:
         prompt = (
             "Разбери сообщение о еде на отдельные блюда/приёмы пищи и оцени КБЖУ каждого (типичная порция, "
-            "если размер не указан). meal_desc — короткое название по-русски. "
+            "если размер не указан). Если размер не назван, но есть слова «наелся», «до отвала», «сытый», «большая», "
+            "«много», «to'ydim», «katta» — считай большую порцию (в 1.5–2 раза больше типичной); «немного», «чуть», "
+            "«ozgina» — маленькую. meal_desc — короткое название по-русски. "
             "Верни только JSON-массив объектов: "
             '[{"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}]\n\n'
             f"Текст: {raw_text}"
@@ -486,6 +488,57 @@ class AIService:
             "note": note,
             "bucket": account if account in {"card", "cash"} else "card",
         }
+
+    async def plan_command(self, text: str, context: str) -> dict[str, Any]:
+        """«Джарвис»: свободная фраза → структурированная команда."""
+        prompt = (
+            "Ты — исполнительный ассистент в личном Telegram-боте (финансы, питание, напоминания). "
+            "Разбери сообщение пользователя и верни ОДНУ команду в JSON. Не выдумывай данных, которых нет в сообщении.\n\n"
+            "Действия (action) и параметры (params):\n"
+            "- delete_entry: удалить операцию. params: {kind: expense|income|transfer|lent|debt|any, category: ключ|null, amount: число|null, "
+            "note: текст|null, date: today|yesterday|YYYY-MM-DD|null, unnamed: true если «без имени»}\n"
+            "- edit_entry: исправить операцию. params: {find: {kind, category, amount, note, date} (что искать), set: {amount, category, note}} "
+            "(«не 10000 а 15000» → find.amount=10000, set.amount=15000)\n"
+            "- clear_unnamed_debt: убрать сумму «без имени» из долгов. params: {side: lent (мне должны / дал в долг) | debt (я должен)}\n"
+            "- set_base: задать текущий остаток счёта. params: {bucket: card|cash|lent|debt, amount}\n"
+            "- set_budget: лимит на месяц по категории. params: {category: ключ, amount}\n"
+            "- remove_budget: params: {category: ключ|all}\n"
+            "- clear_recurring: убрать регулярные платежи. params: {title: текст|all}\n"
+            "- pause_recurring / resume_recurring: params: {title: текст|all}\n"
+            "- add_reminder: регулярно/однократно присылать текст или ссылку. params: {text, links: [..], time: HH:MM|null, "
+            "days: daily|weekdays|weekend|[1..7]|once, date: YYYY-MM-DD|null}\n"
+            "- delete_reminder: params: {text: фрагмент|all}\n"
+            "- list_reminders: {}\n"
+            "- food_advice: что/сколько съесть, совет по питанию. params: {question}\n"
+            "- log_food: пользователь СООБЩАЕТ, что съел (записать). params: {text}\n"
+            "- question: вопрос о своих данных (сколько потратил, баланс…). params: {question}\n"
+            "- none: не команда (обычная операция, вакансия, болтовня)\n\n"
+            f"Категории расходов: {cats.prompt_catalog('expense')}. Доходов: {cats.prompt_catalog('income')}.\n"
+            "Суммы: «10 тыс»=10000, «700 тыс»=700000, «1.5 млн»=1500000.\n"
+            'Ответ только JSON: {"action":"...","params":{...},"confidence":0.0,"reply":"короткая фраза-ответ пользователю на его языке"}\n\n'
+            f"КОНТЕКСТ:\n{context}\n\nСООБЩЕНИЕ: {text}"
+        )
+        data = await self.generate_json(prompt, temperature=0.0, max_tokens=700)
+        if not isinstance(data, dict):
+            return {"action": "none", "params": {}, "confidence": 0.0, "reply": ""}
+        params = data.get("params") if isinstance(data.get("params"), dict) else {}
+        return {
+            "action": str(data.get("action") or "none").strip().lower(),
+            "params": params,
+            "confidence": max(0.0, min(1.0, _num(data.get("confidence")) or 0.0)),
+            "reply": _clean_text(data.get("reply"), max_len=300) or "",
+        }
+
+    async def food_advice(self, question: str, context: str, language: str = "ru") -> str:
+        lang_name = "узбекском (латиница)" if language == "uz" else "русском"
+        prompt = (
+            "Ты — личный нутрициолог. По данным ниже дай конкретный, короткий совет: 2–4 варианта, что съесть, "
+            "с примерными граммами и ккал, чтобы уложиться в остаток дня по калориям и белку. Учитывай время суток "
+            "(ночью — лёгкое, белковое, быстрое в приготовлении). Простые продукты, доступные в Узбекистане. "
+            f"Отвечай на {lang_name} языке, без markdown, максимум 8 строк.\n\n"
+            f"ДАННЫЕ:\n{context}\n\nВОПРОС: {question}"
+        )
+        return (await self.generate([{"text": prompt}], temperature=0.5, json_mode=False, max_tokens=600)).strip()
 
     async def answer_question(self, question: str, context: str, language: str = "ru") -> str:
         lang_name = "узбекском (латиница)" if language == "uz" else "русском"

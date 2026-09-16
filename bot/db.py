@@ -454,3 +454,40 @@ class Database:
 
     async def delete_recurring(self, telegram_id: int, rec_id: str | int) -> None:
         await self._table("recurring_payments").delete().eq("telegram_id", telegram_id).eq("id", rec_id).execute()
+
+    # ---------------------------------------------------------- reminders (напоминания / видео-уроки)
+    async def list_reminders(self, telegram_id: int) -> list[dict[str, Any]]:
+        res = await self._table("reminders").select("*").eq("telegram_id", telegram_id).order("created_at").execute()
+        return res.data or []
+
+    async def list_reminders_all(self) -> list[dict[str, Any]]:
+        res = await self._table("reminders").select("*").eq("enabled", True).execute()
+        return res.data or []
+
+    async def add_reminder(self, telegram_id: int, *, text: str, reminder_time: str, days_of_week: list[int], tz_name: str) -> dict[str, Any]:
+        res = await self._table("reminders").insert(
+            {
+                "telegram_id": telegram_id,
+                "reminder_text": text,
+                "reminder_time": reminder_time,
+                "days_of_week": days_of_week,
+                "timezone": tz_name,
+                "enabled": True,
+            }
+        ).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def update_reminder(self, telegram_id: int, reminder_id: str, fields: dict[str, Any]) -> None:
+        await self._table("reminders").update(fields).eq("telegram_id", telegram_id).eq("id", reminder_id).execute()
+
+    async def delete_reminder(self, telegram_id: int, reminder_id: str) -> None:
+        await self._table("reminders").delete().eq("telegram_id", telegram_id).eq("id", reminder_id).execute()
+
+    async def delete_finance_entries(self, telegram_id: int, ids: list[Any]) -> None:
+        if not ids:
+            return
+        await self._table("finance_entries").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    async def delete_all_recurring(self, telegram_id: int) -> None:
+        await self._table("recurring_payments").delete().eq("telegram_id", telegram_id).execute()

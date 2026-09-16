@@ -57,7 +57,9 @@ async def build_dashboard(profile: Profile) -> str:
         if remaining > 0:
             fin_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)} → {'erkin' if uz else 'свободно'} <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
     if limits and month:
-        fin_lines.extend(fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:2])
+        for b in fin.budget_statuses(month, limits)[:4]:
+            flag = "🚫 " if b.ratio >= 1 else "⚠️ " if b.ratio >= 0.8 else "🎯 "
+            fin_lines.append(f"{flag}{cats.label(b.category, lang)} {fin.fmt_money(b.spent)} / {fin.fmt_money(b.limit)} {fin.bar(min(b.ratio, 1.0), 8)} {ui.pct(b.ratio)}")
     debts = []
     if b["lent"]:
         debts.append(f"🤝 {'menga qarz' if uz else 'мне должны'} {fin.fmt_money(b['lent'])}")

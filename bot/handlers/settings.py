@@ -14,7 +14,7 @@ from .. import services
 from .. import ui
 from ..context import db
 from ..keyboards import settings_keyboard
-from ..profile import Profile
+from ..profile import Profile, h
 from .common import answer_now, get_profile, safe_edit
 
 router = Router(name="settings")
@@ -51,6 +51,13 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             ui.card("<b>🌙 Вечернее напоминание</b> · 21:00", ["если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня"]),
             ui.card("<b>📊 Авто-отчёт</b>", ["воскресенье 20:00 (недельный) или 1-го числа (месячный)"]),
         )
+    from .agent import _reminder_title
+
+    rems = await services.reminders(profile.telegram_id)
+    rem_lines = [f"• {h(_reminder_title(r))}" for r in rems] or [ui.muted(
+        "Yo'q. Yozing: «har kuni 20:00 da menga shu havolani yubor …»" if lang == "uz"
+        else "Нет. Напиши: «каждый день в 20:00 отправляй мне это видео …»")]
+    text = ui.join(text, ui.card(f"<b>⏰ {'Eslatmalar' if lang == 'uz' else 'Напоминания'}</b>", rem_lines))
     await safe_edit(
         callback,
         text + hint,
@@ -60,6 +67,7 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             evening=bool(us.get("brief_evening", True)),
             report_enabled=bool(prefs.get("enabled", True)),
             report_frequency=str(prefs.get("frequency") or "weekly"),
+            reminders=[(str(r.get("id")), _reminder_title(r)) for r in rems],
         ),
     )
 
@@ -101,4 +109,14 @@ async def cb_report_set(callback: CallbackQuery) -> None:
     await answer_now(callback, note)
     await db.save_report_preferences(profile.telegram_id, enabled=enabled, frequency=frequency, last_sent_key=prefs.get("last_sent_key"))
     cache.invalidate(profile.telegram_id, "report_prefs")
+    await render_settings(callback, profile)
+
+
+@router.callback_query(F.data.startswith("settings:rem_del:"))
+async def cb_reminder_delete(callback: CallbackQuery) -> None:
+    profile = await get_profile(callback.from_user)
+    rem_id = callback.data.split(":")[-1]
+    await answer_now(callback, profile.tr("Удалено", "O'chirildi"))
+    await db.delete_reminder(profile.telegram_id, rem_id)
+    services.invalidate_reminders(profile.telegram_id)
     await render_settings(callback, profile)

@@ -219,3 +219,12 @@ async def month_budget_statuses(profile: Profile) -> list[fin.BudgetStatus]:
         return []
     stats = fin.compute_stats(entries, fin.period_for("month", profile.today))
     return fin.budget_statuses(stats, limits)
+
+
+# ------------------------------------------------------------------ reminders
+async def reminders(uid: int) -> list[dict[str, Any]]:
+    return await cache.remember(uid, ("reminders",), 600, lambda: db.list_reminders(uid))
+
+
+def invalidate_reminders(uid: int) -> None:
+    cache.invalidate(uid, "reminders")

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import LinkPreviewOptions
 
 from . import cache
 from . import insights
@@ -160,4 +161,68 @@ async def brief_worker(bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
-__all__ = ["report_worker", "brief_worker"]
+async def _reminder_tick(bot: Bot) -> None:
+    """Напоминания (в т.ч. видео-уроки): раз в минуту, по локальному времени пользователя."""
+    from .handlers.agent import reminder_message, _reminder_payload
+    from .keyboards import back_to_menu_keyboard
+    import json
+
+    now_utc = datetime.now(timezone.utc)
+    try:
+        rows = await db.list_reminders_all()
+    except Exception:
+        logger.debug("reminders table unavailable", exc_info=True)
+        return
+    for row in rows:
+        telegram_id = int(row.get("telegram_id") or 0)
+        if not settings.is_allowed(telegram_id):
+            continue
+        profile = await profile_by_id(telegram_id)
+        local_now = now_utc.astimezone(profile.tz)
+        today_key = local_now.date().isoformat()
+        if str(row.get("last_sent_key") or "") == today_key:
+            continue
+        days = {int(d) for d in (row.get("days_of_week") or [1, 2, 3, 4, 5, 6, 7])}
+        if (local_now.weekday() + 1) not in days:
+            continue
+        payload = _reminder_payload(row)
+        if payload.get("date") and str(payload["date"])[:10] != today_key:
+            continue
+        hhmm = str(row.get("reminder_time") or "")[:5]
+        try:
+            hh, mm = (int(x) for x in hhmm.split(":"))
+        except Exception:
+            continue
+        minutes_now = local_now.hour * 60 + local_now.minute
+        if minutes_now < hh * 60 + mm or minutes_now - (hh * 60 + mm) > 180:
+            if minutes_now - (hh * 60 + mm) > 180:
+                await db.update_reminder(telegram_id, row["id"], {"last_sent_key": today_key})
+            continue
+        text, next_idx = reminder_message(row)
+        try:
+            await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang), link_preview_options=LinkPreviewOptions(is_disabled=False, prefer_large_media=True))
+        except Exception:
+            logger.exception("reminder send failed for %s", telegram_id)
+            continue
+        fields: dict = {"last_sent_key": today_key}
+        payload["idx"] = next_idx
+        if payload.get("once"):
+            fields["enabled"] = False
+        fields["reminder_text"] = "R1:" + json.dumps(payload, ensure_ascii=False)
+        await db.update_reminder(telegram_id, row["id"], fields)
+        services.invalidate_reminders(telegram_id)
+
+
+async def reminder_worker(bot: Bot) -> None:
+    logger.info("Reminder worker started")
+    while True:
+        try:
+            await _reminder_tick(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Reminder worker iteration failed")
+        await asyncio.sleep(60)
+
+
+__all__ = ["report_worker", "brief_worker", "reminder_worker"]
