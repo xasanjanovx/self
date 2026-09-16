@@ -15,8 +15,10 @@ from typing import Any
 from . import categories as cats
 
 BUCKETS = ("card", "cash", "lent", "debt")
+# "init" — виртуальный источник: долг уже существовал до начала учёта, деньги по счетам не двигались
+INIT = "init"
 
-_TRANSFER_RE = re.compile(r"^\[x:(card|cash|lent|debt)>(card|cash|lent|debt)\]\s*", re.IGNORECASE)
+_TRANSFER_RE = re.compile(r"^\[x:(card|cash|lent|debt|init)>(card|cash|lent|debt|init)\]\s*", re.IGNORECASE)
 _BUCKET_RE = re.compile(r"^\[b:(card|cash|lent|debt)\]\s*", re.IGNORECASE)
 
 
@@ -62,7 +64,7 @@ def note_with_transfer(note: str | None, src: str, dst: str) -> str:
 
 def normalize_bucket(bucket: str | None) -> str:
     value = str(bucket or "").strip().lower()
-    return value if value in BUCKETS else "card"
+    return value if value in BUCKETS or value == INIT else "card"
 
 
 def is_transfer(entry: dict[str, Any]) -> bool:
@@ -70,8 +72,8 @@ def is_transfer(entry: dict[str, Any]) -> bool:
 
 
 def bucket_label(bucket: str, lang: str = "ru") -> str:
-    ru = {"card": "💳 Карта", "cash": "💵 Наличные", "lent": "🤝 Дал в долг", "debt": "📌 Мои долги"}
-    uz = {"card": "💳 Karta", "cash": "💵 Naqd", "lent": "🤝 Qarzga berilgan", "debt": "📌 Mening qarzim"}
+    ru = {"card": "💳 Карта", "cash": "💵 Наличные", "lent": "🤝 Дал в долг", "debt": "📌 Мои долги", INIT: "🕘 Было раньше"}
+    uz = {"card": "💳 Karta", "cash": "💵 Naqd", "lent": "🤝 Qarzga berilgan", "debt": "📌 Mening qarzim", INIT: "🕘 Avval bo'lgan"}
     return (uz if lang == "uz" else ru).get(normalize_bucket(bucket), bucket)
 
 
@@ -95,8 +97,11 @@ def apply_to_balances(balances: dict[str, float], *, kind: str, amount: float, b
         return
     if kind == "transfer":
         # debt — пассив: возврат долга (to=debt) УМЕНЬШАЕТ его, заём (from=debt) — увеличивает.
+        # init — «уже было»: старый долг, счета card/cash не трогаем.
         for b, sign in ((normalize_bucket(src), -1.0), (normalize_bucket(dst), 1.0)):
-            if b == "debt":
+            if b == INIT:
+                continue
+            if b == "debt" and src != INIT:
                 sign = -sign
             balances[b] = balances.get(b, 0.0) + sign * amount
         return
@@ -476,7 +481,7 @@ def looks_like_finance(text: str) -> bool:
     parsed = parse_amount(low)
     if parsed is None:
         return False
-    keywords = _INCOME_WORDS + _EXPENSE_WORDS + _COMPLEX_WORDS + ("сум", "so'm", "uzs", "трат", "плат", "pul")
+    keywords = _INCOME_WORDS + _EXPENSE_WORDS + _COMPLEX_WORDS + ("сум", "so'm", "uzs", "трат", "плат", "pul", "должен", "должна", "должны", "qarzdor")
     if any(word in low for word in keywords):
         return True
     if parsed[0] < _MIN_IMPLICIT_AMOUNT:
@@ -632,14 +637,14 @@ def debt_ledger(entries: list[dict[str, Any]], settings: dict[str, float] | None
         if transfer:
             src, dst = transfer
             k = _key(row.get("note"))
-            if dst == "lent" and src in {"card", "cash"}:
+            if dst == "lent" and src in {"card", "cash", INIT}:
                 lent[k] = lent.get(k, 0.0) + amount
             elif src == "lent" and dst in {"card", "cash"}:
                 lent[k] = lent.get(k, 0.0) - amount
             elif src == "debt" and dst in {"card", "cash"}:
                 debt[k] = debt.get(k, 0.0) + amount
-            elif dst == "debt" and src in {"card", "cash"}:
-                debt[k] = debt.get(k, 0.0) - amount
+            elif dst == "debt" and src in {"card", "cash", INIT}:
+                debt[k] = debt.get(k, 0.0) + (amount if src == INIT else -amount)
             continue
         bucket = bucket_from_note(row.get("note"))
         if bucket == "lent":
@@ -677,6 +682,10 @@ def needs_counterparty(item: dict[str, Any]) -> bool:
 def debt_direction_label(item: dict[str, Any], lang: str = "ru") -> str:
     src, dst = item.get("from_bucket"), item.get("to_bucket")
     uz = lang == "uz"
+    if src == INIT and dst == "lent":
+        return "Kim sizga qarz?" if uz else "Кто тебе должен?"
+    if src == INIT and dst == "debt":
+        return "Kimga qarzdorsiz? (odam yoki bank)" if uz else "Кому ты должен? (человек или банк)"
     if dst == "lent":
         return "Kimga qarz berdingiz?" if uz else "Кому дал в долг?"
     if src == "lent":
@@ -686,3 +695,50 @@ def debt_direction_label(item: dict[str, Any], lang: str = "ru") -> str:
     if dst == "debt":
         return "Kimga qaytardingiz?" if uz else "Кому вернул долг?"
     return "Izoh?" if uz else "Комментарий?"
+
+
+# ------------------------------------------------------------ existing (old) debts — без движения денег
+_OLD_LENT_RE = re.compile(
+    r"^(?:мне\s+(?:должен|должна|должны|дол[жг]?ны)|menga\s+qarz(?:dor)?)\s+(?P<who>.+)$|^(?P<who2>.+?)\s+(?:мне\s+)?(?:должен|должна|должны)\s+мне\s*(?P<rest2>.*)$|^(?P<who3>.+?)\s+menga\s+qarz(?:dor)?\s*(?P<rest3>.*)$",
+    re.IGNORECASE,
+)
+_OLD_DEBT_RE = re.compile(
+    r"^(?:я\s+(?:должен|должна)|мой\s+долг|у\s+меня\s+долг|men\s+qarzdorman|mening\s+qarzim)\s*(?P<who>.*)$|^men\s+(?P<who2>.+?)(?:ga|ga\s+)\s*qarzdorman\s*(?P<rest2>.*)$",
+    re.IGNORECASE,
+)
+_OLD_HINT_RE = re.compile(r"\b(уже|давно|ещё|еще|с прошлого|раньше|старый долг|старые долги|avval|allaqachon|eski qarz)\b", re.IGNORECASE)
+
+
+def _strip_amount(text: str) -> tuple[float, str] | None:
+    parsed = parse_amount(text)
+    if parsed is None:
+        return None
+    amount, rest = parsed
+    rest = _OLD_HINT_RE.sub("", rest)
+    rest = re.sub(r"\b(в долг|долг|qarz|sum|so'm)\b", "", rest, flags=re.IGNORECASE)
+    rest = re.sub(r"\s+", " ", rest).strip(" ,.;:—-")
+    return amount, rest
+
+
+def parse_existing_debt(text: str) -> dict[str, Any] | None:
+    """«мне должен Абдулазиз 200000» / «Абдулазиз должен мне 200000» → init→lent;
+    «я должен банку 3 млн» / «мой долг Хамкорбанк 3 млн» → init→debt. Деньги по счетам не двигаются."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw or len(raw) > 120:
+        return None
+    parsed = _strip_amount(raw)
+    if parsed is None:
+        return None
+    amount, rest = parsed
+    if amount <= 0:
+        return None
+    m = _OLD_LENT_RE.match(rest)
+    if m:
+        who = (m.group("who") or m.group("who2") or m.group("who3") or "").strip(" ,.;:—-")
+        return {"kind": "transfer", "amount": amount, "from_bucket": INIT, "to_bucket": "lent", "note": who or None}
+    m = _OLD_DEBT_RE.match(rest)
+    if m:
+        who = (m.group("who") or m.group("who2") or "").strip(" ,.;:—-")
+        who = re.sub(r"^(перед|у|banku|bankga)\s+", "", who, flags=re.IGNORECASE)
+        return {"kind": "transfer", "amount": amount, "from_bucket": INIT, "to_bucket": "debt", "note": who or None}
+    return None

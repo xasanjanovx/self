@@ -150,6 +150,11 @@ def _format_pending(items: list[dict[str, Any]], profile: Profile, balances_befo
         note = h(str(item.get("note") or "").strip())
         note_part = f" · {note}" if note else ""
         if item.get("kind") == "transfer":
+            if item.get("from_bucket") == fin.INIT:
+                what = ("Eski qarz — menga qarz" if lang == "uz" else "Старый долг — мне должны") if item.get("to_bucket") == "lent" \
+                    else ("Eski qarz — men qarzdorman" if lang == "uz" else "Старый долг — я должен")
+                lines.append(f"🕘 <b>{fin.fmt_money(amount)} {cur}</b> · {what}{note_part}")
+                continue
             route = fin.transfer_label(item.get("from_bucket", "card"), item.get("to_bucket", "cash"), lang)
             lines.append(f"↔ <b>{fin.fmt_money(amount)} {cur}</b> · {route}{note_part}")
         else:
@@ -197,7 +202,8 @@ async def handle_finance_text(
         return
     await safe_delete(message)
 
-    items = fin.parse_local(raw_text)
+    old_debt = fin.parse_existing_debt(raw_text)
+    items = [old_debt] if old_debt else fin.parse_local(raw_text)
     if items is None:
         await show_progress(message, profile.tr("⏳ Разбираю операцию…", "⏳ Operatsiya tahlil qilinmoqda…"))
         try:
@@ -569,46 +575,6 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ------------------------------------------------------------------ debts by person
-def build_debts_text(profile: Profile, ledger: dict[str, list[tuple[str, float]]], balances: dict[str, float]) -> str:
-    lang, cur = profile.lang, profile.currency
-    uz = lang == "uz"
-    header = ui.title("🤝", "Qarzlar" if uz else "Долги")
-
-    def _lines(items: list[tuple[str, float]], *, positive_word: str, negative_word: str) -> list[str]:
-        out = []
-        for name, amount in items:
-            label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
-            if amount >= 0:
-                out.append(f"• {label} — <b>{fin.fmt_money(amount)}</b>")
-            else:
-                out.append(f"• {label} — <b>{fin.fmt_money(abs(amount))}</b> {ui.muted(negative_word)}")
-        return out or [ui.muted("yo'q" if uz else "нет")]
-
-    lent_lines = _lines(ledger["lent"], positive_word="", negative_word="ortiqcha qaytardi" if uz else "вернул больше")
-    debt_lines = _lines(ledger["debt"], positive_word="", negative_word="ortiqcha to'landi" if uz else "переплата")
-    lent_card = ui.card(f"<b>🤝 {'Menga qarz' if uz else 'Мне должны'}</b> · {fin.fmt_money(balances['lent'])} {cur}", lent_lines)
-    debt_card = ui.card(f"<b>📌 {'Mening qarzim' if uz else 'Я должен'}</b> · {fin.fmt_money(balances['debt'])} {cur}", debt_lines)
-    hint = ui.muted(
-        "«Abdulazizga 200000 qarz berdim» · «akamdan 500000 qarz oldim» · «Abdulaziz 100000 qaytardi» · «Hamkorbankdan 3 mln kredit oldim»"
-        if uz else
-        "«дал Абдулазизу 200000» · «взял у брата 500000» · «Абдулазиз вернул 100000» · «взял кредит в Хамкорбанке 3 млн»"
-    )
-    return ui.join(header, lent_card, debt_card, hint)
-
-
-@router.callback_query(F.data == "finance:debts")
-async def cb_debts(callback: CallbackQuery, state: FSMContext) -> None:
-    await answer_now(callback)
-    profile = await get_profile(callback.from_user)
-    snap = await services.finance_snapshot(profile)
-    ledger = fin.debt_ledger(snap.entries, snap.settings)
-    await state.set_state(BotStates.waiting_finance_input)
-    await remember_panel(callback, state)
-    from ..keyboards import finance_debts_keyboard
-
-    await safe_edit(callback, build_debts_text(profile, ledger, snap.balances), finance_debts_keyboard(profile.lang))
-
-
 # ------------------------------------------------------------------ edit note
 @router.callback_query(F.data.startswith("finance:note:"))
 async def cb_note_edit(callback: CallbackQuery, state: FSMContext) -> None:
@@ -841,8 +807,8 @@ def _field_label(field: str, lang: str) -> str:
     return (uz if lang == "uz" else ru).get(field, field)
 
 
-async def _settings_view(profile: Profile) -> tuple[dict[str, float], dict[str, float]]:
-    """Текущие фактические балансы (base + операции) для показа в настройках."""
+async def _settings_view(profile: Profile) -> tuple[dict[str, float], dict[str, float], dict[str, list[tuple[str, float]]]]:
+    """Текущие фактические балансы (base + операции), «живые» без base и долги по людям."""
     snap = await services.finance_snapshot(profile)
     view = {
         "card_base": snap.balances["card"],
@@ -852,30 +818,56 @@ async def _settings_view(profile: Profile) -> tuple[dict[str, float], dict[str, 
         "monthly_credit_payment": float(snap.settings.get("monthly_credit_payment") or 0),
     }
     live = fin.compute_balances(snap.entries)  # без base
-    return view, live
+    ledger = fin.debt_ledger(snap.entries, snap.settings)
+    return view, live, ledger
 
 
-def _settings_text(profile: Profile, view: dict[str, float]) -> str:
+def _settings_text(profile: Profile, view: dict[str, float], ledger: dict[str, list[tuple[str, float]]] | None = None) -> str:
     lang, cur = profile.lang, profile.currency
-    lines = [
-        "⚙️ <b>Moliya / Hisoblar</b>" if lang == "uz" else "⚙️ <b>Финансы / Счета</b>",
-        "",
-        ("Hozirgi qoldiqlar. Tuzatish uchun hisobni tanlang va yangi summani yozing." if lang == "uz" else "Текущие остатки. Чтобы поправить — выбери счёт и введи актуальную сумму."),
-        "",
+    uz = lang == "uz"
+    header = ui.title("⚙️", "Hisoblar" if uz else "Счета")
+    acc_lines = [
+        f"{_field_label('card', lang)}: <b>{fin.fmt_money(view['card_base'])} {cur}</b>",
+        f"{_field_label('cash', lang)}: <b>{fin.fmt_money(view['cash_base'])} {cur}</b>",
+        f"{_field_label('credit', lang)}: <b>{fin.fmt_money(view['monthly_credit_payment'])} {cur}</b>",
+        ui.muted("Tuzatish uchun hisobni bosing va joriy summani yozing." if uz else "Чтобы поправить — нажми счёт и введи актуальную сумму."),
     ]
-    for field, key in _FIELDS.items():
-        lines.append(f"{_field_label(field, lang)}: <b>{fin.fmt_money(view[key])} {cur}</b>")
-    return "\n".join(lines)
+    blocks = [header, ui.card(f"<b>{'Balans' if uz else 'Балансы'}</b>", acc_lines)]
+
+    ledger = ledger or {"lent": [], "debt": []}
+
+    def _lines(items: list[tuple[str, float]], negative_word: str) -> list[str]:
+        out = []
+        for name, amount in items:
+            label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
+            if amount >= 0:
+                out.append(f"• {label} — <b>{fin.fmt_money(amount)}</b>")
+            else:
+                out.append(f"• {label} — <b>{fin.fmt_money(abs(amount))}</b> {ui.muted(negative_word)}")
+        return out or [ui.muted("yo'q" if uz else "нет")]
+
+    blocks.append(ui.card(f"<b>🤝 {'Menga qarz' if uz else 'Мне должны'}</b> · {fin.fmt_money(view['lent_base'])} {cur}",
+                          _lines(ledger["lent"], "ortiqcha qaytardi" if uz else "вернул больше")))
+    blocks.append(ui.card(f"<b>📌 {'Mening qarzim' if uz else 'Я должен'}</b> · {fin.fmt_money(view['debt_base'])} {cur}",
+                          _lines(ledger["debt"], "ortiqcha to'landi" if uz else "переплата")))
+    blocks.append(ui.muted(
+        "Eski qarzni qo'shish (pul harakatisiz): «menga Abdulaziz qarz 200000» · «men bankka qarzdorman 3 mln». "
+        "Yangi: «Abdulazizga 200000 qarz berdim» · «akamdan 500000 qarz oldim» · «Abdulaziz 100000 qaytardi»."
+        if uz else
+        "Старый долг (деньги не двигаются): «мне должен Абдулазиз 200000» · «я должен банку 3 млн». "
+        "Новый: «дал Абдулазизу 200000» · «взял у брата 500000» · «Абдулазиз вернул 100000»."
+    ))
+    return ui.join(*blocks)
 
 
 @router.callback_query(F.data == "finance:settings")
 async def cb_settings(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
     profile = await get_profile(callback.from_user)
-    view, _ = await _settings_view(profile)
+    view, _, ledger = await _settings_view(profile)
     await state.set_state(BotStates.waiting_finance_settings)
     await remember_panel(callback, state)
-    await safe_edit(callback, _settings_text(profile, view), finance_settings_keyboard(view, profile.currency, profile.lang))
+    await safe_edit(callback, _settings_text(profile, view, ledger), finance_settings_keyboard(view, profile.currency, profile.lang))
 
 
 @router.callback_query(F.data.startswith("finance:set:"))
@@ -885,7 +877,7 @@ async def cb_setting_pick(callback: CallbackQuery, state: FSMContext) -> None:
     field = callback.data.split(":")[-1]
     if field not in _FIELDS:
         return
-    view, _ = await _settings_view(profile)
+    view, _, _ = await _settings_view(profile)
     await state.set_state(BotStates.waiting_finance_settings_value)
     await state.update_data(finance_setting_field=field)
     await remember_panel(callback, state)
@@ -917,13 +909,13 @@ async def msg_setting_value(message: Message, state: FSMContext) -> None:
     if field == "credit":
         settings["monthly_credit_payment"] = value
     else:
-        _, live = await _settings_view(profile)
+        _, live, _ = await _settings_view(profile)
         # base = желаемый текущий остаток − сумма операций
         settings[_FIELDS[field]] = value - live[field]
     await services.save_finance_settings(profile.telegram_id, settings)
-    view, _ = await _settings_view(profile)
+    view, _, ledger = await _settings_view(profile)
     await state.set_state(BotStates.waiting_finance_settings)
-    await show_panel(message, state, _settings_text(profile, view) + "\n\n✅", finance_settings_keyboard(view, profile.currency, profile.lang))
+    await show_panel(message, state, _settings_text(profile, view, ledger) + "\n\n✅", finance_settings_keyboard(view, profile.currency, profile.lang))
 
 
 @router.message(BotStates.waiting_finance_settings_value)
@@ -932,10 +924,10 @@ async def msg_settings_other(message: Message, state: FSMContext) -> None:
     profile = await get_profile(message.from_user)
     text = (message.text or "").strip()
     await safe_delete(message)
-    # В настройках тоже можно сразу писать операции — удобно.
-    if text and not text.startswith("/") and fin.looks_like_finance(text):
+    # В «Счетах» тоже можно сразу писать операции и старые долги — удобно.
+    if text and not text.startswith("/") and (fin.parse_existing_debt(text) or fin.looks_like_finance(text)):
         await handle_finance_text(message, state, profile, text, source="text")
         return
-    view, _ = await _settings_view(profile)
+    view, _, ledger = await _settings_view(profile)
     await state.set_state(BotStates.waiting_finance_settings)
-    await show_panel(message, state, _settings_text(profile, view), finance_settings_keyboard(view, profile.currency, profile.lang))
+    await show_panel(message, state, _settings_text(profile, view, ledger), finance_settings_keyboard(view, profile.currency, profile.lang))

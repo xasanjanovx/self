@@ -367,7 +367,8 @@ class AIService:
         transfer:       {"kind":"transfer","amount","from","to","note"}"""
         prompt = (
             "Ты — финансовый ассистент. Разбери сообщение на список операций и верни ТОЛЬКО JSON-массив.\n\n"
-            "Счета: \"card\" (карта), \"cash\" (наличные). Виртуальные: \"lent\" (мне должны), \"debt\" (я должен).\n"
+            "Счета: \"card\" (карта), \"cash\" (наличные). Виртуальные: \"lent\" (мне должны), \"debt\" (я должен), "
+            "\"init\" (долг уже существовал раньше — деньги СЕЙЧАС не двигаются).\n"
             "kind: \"expense\" | \"income\" | \"transfer\".\n"
             "Поля expense/income: amount (число), category (ключ из списка ниже), note (коротко, 1–4 слова, о чём операция), account (card|cash; по умолчанию card).\n"
             "Поля transfer: amount, from, to (card|cash|lent|debt), note.\n"
@@ -380,7 +381,10 @@ class AIService:
             "- мне вернули долг → transfer from=lent to=card|cash\n"
             "- взял в долг / занял у кого-то → transfer from=debt to=card|cash\n"
             "- вернул свой долг / погасил кредит → transfer from=card|cash to=debt\n"
-            "- снял с карты → transfer card→cash; положил на карту → cash→card\n\n"
+            "- снял с карты → transfer card→cash; положил на карту → cash→card\n"
+            "- КОНСТАТАЦИЯ существующего долга без действия сейчас («мне должен X 200000», «X должен мне», «я должен банку 3 млн», "
+            "«у меня долг перед братом», «уже/давно должен») → transfer from=init to=lent (мне должны) или from=init to=debt (я должен). "
+            "Если есть глагол действия (дал, взял, вернул, занял, оплатил) — это обычный перевод с card/cash.\n\n"
             "Суммы: «25к»=25000, «1.5 млн»=1500000, «300 000»=300000. Слова «сум/uzs/сўм» — валюта, не число.\n"
             "В сообщении может быть несколько операций — верни все по порядку. Если ничего нет — [].\n\n"
             "Примеры:\n"
@@ -399,6 +403,10 @@ class AIService:
             '[{"kind":"transfer","amount":3000000,"from":"debt","to":"card","note":"Хамкорбанк"}]\n'
             "«дал в долг 200000» → "
             '[{"kind":"transfer","amount":200000,"from":"card","to":"lent","note":null}]\n'
+            "«мне должен Абдулазиз 200000» → "
+            '[{"kind":"transfer","amount":200000,"from":"init","to":"lent","note":"Абдулазиз"}]\n'
+            "«я должен Хамкорбанку 3 млн» → "
+            '[{"kind":"transfer","amount":3000000,"from":"init","to":"debt","note":"Хамкорбанк"}]\n'
             "«снял с карты 300000» → "
             '[{"kind":"transfer","amount":300000,"from":"card","to":"cash","note":"снял наличные"}]\n\n'
             f"Сообщение: {raw_text}"
@@ -413,7 +421,7 @@ class AIService:
         if not isinstance(parsed, list):
             return []
 
-        buckets = {"card", "cash", "lent", "debt"}
+        buckets = {"card", "cash", "lent", "debt", "init"}
         result: list[dict[str, Any]] = []
         for item in parsed:
             if not isinstance(item, dict):

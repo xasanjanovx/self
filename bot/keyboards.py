@@ -66,7 +66,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "no": "Нет",
         "calorie_goal": "Цель и профиль",
         "calorie_meals": "Приёмы",
-        "finance_settings": "Счета",
+        "finance_settings": "Счета и долги",
         "finance_ops": "Операции",
         "finance_stats": "Статистика",
         "finance_chart": "График",
@@ -129,7 +129,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "no": "Yo'q",
         "calorie_goal": "Maqsad va profil",
         "calorie_meals": "Qabullar",
-        "finance_settings": "Hisoblar",
+        "finance_settings": "Hisoblar va qarzlar",
         "finance_ops": "Operatsiyalar",
         "finance_stats": "Statistika",
         "finance_chart": "Grafik",
@@ -346,21 +346,11 @@ def finance_panel_keyboard(quick_labels: list[str], lang: str = "ru") -> InlineK
     )
     rows.append(
         [
-            _btn(t(lang, "finance_debts"), "finance:debts", icon=_pe.id_for("🤝")),
             _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS),
+            _back(lang),
         ]
     )
-    rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def finance_debts_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_btn(t(lang, "finance_ops"), "finance:ops:month", icon=_pe.ID_REPORT), _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS)],
-            [_back(lang, "menu:finance")],
-        ]
-    )
 
 
 def debt_note_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:

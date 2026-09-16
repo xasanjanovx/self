@@ -101,3 +101,18 @@ def test_needs_counterparty():
     assert not fin.needs_counterparty({"kind": "transfer", "from_bucket": "card", "to_bucket": "lent", "note": "Алишер"})
     assert not fin.needs_counterparty({"kind": "transfer", "from_bucket": "card", "to_bucket": "cash", "note": None})
     assert not fin.needs_counterparty({"kind": "expense", "amount": 1, "note": None})
+
+
+def test_existing_debt_parse_and_balances():
+    old = fin.parse_existing_debt("мне должен Абдулазиз 200000")
+    assert old == {"kind": "transfer", "amount": 200000.0, "from_bucket": "init", "to_bucket": "lent", "note": "Абдулазиз"}
+    assert fin.parse_existing_debt("я должен банку 3 млн")["to_bucket"] == "debt"
+    assert fin.parse_existing_debt("дал Абдулазизу 200000") is None
+    entries = [
+        _e("expense", 200_000, "[x:init>lent] Абдулазиз", "2026-09-01", "transfer"),
+        _e("expense", 3_000_000, "[x:init>debt] банк", "2026-09-01", "transfer"),
+        _e("expense", 1_000_000, "[x:card>debt] банк", "2026-09-02", "transfer"),
+    ]
+    b = fin.compute_balances(entries, {"card_base": 5_000_000})
+    assert b["card"] == 4_000_000 and b["lent"] == 200_000 and b["debt"] == 2_000_000
+    assert fin.debt_ledger(entries)["debt"] == [("банк", 2_000_000.0)]
