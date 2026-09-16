@@ -370,7 +370,9 @@ class AIService:
             "Счета: \"card\" (карта), \"cash\" (наличные). Виртуальные: \"lent\" (мне должны), \"debt\" (я должен).\n"
             "kind: \"expense\" | \"income\" | \"transfer\".\n"
             "Поля expense/income: amount (число), category (ключ из списка ниже), note (коротко, 1–4 слова, о чём операция), account (card|cash; по умолчанию card).\n"
-            "Поля transfer: amount, from, to (card|cash|lent|debt), note.\n\n"
+            "Поля transfer: amount, from, to (card|cash|lent|debt), note.\n"
+            "ДЛЯ ДОЛГОВ (lent/debt) note = ТОЛЬКО имя человека или название банка/организации, кому дал / у кого взял / кто вернул "
+            "(например \"Абдулазиз\", \"брат\", \"Хамкорбанк\"). Без слов «долг», «дал», «взял». Если имя не названо — note = null.\n\n"
             f"Категории расходов (category): {cats.prompt_catalog('expense')}.\n"
             f"Категории доходов (category): {cats.prompt_catalog('income')}.\n\n"
             "ПРАВИЛА ДОЛГОВ:\n"
@@ -389,6 +391,14 @@ class AIService:
             '[{"kind":"income","amount":5000000,"category":"salary","note":"зарплата","account":"card"}]\n'
             "«дал Алишеру в долг 200000 наличными» → "
             '[{"kind":"transfer","amount":200000,"from":"cash","to":"lent","note":"Алишер"}]\n'
+            "«взял в долг у брата 500000» → "
+            '[{"kind":"transfer","amount":500000,"from":"debt","to":"card","note":"брат"}]\n'
+            "«Абдулазиз вернул 100000 на карту» → "
+            '[{"kind":"transfer","amount":100000,"from":"lent","to":"card","note":"Абдулазиз"}]\n'
+            "«взял кредит в Хамкорбанке 3 млн» → "
+            '[{"kind":"transfer","amount":3000000,"from":"debt","to":"card","note":"Хамкорбанк"}]\n'
+            "«дал в долг 200000» → "
+            '[{"kind":"transfer","amount":200000,"from":"card","to":"lent","note":null}]\n'
             "«снял с карты 300000» → "
             '[{"kind":"transfer","amount":300000,"from":"card","to":"cash","note":"снял наличные"}]\n\n'
             f"Сообщение: {raw_text}"

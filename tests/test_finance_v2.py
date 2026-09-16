@@ -80,3 +80,24 @@ def test_top_operations_puts_latest_first():
 def test_build_xlsx_smoke():
     data = export_mod.build_xlsx(ENTRIES, period=fin.period_for("month", date(2026, 9, 15)), lang="ru", currency="UZS")
     assert data[:2] == b"PK" and len(data) > 3000
+
+
+def test_debt_ledger_by_person():
+    entries = [
+        _e("expense", 200_000, "[x:card>lent] Абдулазиз", "2026-09-01", "transfer"),
+        _e("expense", 50_000, "[x:lent>cash] абдулазиз", "2026-09-02", "transfer"),
+        _e("expense", 500_000, "[x:debt>card] Хамкорбанк", "2026-09-02", "transfer"),
+        _e("expense", 100_000, "[x:card>debt] хамкорбанк", "2026-09-03", "transfer"),
+        _e("expense", 70_000, "[x:card>lent]", "2026-09-03", "transfer"),
+    ]
+    ledger = fin.debt_ledger(entries, {"lent_base": 0, "debt_base": 1_000_000})
+    assert ledger["lent"] == [("Абдулазиз", 150_000.0), ("", 70_000.0)]
+    assert ledger["debt"] == [("", 1_000_000.0), ("Хамкорбанк", 400_000.0)]
+
+
+def test_needs_counterparty():
+    assert fin.needs_counterparty({"kind": "transfer", "from_bucket": "card", "to_bucket": "lent", "note": "дал в долг"})
+    assert fin.needs_counterparty({"kind": "transfer", "from_bucket": "debt", "to_bucket": "card", "note": None})
+    assert not fin.needs_counterparty({"kind": "transfer", "from_bucket": "card", "to_bucket": "lent", "note": "Алишер"})
+    assert not fin.needs_counterparty({"kind": "transfer", "from_bucket": "card", "to_bucket": "cash", "note": None})
+    assert not fin.needs_counterparty({"kind": "expense", "amount": 1, "note": None})

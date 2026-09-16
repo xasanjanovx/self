@@ -19,7 +19,6 @@ from .. import ui
 from ..context import ai, db
 from ..keyboards import (
     amount_category_keyboard,
-    finance_add_confirm_keyboard,
     finance_budgets_keyboard,
     finance_recurring_detail_keyboard,
     finance_recurring_keyboard,
@@ -446,13 +445,9 @@ async def handle_receipt_photo(message: Message, state: FSMContext, profile: Pro
         await render_panel(message, state, profile, notice=profile.tr("Не нашёл сумму на фото. Если это еда — открой раздел «Питание» и отправь фото там.",
                                                                         "Rasmda summa topilmadi. Agar bu ovqat bo'lsa — «Oziqlanish» bo'limida yuboring."))
         return
-    from .finance import _format_pending
+    from .finance import ask_confirm
 
-    snap = await services.finance_snapshot(profile)
-    await state.set_state(BotStates.waiting_finance_confirm)
-    await state.update_data(pending_finance_items=[item], pending_finance_source="receipt")
-    await show_panel(message, state, _format_pending([item], profile, snap.balances) + "\n<i>" + profile.tr("📷 Распознано с чека", "📷 Chekdan aniqlandi") + "</i>",
-                     finance_add_confirm_keyboard(profile.lang))
+    await ask_confirm(message, state, profile, [item], source="receipt")
 
 
 # ------------------------------------------------------------------ excel export

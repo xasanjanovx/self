@@ -40,6 +40,9 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_settings": "Настройки",
         "menu_refresh": "Обновить",
         "finance_budgets": "Лимиты",
+        "finance_debts": "Долги",
+        "finance_note": "Комментарий",
+        "skip": "Пропустить",
         "finance_recurring": "Регулярные",
         "finance_excel": "Excel",
         "brief_morning_on": "🌅 Утро 08:00: вкл",
@@ -100,6 +103,9 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_settings": "Sozlamalar",
         "menu_refresh": "Yangilash",
         "finance_budgets": "Limitlar",
+        "finance_debts": "Qarzlar",
+        "finance_note": "Izoh",
+        "skip": "O'tkazib yuborish",
         "finance_recurring": "Doimiy to'lovlar",
         "finance_excel": "Excel",
         "brief_morning_on": "🌅 Ertalab 08:00: yoq",
@@ -340,11 +346,29 @@ def finance_panel_keyboard(quick_labels: list[str], lang: str = "ru") -> InlineK
     )
     rows.append(
         [
+            _btn(t(lang, "finance_debts"), "finance:debts", icon=_pe.id_for("🤝")),
             _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS),
-            _back(lang),
         ]
     )
+    rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_debts_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "finance_ops"), "finance:ops:month", icon=_pe.ID_REPORT), _btn(t(lang, "finance_settings"), "finance:settings", icon=_pe.ID_SETTINGS)],
+            [_back(lang, "menu:finance")],
+        ]
+    )
+
+
+def debt_note_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "skip"), "finance:debt_note_skip", icon=_pe.id_for("⏭")), _btn(t(lang, "cancel"), "menu:finance", style="danger", icon=_pe.ID_CANCEL)],
+        ]
+    )
 
 
 def finance_budgets_keyboard(limits: dict[str, float], lang: str = "ru") -> InlineKeyboardMarkup:
@@ -486,8 +510,10 @@ def finance_operations_keyboard(entries: list[dict], period: str, lang: str = "r
 
 def finance_detail_keyboard(entry_id: str | int, lang: str = "ru", *, transfer: bool = False) -> InlineKeyboardMarkup:
     rows = []
+    edit_row = [_btn(t(lang, "finance_note"), f"finance:note:{entry_id}", style="primary", icon=_pe.ID_EDIT)]
     if not transfer:
-        rows.append([_btn(t(lang, "finance_category"), f"finance:cat:{entry_id}", style="primary", icon=_pe.ID_EDIT)])
+        edit_row.append(_btn(t(lang, "finance_category"), f"finance:cat:{entry_id}", style="primary", icon=_pe.id_for("🏷")))
+    rows.append(edit_row)
     rows.append([_btn(t(lang, "delete"), f"finance:ask_del:{entry_id}", style="danger", icon=_pe.ID_DELETE)])
     rows.append([_back(lang, "finance:ops:day")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

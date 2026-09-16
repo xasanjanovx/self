@@ -16,5 +16,7 @@ class BotStates(StatesGroup):
     waiting_finance_amount_category = State()
     waiting_budget_value = State()
     waiting_recurring_input = State()
+    waiting_debt_note = State()
+    waiting_note_value = State()
     # вакансии
     waiting_vacancy_input = State()

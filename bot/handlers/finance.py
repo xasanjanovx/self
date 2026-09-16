@@ -213,10 +213,91 @@ async def handle_finance_text(
         )
         return
 
+    await ask_confirm(message, state, profile, items, source=source)
+
+
+async def ask_confirm(message: Message, state: FSMContext, profile: Profile, items: list[dict[str, Any]], *, source: str) -> None:
+    """Перед подтверждением: если это долг без имени — спросить «кому / у кого»."""
+    missing = [i for i, item in enumerate(items) if fin.needs_counterparty(item)]
+    if missing:
+        from ..keyboards import debt_note_keyboard
+
+        idx = missing[0]
+        item = items[idx]
+        await state.set_state(BotStates.waiting_debt_note)
+        await state.update_data(pending_finance_items=items, pending_finance_source=source, pending_debt_idx=idx)
+        route = fin.transfer_label(item.get("from_bucket", "card"), item.get("to_bucket", "cash"), profile.lang)
+        text = ui.join(
+            ui.title("🤝", "Qarz" if profile.lang == "uz" else "Долг"),
+            ui.card(f"<b>{fin.fmt_money(float(item.get('amount') or 0))} {profile.currency}</b>", [route]),
+            f"<b>{fin.debt_direction_label(item, profile.lang)}</b>\n" + ui.muted(
+                "Ism yoki bank nomini yozing — «Qarzlar» bo'limida odamlar bo'yicha ko'rinadi." if profile.lang == "uz"
+                else "Напиши имя или банк — в разделе «Долги» будет видно по людям."),
+        )
+        await show_panel(message, state, text, debt_note_keyboard(profile.lang))
+        return
     snap = await services.finance_snapshot(profile)
     await state.set_state(BotStates.waiting_finance_confirm)
     await state.update_data(pending_finance_items=items, pending_finance_source=source)
     await show_panel(message, state, _format_pending(items, profile, snap.balances), finance_add_confirm_keyboard(profile.lang))
+
+
+@router.message(BotStates.waiting_debt_note, F.text)
+async def msg_debt_note(message: Message, state: FSMContext) -> None:
+    profile = await get_profile(message.from_user)
+    name = (message.text or "").strip(" .,;:—-")[:60]
+    await safe_delete(message)
+    data = await state.get_data()
+    items = data.get("pending_finance_items") or []
+    idx = int(data.get("pending_debt_idx") or 0)
+    if not items or name.startswith("/"):
+        await render_panel(message, state, profile)
+        return
+    if 0 <= idx < len(items):
+        items[idx]["note"] = name or None
+        # то же имя — для остальных долговых операций без имени в этом сообщении
+        for other in items[idx + 1:]:
+            if fin.needs_counterparty(other):
+                other["note"] = name or None
+                break
+    await ask_confirm(message, state, profile, items, source=str(data.get("pending_finance_source") or "text"))
+
+
+@router.message(BotStates.waiting_debt_note)
+async def msg_debt_note_other(message: Message, state: FSMContext) -> None:
+    await safe_delete(message)
+
+
+@router.callback_query(F.data == "finance:debt_note_skip")
+async def cb_debt_note_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    data = await state.get_data()
+    items = data.get("pending_finance_items") or []
+    idx = int(data.get("pending_debt_idx") or 0)
+    if 0 <= idx < len(items):
+        items[idx]["note"] = "—"
+    if callback.message is None:
+        return
+    snap = await services.finance_snapshot(profile)
+    missing = [i for i, item in enumerate(items) if fin.needs_counterparty(item) and str(item.get("note")) != "—"]
+    if missing:
+        await state.update_data(pending_finance_items=items, pending_debt_idx=missing[0])
+        item = items[missing[0]]
+        route = fin.transfer_label(item.get("from_bucket", "card"), item.get("to_bucket", "cash"), profile.lang)
+        from ..keyboards import debt_note_keyboard
+
+        await safe_edit(callback, ui.join(ui.title("🤝", "Qarz" if profile.lang == "uz" else "Долг"),
+                                          ui.card(f"<b>{fin.fmt_money(float(item.get('amount') or 0))} {profile.currency}</b>", [route]),
+                                          f"<b>{fin.debt_direction_label(item, profile.lang)}</b>"), debt_note_keyboard(profile.lang))
+        return
+    for item in items:
+        if str(item.get("note")) == "—":
+            item["note"] = None
+    await state.set_state(BotStates.waiting_finance_confirm)
+    await state.update_data(pending_finance_items=items)
+    await remember_panel(callback, state)
+    await safe_edit(callback, _format_pending(items, profile, snap.balances), finance_add_confirm_keyboard(profile.lang))
 
 
 async def handle_finance_voice(message: Message, state: FSMContext, profile: Profile, transcript: str | None = None) -> None:
@@ -394,11 +475,14 @@ def _detail_text(entry: dict[str, Any], profile: Profile) -> str:
     transfer = fin.transfer_from_note(entry.get("note"))
     if transfer:
         route = fin.transfer_label(transfer[0], transfer[1], lang)
+        is_debt = "lent" in transfer or "debt" in transfer
+        who = ("Kim" if lang == "uz" else "Кто / кому") if is_debt else ("Izoh" if lang == "uz" else "Заметка")
+        title = ("Qarz" if lang == "uz" else "Долг") if is_debt else ("O'tkazma" if lang == "uz" else "Перевод")
         return (
-            f"💰 <b>{'O`tkazma' if lang == 'uz' else 'Перевод'}</b>\n\n"
+            f"💰 <b>{title}</b>\n\n"
             f"{'Yo`nalish' if lang == 'uz' else 'Маршрут'}: <b>{route}</b>\n"
             f"{'Summa' if lang == 'uz' else 'Сумма'}: <b>{fin.fmt_money(amount)} {cur}</b>\n"
-            f"{'Sana' if lang == 'uz' else 'Дата'}: {day}\n{'Izoh' if lang == 'uz' else 'Заметка'}: {note}"
+            f"{'Sana' if lang == 'uz' else 'Дата'}: {day}\n{who}: <b>{note}</b>"
         )
     kind = entry.get("entry_type")
     sign = "+" if kind == "income" else "−"
@@ -482,6 +566,98 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         logger.exception("Finance delete failed")
     await render_panel(callback, state, profile)
+
+
+# ------------------------------------------------------------------ debts by person
+def build_debts_text(profile: Profile, ledger: dict[str, list[tuple[str, float]]], balances: dict[str, float]) -> str:
+    lang, cur = profile.lang, profile.currency
+    uz = lang == "uz"
+    header = ui.title("🤝", "Qarzlar" if uz else "Долги")
+
+    def _lines(items: list[tuple[str, float]], *, positive_word: str, negative_word: str) -> list[str]:
+        out = []
+        for name, amount in items:
+            label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
+            if amount >= 0:
+                out.append(f"• {label} — <b>{fin.fmt_money(amount)}</b>")
+            else:
+                out.append(f"• {label} — <b>{fin.fmt_money(abs(amount))}</b> {ui.muted(negative_word)}")
+        return out or [ui.muted("yo'q" if uz else "нет")]
+
+    lent_lines = _lines(ledger["lent"], positive_word="", negative_word="ortiqcha qaytardi" if uz else "вернул больше")
+    debt_lines = _lines(ledger["debt"], positive_word="", negative_word="ortiqcha to'landi" if uz else "переплата")
+    lent_card = ui.card(f"<b>🤝 {'Menga qarz' if uz else 'Мне должны'}</b> · {fin.fmt_money(balances['lent'])} {cur}", lent_lines)
+    debt_card = ui.card(f"<b>📌 {'Mening qarzim' if uz else 'Я должен'}</b> · {fin.fmt_money(balances['debt'])} {cur}", debt_lines)
+    hint = ui.muted(
+        "«Abdulazizga 200000 qarz berdim» · «akamdan 500000 qarz oldim» · «Abdulaziz 100000 qaytardi» · «Hamkorbankdan 3 mln kredit oldim»"
+        if uz else
+        "«дал Абдулазизу 200000» · «взял у брата 500000» · «Абдулазиз вернул 100000» · «взял кредит в Хамкорбанке 3 млн»"
+    )
+    return ui.join(header, lent_card, debt_card, hint)
+
+
+@router.callback_query(F.data == "finance:debts")
+async def cb_debts(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    snap = await services.finance_snapshot(profile)
+    ledger = fin.debt_ledger(snap.entries, snap.settings)
+    await state.set_state(BotStates.waiting_finance_input)
+    await remember_panel(callback, state)
+    from ..keyboards import finance_debts_keyboard
+
+    await safe_edit(callback, build_debts_text(profile, ledger, snap.balances), finance_debts_keyboard(profile.lang))
+
+
+# ------------------------------------------------------------------ edit note
+@router.callback_query(F.data.startswith("finance:note:"))
+async def cb_note_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    profile = await get_profile(callback.from_user)
+    entry_id = callback.data.split(":")[-1]
+    entry = await db.get_finance_entry(profile.telegram_id, entry_id)
+    if not entry:
+        return
+    await state.set_state(BotStates.waiting_note_value)
+    await state.update_data(note_entry_id=entry_id)
+    await remember_panel(callback, state)
+    current = fin.clean_note(entry.get("note")) or "—"
+    await safe_edit(
+        callback,
+        _detail_text(entry, profile) + "\n\n" + profile.tr(f"Текущий комментарий: <b>{h(current)}</b>\nНапиши новый (имя, за что, кому):",
+                                                           f"Hozirgi izoh: <b>{h(current)}</b>\nYangisini yozing:"),
+        finance_setting_input_keyboard(profile.lang),
+    )
+
+
+@router.message(BotStates.waiting_note_value, F.text)
+async def msg_note_value(message: Message, state: FSMContext) -> None:
+    profile = await get_profile(message.from_user)
+    text = (message.text or "").strip()[:80]
+    await safe_delete(message)
+    entry_id = str((await state.get_data()).get("note_entry_id") or "")
+    entry = await db.get_finance_entry(profile.telegram_id, entry_id) if entry_id else None
+    if not entry or text.startswith("/"):
+        await render_panel(message, state, profile)
+        return
+    transfer = fin.transfer_from_note(entry.get("note"))
+    if transfer:
+        new_note = fin.note_with_transfer(text, transfer[0], transfer[1])
+    else:
+        new_note = fin.note_with_bucket(text, fin.bucket_from_note(entry.get("note")))
+    await db.update_finance_entry(profile.telegram_id, entry_id, {"note": new_note})
+    from .. import cache
+
+    cache.invalidate(profile.telegram_id, "fin_entries")
+    entry["note"] = new_note
+    await state.set_state(BotStates.waiting_finance_input)
+    await show_panel(message, state, _detail_text(entry, profile) + "\n\n✅", finance_detail_keyboard(entry_id, profile.lang, transfer=bool(transfer)))
+
+
+@router.message(BotStates.waiting_note_value)
+async def msg_note_other(message: Message, state: FSMContext) -> None:
+    await safe_delete(message)
+    await render_panel(message, state, await get_profile(message.from_user))
 
 
 # ------------------------------------------------------------------ stats

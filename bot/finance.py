@@ -606,3 +606,83 @@ def recurring_due_today(items: list[dict[str, Any]], today: date) -> list[dict[s
         if recurring_due_day(int(item.get("day_of_month") or 1), today.year, today.month) <= today.day:
             due.append(item)
     return due
+
+
+# ------------------------------------------------------------ debts by person
+def debt_ledger(entries: list[dict[str, Any]], settings: dict[str, float] | None = None) -> dict[str, list[tuple[str, float]]]:
+    """Кто мне должен и кому должен я — по именам из комментария операции.
+    Возвращает {"lent": [(имя, сумма)], "debt": [(имя, сумма)]}, отсортировано по сумме."""
+    lent: dict[str, float] = {}
+    debt: dict[str, float] = {}
+    names: dict[str, str] = {}
+
+    def _key(note: str | None) -> str:
+        name = (clean_note(note) or "").strip(" .,;:—-")
+        if not name:
+            return ""
+        k = name.casefold()
+        names.setdefault(k, name)
+        return k
+
+    for row in entries:
+        transfer = transfer_from_note(row.get("note"))
+        amount = float(row.get("amount") or 0)
+        if amount <= 0:
+            continue
+        if transfer:
+            src, dst = transfer
+            k = _key(row.get("note"))
+            if dst == "lent" and src in {"card", "cash"}:
+                lent[k] = lent.get(k, 0.0) + amount
+            elif src == "lent" and dst in {"card", "cash"}:
+                lent[k] = lent.get(k, 0.0) - amount
+            elif src == "debt" and dst in {"card", "cash"}:
+                debt[k] = debt.get(k, 0.0) + amount
+            elif dst == "debt" and src in {"card", "cash"}:
+                debt[k] = debt.get(k, 0.0) - amount
+            continue
+        bucket = bucket_from_note(row.get("note"))
+        if bucket == "lent":
+            k = _key(row.get("note"))
+            lent[k] = lent.get(k, 0.0) + (amount if row.get("entry_type") == "expense" else -amount)
+        elif bucket == "debt":
+            k = _key(row.get("note"))
+            debt[k] = debt.get(k, 0.0) + (amount if row.get("entry_type") == "income" else -amount)
+
+    if settings:
+        if float(settings.get("lent_base") or 0):
+            lent[""] = lent.get("", 0.0) + float(settings["lent_base"])
+        if float(settings.get("debt_base") or 0):
+            debt[""] = debt.get("", 0.0) + float(settings["debt_base"])
+
+    def _shape(d: dict[str, float]) -> list[tuple[str, float]]:
+        items = [(names.get(k, ""), v) for k, v in d.items() if abs(v) >= 1]
+        return sorted(items, key=lambda x: -abs(x[1]))
+
+    return {"lent": _shape(lent), "debt": _shape(debt)}
+
+
+def needs_counterparty(item: dict[str, Any]) -> bool:
+    """Операция с долгом без указания «кому/у кого»."""
+    if item.get("kind") != "transfer":
+        return False
+    if "lent" not in (item.get("from_bucket"), item.get("to_bucket")) and "debt" not in (item.get("from_bucket"), item.get("to_bucket")):
+        return False
+    note = str(item.get("note") or "").strip().casefold()
+    generic = {"", "долг", "qarz", "дал в долг", "взял в долг", "вернул долг", "возврат долга", "снял наличные", "qarzga berdim", "qarz oldim",
+               "вернул", "qaytardi", "займ", "кредит", "kredit", "дал", "взял"}
+    return note in generic or len(note) < 2
+
+
+def debt_direction_label(item: dict[str, Any], lang: str = "ru") -> str:
+    src, dst = item.get("from_bucket"), item.get("to_bucket")
+    uz = lang == "uz"
+    if dst == "lent":
+        return "Kimga qarz berdingiz?" if uz else "Кому дал в долг?"
+    if src == "lent":
+        return "Kim qaytardi?" if uz else "Кто вернул долг?"
+    if src == "debt":
+        return "Kimdan qarz oldingiz? (odam yoki bank)" if uz else "У кого взял в долг? (человек или банк)"
+    if dst == "debt":
+        return "Kimga qaytardingiz?" if uz else "Кому вернул долг?"
+    return "Izoh?" if uz else "Комментарий?"
