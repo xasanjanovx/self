@@ -84,8 +84,8 @@ async def safe_delete(message: Message | None) -> None:
         return
     try:
         await message.delete()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("delete user message failed: %s", exc)
 
 
 async def safe_edit(callback: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:

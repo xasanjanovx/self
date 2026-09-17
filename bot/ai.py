@@ -297,6 +297,8 @@ class AIService:
             "если размер не указан). Если размер не назван, но есть слова «наелся», «до отвала», «сытый», «большая», "
             "«много», «to'ydim», «katta» — считай большую порцию (в 1.5–2 раза больше типичной); «немного», «чуть», "
             "«ozgina» — маленькую. meal_desc — короткое название по-русски. "
+            "confidence (0..1) — уверенность, что блюдо распознано верно и порция понятна: ≥0.9 если блюдо названо ясно "
+            "и объём указан или типичен; ≤0.7 если блюдо неясное, состав/размер неизвестны или это не еда. "
             "Верни только JSON-массив объектов: "
             '[{"meal_desc":"...","calories":0,"protein":0,"fat":0,"carbs":0,"confidence":0.0}]\n\n'
             f"Текст: {raw_text}"
@@ -374,6 +376,8 @@ class AIService:
             "kind: \"expense\" | \"income\" | \"transfer\".\n"
             "Поля expense/income: amount (число), category (ключ из списка ниже), note (коротко, 1–4 слова, о чём операция), account (card|cash; по умолчанию card).\n"
             "Поля transfer: amount, from, to (card|cash|lent|debt), note.\n"
+            "У КАЖДОЙ операции поле confidence (0..1): насколько ты уверен в сумме, типе и категории. "
+            "≥0.9 — только если сумма однозначна и категория очевидна; если сумма двусмысленна, категория угадана или фраза неполная — ≤0.7.\n"
             "ДЛЯ ДОЛГОВ (lent/debt) note = ТОЛЬКО имя человека или название банка/организации, кому дал / у кого взял / кто вернул "
             "(например \"Абдулазиз\", \"брат\", \"Хамкорбанк\"). Без слов «долг», «дал», «взял». Если имя не названо — note = null.\n\n"
             f"Категории расходов (category): {cats.prompt_catalog('expense')}.\n"
@@ -391,12 +395,12 @@ class AIService:
             "В сообщении может быть несколько операций — верни все по порядку. Если ничего нет — [].\n\n"
             "Примеры:\n"
             "«такси 25000, обед 40к» → "
-            '[{"kind":"expense","amount":25000,"category":"transport","note":"такси","account":"card"},'
-            '{"kind":"expense","amount":40000,"category":"food","note":"обед","account":"card"}]\n'
+            '[{"kind":"expense","amount":25000,"category":"transport","note":"такси","account":"card","confidence":0.97},'
+            '{"kind":"expense","amount":40000,"category":"food","note":"обед","account":"card","confidence":0.95}]\n'
             "«зарплата 5 млн на карту» → "
-            '[{"kind":"income","amount":5000000,"category":"salary","note":"зарплата","account":"card"}]\n'
+            '[{"kind":"income","amount":5000000,"category":"salary","note":"зарплата","account":"card","confidence":0.97}]\n'
             "«дал Алишеру в долг 200000 наличными» → "
-            '[{"kind":"transfer","amount":200000,"from":"cash","to":"lent","note":"Алишер"}]\n'
+            '[{"kind":"transfer","amount":200000,"from":"cash","to":"lent","note":"Алишер","confidence":0.95}]\n'
             "«взял в долг у брата 500000» → "
             '[{"kind":"transfer","amount":500000,"from":"debt","to":"card","note":"брат"}]\n'
             "«Абдулазиз вернул 100000 на карту» → "
@@ -433,12 +437,13 @@ class AIService:
                 continue
             kind = str(item.get("kind") or "expense").strip().lower()
             note = _clean_text(item.get("note"), max_len=80)
+            confidence = max(0.0, min(1.0, _num(item.get("confidence")) or 0.0))
             if kind == "transfer":
                 src = str(item.get("from") or "").strip().lower()
                 dst = str(item.get("to") or "").strip().lower()
                 if src not in buckets or dst not in buckets or src == dst:
                     continue
-                result.append({"kind": "transfer", "amount": amount, "from_bucket": src, "to_bucket": dst, "note": note})
+                result.append({"kind": "transfer", "amount": amount, "from_bucket": src, "to_bucket": dst, "note": note, "confidence": confidence})
                 continue
             entry_type = "income" if kind == "income" else "expense"
             account = str(item.get("account") or "card").strip().lower()
@@ -451,6 +456,7 @@ class AIService:
                     "category": cats.normalize(item.get("category"), entry_type, note=f"{note or ''} {raw_text}"),
                     "note": note,
                     "bucket": account,
+                    "confidence": confidence,
                 }
             )
         return result

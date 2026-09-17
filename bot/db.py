@@ -224,7 +224,7 @@ class Database:
         }
         await self._table("nutrition_profiles").upsert(payload, on_conflict="telegram_id").execute()
 
-    async def add_calorie_logs(self, telegram_id: int, items: list[dict[str, Any]]) -> None:
+    async def add_calorie_logs(self, telegram_id: int, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payload = [
             {
                 "telegram_id": telegram_id,
@@ -241,8 +241,9 @@ class Database:
             if str(item.get("meal_desc") or "").strip()
         ]
         if not payload:
-            return
-        await self._table("calorie_logs").insert(payload).execute()
+            return []
+        res = await self._table("calorie_logs").insert(payload).execute()
+        return list(res.data or [])
 
     async def list_calorie_logs_between(
         self, telegram_id: int, start_utc: datetime, end_utc: datetime, *, columns: str = CALORIE_COLUMNS

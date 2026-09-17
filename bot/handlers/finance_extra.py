@@ -400,11 +400,9 @@ async def cb_amount_category(callback: CallbackQuery, state: FSMContext) -> None
         await render_panel(callback, state, profile)
         return
     await answer_now(callback, f"{cats.label(key, profile.lang)} ✅")
-    await services.add_finance_entries(
-        profile, [{"kind": kind, "amount": amount, "category": key, "note": None, "bucket": data.get("pending_bucket") or "card"}], source="quick"
-    )
-    notice = await budget_notice(profile, {key})
-    await render_panel(callback, state, profile, notice=notice)
+    from .finance import commit_items
+
+    await commit_items(callback, state, profile, [{"kind": kind, "amount": amount, "category": key, "note": None, "bucket": data.get("pending_bucket") or "card"}], source="quick")
 
 
 @router.message(BotStates.waiting_finance_amount_category)

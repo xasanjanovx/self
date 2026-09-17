@@ -277,13 +277,62 @@ def _format_pending(items: list[dict[str, Any]], lang: str, transcript: str | No
     return "\n".join(lines)
 
 
+AUTO_SAVE_CONFIDENCE = 0.9
+
+
+async def capture_origin(state: FSMContext) -> None:
+    """Откуда пришла еда: панель «Питание» (panel) или чат/главный экран (menu)."""
+    current = await state.get_state()
+    data = await state.get_data()
+    if current == BotStates.waiting_calorie_input.state:
+        origin = "panel"
+    elif current == BotStates.waiting_calorie_confirm.state and data.get("pending_origin"):
+        origin = str(data["pending_origin"])
+    else:
+        origin = "menu"
+    await state.update_data(pending_origin=origin)
+
+
+async def commit_items(target: Message | CallbackQuery, state: FSMContext, profile: Profile, items: list[dict[str, Any]]) -> None:
+    """Записать в дневник, показать «✅ Записано …» с отменой и вернуться на исходный экран."""
+    from .. import cache
+
+    try:
+        inserted = await services.add_calorie_logs(profile.telegram_id, items)
+    except Exception as exc:
+        logger.exception("Calorie save failed")
+        text = f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}"
+        if isinstance(target, CallbackQuery):
+            await safe_edit(target, text, back_to_menu_keyboard(profile.lang))
+        else:
+            await show_panel(target, state, text, back_to_menu_keyboard(profile.lang))
+        return
+    uz = profile.lang == "uz"
+    parts = [f"{h(i.get('meal_desc') or '-')} — {int(float(i.get('calories') or 0))} {'kkal' if uz else 'ккал'}" for i in items]
+    notice = f"{pe.CHECK} <b>{'Yozildi' if uz else 'Записано'}:</b> " + " · ".join(parts)
+    ids = [r.get("id") for r in (inserted or []) if r.get("id") is not None]
+    if ids:
+        cache.put(profile.telegram_id, ("undo",), {"type": "delete_calorie_logs", "ids": ids}, 1800)
+    origin = str((await state.get_data()).get("pending_origin") or "menu")
+    if origin == "panel":
+        await render_panel(target, state, profile, notice=notice)
+        return
+    from .menu import render_dashboard
+
+    await render_dashboard(target, state, profile, notice=notice, undo=bool(ids))
+
+
 async def _ask_confirm(message: Message, state: FSMContext, profile: Profile, items: list[dict[str, Any]], *, transcript: str | None = None) -> None:
+    if items and all(float(i.get("confidence") or 0) >= AUTO_SAVE_CONFIDENCE for i in items):
+        await commit_items(message, state, profile, items)
+        return
     await state.set_state(BotStates.waiting_calorie_confirm)
     await state.update_data(pending_calorie_items=items)
     await show_panel(message, state, _format_pending(items, profile.lang, transcript), calorie_confirm_keyboard(profile.lang))
 
 
 async def handle_photo(message: Message, state: FSMContext, profile: Profile) -> None:
+    await capture_origin(state)
     await show_progress(message, profile.tr("⏳ Анализирую фото…", "⏳ Rasm tahlil qilinmoqda…"))
     hint = message_text(message) or None
     try:
@@ -305,6 +354,7 @@ async def handle_text(
         await safe_delete(message)
         await render_panel(message, state, profile, notice=profile.tr("Нужен текст блюда или фото.", "Taom matni yoki rasmi kerak."))
         return
+    await capture_origin(state)
     if reroute:
         from .agent import handle_command, looks_like_command
 
@@ -390,19 +440,19 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await answer_now(callback, profile.tr("Нет данных для сохранения", "Saqlash uchun ma'lumot yo'q"), alert=True)
         return
     await answer_now(callback, profile.tr("Сохранено ✅", "Saqlandi ✅"))
-    try:
-        await services.add_calorie_logs(profile.telegram_id, items)
-    except Exception as exc:
-        logger.exception("Calorie save failed")
-        await safe_edit(callback, f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}", back_to_menu_keyboard(profile.lang))
-        return
-    await render_panel(callback, state, profile)
+    await commit_items(callback, state, profile, items)
 
 
 @router.callback_query(F.data == "calorie:cancel")
 async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
-    await render_panel(callback, state, await get_profile(callback.from_user))
+    profile = await get_profile(callback.from_user)
+    if str((await state.get_data()).get("pending_origin") or "menu") == "panel":
+        await render_panel(callback, state, profile)
+        return
+    from .menu import render_dashboard
+
+    await render_dashboard(callback, state, profile)
 
 
 @router.callback_query(F.data.startswith("calorie:quick:"))

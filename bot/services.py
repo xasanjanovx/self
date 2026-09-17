@@ -151,10 +151,11 @@ async def top_meals(profile: Profile) -> list[dict[str, Any]]:
     return nutri.top_meals(logs, limit=8)
 
 
-async def add_calorie_logs(uid: int, items: list[dict[str, Any]]) -> None:
-    await db.add_calorie_logs(uid, items)
+async def add_calorie_logs(uid: int, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    inserted = await db.add_calorie_logs(uid, items)
     cache.invalidate(uid, "kcal_today")
     cache.invalidate(uid, "kcal_days")
+    return inserted
 
 
 async def delete_calorie_log(uid: int, log_id: str | int) -> None:

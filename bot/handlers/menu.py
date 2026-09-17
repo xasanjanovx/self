@@ -100,6 +100,27 @@ async def build_dashboard(profile: Profile) -> str:
     return ui.join(header, finance_card, nutrition_card, hint)
 
 
+async def render_dashboard(
+    target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None, undo: bool = False
+) -> None:
+    """Главный экран после записи из чата: дашборд + короткая заметка «✅ Записано…»."""
+    await state.clear()
+    try:
+        text = await build_dashboard(profile)
+    except Exception:
+        logger.exception("build_dashboard failed")
+        text = profile.tr("Не удалось загрузить данные. Попробуй ещё раз.", "Ma'lumot yuklanmadi. Qayta urining.")
+    if notice:
+        text += f"\n\n{notice}"
+    kb = main_menu_keyboard(profile.lang, undo=undo)
+    if isinstance(target, CallbackQuery):
+        if target.message is not None:
+            await screen_mod.drop_chart(target.bot, target.message.chat.id)
+        await safe_edit(target, text, kb)
+    else:
+        await screen_mod.show_screen(target.bot, target.chat.id, text, kb)
+
+
 async def send_main_menu(message: Message, profile: Profile, *, force_new: bool = False) -> None:
     try:
         text = await build_dashboard(profile)

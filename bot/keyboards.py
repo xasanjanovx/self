@@ -181,10 +181,11 @@ def _back(lang: str, target: str = "menu:open") -> InlineKeyboardButton:
 
 
 # ------------------------------------------------------------------ main
-def main_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboardMarkup:
     P = "primary"
+    undo_rows = [[_btn("↩️ " + ("Bekor qilish" if lang == "uz" else "Отменить запись"), "agent:undo", icon=_pe.id_for("🔄"))]] if undo else []
     return InlineKeyboardMarkup(
-        inline_keyboard=[
+        inline_keyboard=undo_rows + [
             [
                 _btn(t(lang, "menu_nutrition"), "menu:calorie", style=P, icon=_pe.ID_NUTRITION),
                 _btn(t(lang, "menu_finance"), "menu:finance", style=P, icon=_pe.ID_FINANCE),

@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from .. import categories as cats
+from .. import cache
 from .. import charts as charts_mod
 from .. import emoji as pe
 from .. import finance as fin
@@ -187,6 +188,7 @@ async def handle_finance_text(
         await safe_delete(message)
         await render_panel(message, state, profile, notice=profile.tr("Нужен текст или голос.", "Matn yoki ovoz kerak."))
         return
+    await capture_origin(state)
     if reroute:
         from .agent import handle_command, looks_like_command
 
@@ -209,6 +211,7 @@ async def handle_finance_text(
 
     old_debt = fin.parse_existing_debt(raw_text)
     items = [old_debt] if old_debt else fin.parse_local(raw_text)
+    confident = items is not None  # локальный парсер срабатывает только на однозначных фразах
     if items is None:
         await show_progress(message, profile.tr("⏳ Разбираю операцию…", "⏳ Operatsiya tahlil qilinmoqda…"))
         try:
@@ -217,6 +220,7 @@ async def handle_finance_text(
             logger.exception("parse_finance_ops failed")
             await render_panel(message, state, profile, notice=f"{pe.CROSS} {profile.tr('Ошибка разбора', 'Tahlil xatosi')}: {h(str(exc)[:120])}")
             return
+        confident = bool(items) and all(float(i.get("confidence") or 0) >= AUTO_SAVE_CONFIDENCE for i in items)
     if not items:
         await render_panel(
             message, state, profile,
@@ -224,11 +228,85 @@ async def handle_finance_text(
         )
         return
 
-    await ask_confirm(message, state, profile, items, source=source)
+    await ask_confirm(message, state, profile, items, source=source, confident=confident)
 
 
-async def ask_confirm(message: Message, state: FSMContext, profile: Profile, items: list[dict[str, Any]], *, source: str) -> None:
-    """Перед подтверждением: если это долг без имени — спросить «кому / у кого»."""
+AUTO_SAVE_CONFIDENCE = 0.9
+_FLOW_STATES = {
+    BotStates.waiting_finance_confirm.state, BotStates.waiting_debt_note.state, BotStates.waiting_finance_amount_category.state,
+}
+
+
+async def capture_origin(state: FSMContext) -> None:
+    """Откуда пришла операция: из панели «Финансы» (panel) или из чата/главного экрана (menu).
+    После сохранения возвращаемся туда же."""
+    current = await state.get_state()
+    data = await state.get_data()
+    if current == BotStates.waiting_finance_input.state:
+        origin = "panel"
+    elif current in _FLOW_STATES and data.get("pending_origin"):
+        origin = str(data["pending_origin"])
+    else:
+        origin = "menu"
+    await state.update_data(pending_origin=origin)
+
+
+def _saved_line(item: dict[str, Any], lang: str) -> str:
+    amount = float(item.get("amount") or 0)
+    note = h(str(item.get("note") or "").strip())
+    note_part = f" · {note}" if note else ""
+    if item.get("kind") == "transfer":
+        if item.get("from_bucket") == fin.INIT:
+            what = ("menga qarz" if lang == "uz" else "мне должны") if item.get("to_bucket") == "lent" else ("men qarzdorman" if lang == "uz" else "я должен")
+            return f"🕘 {fin.fmt_money(amount)} · {what}{note_part}"
+        return f"↔ {fin.fmt_money(amount)} · {fin.transfer_label(item.get('from_bucket', 'card'), item.get('to_bucket', 'cash'), lang)}{note_part}"
+    sign = "+" if item.get("kind") == "income" else "−"
+    return f"{sign}{fin.fmt_money(amount)} · {cats.label(item.get('category'), lang)}{note_part}"
+
+
+async def finish_save(
+    target: Message | CallbackQuery, state: FSMContext, profile: Profile, items: list[dict[str, Any]], inserted: list[dict[str, Any]] | None
+) -> None:
+    """После записи: заметка «✅ Записано …», кнопка отмены, возврат на экран, откуда пришли."""
+    from .finance_extra import budget_notice
+
+    lang = profile.lang
+    notice = f"{pe.CHECK} <b>{'Yozildi' if lang == 'uz' else 'Записано'}:</b> " + " · ".join(_saved_line(i, lang) for i in items)
+    keys = {str(i.get("category")) for i in items if i.get("kind") == "expense"}
+    warn = await budget_notice(profile, keys) if keys else None
+    if warn:
+        notice += f"\n{warn}"
+    ids = [r.get("id") for r in (inserted or []) if r.get("id") is not None]
+    if ids:
+        cache.put(profile.telegram_id, ("undo",), {"type": "delete_entries", "ids": ids}, 1800)
+    origin = str((await state.get_data()).get("pending_origin") or "menu")
+    if origin == "panel":
+        await render_panel(target, state, profile, notice=notice)
+        return
+    from .menu import render_dashboard
+
+    await render_dashboard(target, state, profile, notice=notice, undo=bool(ids))
+
+
+async def commit_items(target: Message | CallbackQuery, state: FSMContext, profile: Profile, items: list[dict[str, Any]], *, source: str) -> None:
+    try:
+        inserted = await services.add_finance_entries(profile, items, source=source)
+    except Exception as exc:
+        logger.exception("Finance save failed")
+        text = f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}"
+        if isinstance(target, CallbackQuery):
+            await safe_edit(target, text, back_to_menu_keyboard(profile.lang))
+        else:
+            await show_panel(target, state, text, back_to_menu_keyboard(profile.lang))
+        return
+    await finish_save(target, state, profile, items, inserted)
+
+
+async def ask_confirm(
+    message: Message, state: FSMContext, profile: Profile, items: list[dict[str, Any]], *, source: str, confident: bool = False
+) -> None:
+    """Перед подтверждением: если это долг без имени — спросить «кому / у кого».
+    Если разбор уверенный (локальный парсер или AI ≥ 90%) и баланс не уходит в минус — сохраняем сразу."""
     missing = [i for i, item in enumerate(items) if fin.needs_counterparty(item)]
     if missing:
         from ..keyboards import debt_note_keyboard
@@ -236,7 +314,7 @@ async def ask_confirm(message: Message, state: FSMContext, profile: Profile, ite
         idx = missing[0]
         item = items[idx]
         await state.set_state(BotStates.waiting_debt_note)
-        await state.update_data(pending_finance_items=items, pending_finance_source=source, pending_debt_idx=idx)
+        await state.update_data(pending_finance_items=items, pending_finance_source=source, pending_debt_idx=idx, pending_confident=confident)
         route = fin.transfer_label(item.get("from_bucket", "card"), item.get("to_bucket", "cash"), profile.lang)
         text = ui.join(
             ui.title("🤝", "Qarz" if profile.lang == "uz" else "Долг"),
@@ -248,6 +326,11 @@ async def ask_confirm(message: Message, state: FSMContext, profile: Profile, ite
         await show_panel(message, state, text, debt_note_keyboard(profile.lang))
         return
     snap = await services.finance_snapshot(profile)
+    if confident:
+        after = fin.apply_pending(snap.balances, items)
+        if all(after[b] >= 0 for b in ("card", "cash")):
+            await commit_items(message, state, profile, items, source=source)
+            return
     await state.set_state(BotStates.waiting_finance_confirm)
     await state.update_data(pending_finance_items=items, pending_finance_source=source)
     await show_panel(message, state, _format_pending(items, profile, snap.balances), finance_add_confirm_keyboard(profile.lang))
@@ -271,7 +354,7 @@ async def msg_debt_note(message: Message, state: FSMContext) -> None:
             if fin.needs_counterparty(other):
                 other["note"] = name or None
                 break
-    await ask_confirm(message, state, profile, items, source=str(data.get("pending_finance_source") or "text"))
+    await ask_confirm(message, state, profile, items, source=str(data.get("pending_finance_source") or "text"), confident=bool(data.get("pending_confident")))
 
 
 @router.message(BotStates.waiting_debt_note)
@@ -380,24 +463,19 @@ async def cb_add_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await answer_now(callback, profile.tr("Нет данных для сохранения", "Saqlash uchun ma'lumot yo'q"), alert=True)
         return
     await answer_now(callback, profile.tr("Сохранено ✅", "Saqlandi ✅"))
-    try:
-        await services.add_finance_entries(profile, items, source=str(data.get("pending_finance_source") or "text"))
-    except Exception as exc:
-        logger.exception("Finance save failed")
-        await safe_edit(callback, f"{pe.CROSS} {profile.tr('Ошибка сохранения', 'Saqlash xatosi')}: {h(str(exc)[:120])}", back_to_menu_keyboard(profile.lang))
-        return
-    from .finance_extra import budget_notice
-
-    keys = {str(i.get("category")) for i in items if i.get("kind") == "expense"}
-    notice = await budget_notice(profile, keys) if keys else None
-    await render_panel(callback, state, profile, notice=notice)
+    await commit_items(callback, state, profile, items, source=str(data.get("pending_finance_source") or "text"))
 
 
 @router.callback_query(F.data == "finance:add_cancel")
 async def cb_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     profile = await get_profile(callback.from_user)
     await answer_now(callback, profile.tr("Отменено", "Bekor qilindi"))
-    await render_panel(callback, state, profile)
+    if str((await state.get_data()).get("pending_origin") or "menu") == "panel":
+        await render_panel(callback, state, profile)
+        return
+    from .menu import render_dashboard
+
+    await render_dashboard(callback, state, profile)
 
 
 @router.callback_query(F.data.startswith("finance:quick:"))

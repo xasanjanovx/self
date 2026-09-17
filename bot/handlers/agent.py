@@ -563,6 +563,12 @@ async def cb_undo(callback: CallbackQuery, state: FSMContext) -> None:
         elif kind == "restore_fields":
             await db.update_finance_entry(uid, payload["entry_id"], payload["fields"])
             cache.invalidate(uid, "fin_entries")
+        elif kind == "delete_entries":
+            await db.delete_finance_entries(uid, payload.get("ids") or [])
+            cache.invalidate(uid, "fin_entries")
+        elif kind == "delete_calorie_logs":
+            for log_id in payload.get("ids") or []:
+                await services.delete_calorie_log(uid, log_id)
         elif kind == "restore_debt":
             settings_ = dict(await services.finance_settings(uid))
             settings_[f"{payload['side']}_base"] = payload.get("base") or 0.0
