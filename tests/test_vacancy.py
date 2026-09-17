@@ -53,6 +53,8 @@ def test_finalize_fills_phone_telegram_prompt():
     assert data.phone == "+998 90 123 45 67 | +998 93 555 66 77"
     assert data.telegram == "@hr_ish"
     assert data.image_prompt and "16:9" in data.image_prompt
+    assert "«Call-center operatori kerak»" in data.image_prompt
+    assert "Manzil: " in data.image_prompt and "Toshkent»" in data.image_prompt and "Tushlik bepul" in data.image_prompt and "@ishdasiz" in data.image_prompt
 
 
 def test_format_post_contains_sections_and_no_generic_bucket():

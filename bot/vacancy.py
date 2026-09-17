@@ -167,17 +167,68 @@ def finalize(data: VacancyData, raw_text: str) -> VacancyData:
         data.intro = None
     if not data.headline:
         data.headline = "Xodim kerak"
-    if not data.image_prompt:
-        data.image_prompt = default_image_prompt(data.headline)
+    data.image_prompt = build_image_prompt(data, scene=data.image_prompt)
     return data
 
 
-def default_image_prompt(headline: str) -> str:
-    return (
-        f"Сочная, привлекательная фотореалистичная сцена по теме вакансии «{headline}»: "
-        "современное рабочее место, довольные сотрудники за работой, тёплый естественный свет, яркие живые цвета. "
-        "Горизонтальный формат 16:9, фотореалистично, без текста и логотипов."
+def region_name(tag: str) -> str:
+    """#TOSHKENT → Toshkent, #QORAQALPOGISTON → Qoraqalpog'iston."""
+    names = {
+        "#TOSHKENT": "Toshkent", "#ANDIJON": "Andijon", "#SAMARQAND": "Samarqand", "#BUXORO": "Buxoro",
+        "#FARGONA": "Farg'ona", "#NAMANGAN": "Namangan", "#JIZZAX": "Jizzax", "#SIRDARYO": "Sirdaryo",
+        "#QASHQADARYO": "Qashqadaryo", "#SURXONDARYO": "Surxondaryo", "#XORAZM": "Xorazm", "#NAVOIY": "Navoiy",
+        "#QORAQALPOGISTON": "Qoraqalpog'iston",
+    }
+    return names.get(str(tag or "").upper(), str(tag or "").lstrip("#").capitalize())
+
+
+def _short(value: str | None, limit: int = 60) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" .;,")
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def build_image_prompt(data: VacancyData, *, scene: str | None = None) -> str:
+    """Промпт для ChatGPT: сочный баннер 16:9 с ключевыми данными вакансии на узбекском (латиница).
+    Текст для картинки берём из уже готового поста, поэтому он всегда на узбекском и без ошибок."""
+    scene = _short(scene, 400) or (
+        f"реалистичная сцена по теме вакансии «{data.headline}»: современное рабочее место, "
+        "довольные сотрудники за работой, тёплый свет, яркие живые цвета"
     )
+    facts: list[str] = []
+    if data.salary:
+        facts.append(f"«Maosh: {_short(data.salary)}»")
+    if data.schedule:
+        facts.append(f"«Ish vaqti: {_short(data.schedule)}»")
+    region = region_name(data.region_tag)
+    addr = _short(data.address, 50)
+    place = addr if addr and region.lower() in addr.lower() else f"{addr}, {region}" if addr else region
+    facts.append(f"«Manzil: {place}»")
+    for benefit in data.benefits[:2]:
+        short = _short(benefit, 45)
+        if short:
+            facts.append(f"«✓ {short}»")
+    if data.phone:
+        facts.append(f"«Tel: {data.phone.split('|')[0].strip()}»")
+    bullets = "\n".join(f"• {f}" for f in facts)
+    return (
+        "Создай яркий рекламный баннер-превью для вакансии в Telegram. Горизонтальный формат 16:9.\n"
+        f"Сцена (фон): {scene}.\n"
+        "Дизайн: сочный, современный, премиальный — насыщенные контрастные цвета, градиенты, крупная чёткая типографика, "
+        "текст на плашках/карточках поверх фото, лёгкие 3D и глянцевые элементы, чтобы хотелось нажать.\n"
+        "На баннере ОБЯЗАТЕЛЬНО такой текст на узбекском языке (латиница) — пиши ровно как указано, без перевода "
+        "и без ошибок в буквах o‘, g‘, sh, ch:\n"
+        f"• Заголовок крупно: «{_short(data.headline, 70)}»\n"
+        f"{bullets}\n"
+        "• Внизу мелко: «@ishdasiz»\n"
+        "Другого текста и логотипов не добавляй."
+    )
+
+
+def default_image_prompt(headline: str) -> str:
+    return build_image_prompt(VacancyData(headline=headline, intro=None, company=None, region_tag=VACANCY_DEFAULT_REGION_TAG,
+                                          address=None, salary=None, schedule=None))
 
 
 # ------------------------------------------------------------------ render
