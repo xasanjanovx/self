@@ -42,31 +42,40 @@ async def build_dashboard(profile: Profile) -> str:
 
     header = f"{pe.HELLO} <b>{'Assalomu alaykum' if uz else 'Привет'}, {name}</b>\n{pe.CALENDAR} {ui.human_date(today, lang)}"
 
-    # --- финансы
+    # --- финансы: на телефоне узкий экран, поэтому одна строка = один факт
     fin_lines = [
-        f"💼 <b>{fin.fmt_money(snap.wallet)} {cur}</b>   💳 {fin.fmt_money(b['card'])} · 💵 {fin.fmt_money(b['cash'])}",
-        f"{'Bugun' if uz else 'Сегодня'}: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}   {pe.INCOME} {fin.fmt_money(snap.today_income)}",
+        f"💼 <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
+        f"💳 {'Karta' if uz else 'Карта'} {fin.fmt_money(b['card'])}",
+        f"💵 {'Naqd' if uz else 'Наличные'} {fin.fmt_money(b['cash'])}",
+        "",
     ]
+    today_parts = []
+    if snap.today_expense:
+        today_parts.append(f"{pe.EXPENSE} {fin.fmt_money(snap.today_expense)}")
+    if snap.today_income:
+        today_parts.append(f"{pe.INCOME} {fin.fmt_money(snap.today_income)}")
+    fin_lines.append(f"{'Bugun' if uz else 'Сегодня'}: " + (" · ".join(today_parts) if today_parts else ("hali yo'q" if uz else "пока ничего")))
     if month:
         change = month.expense_change_pct()
         change_text = f" ({'▲' if change > 0 else '▼'}{abs(change):.0f}%)" if change is not None else ""
-        top = f" · {cats.label(month.by_category[0][0], lang)} {fin.fmt_money(month.by_category[0][1])}" if month.by_category else ""
-        fin_lines.append(f"{fin.period_title(month.period, lang)}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}{top}")
+        fin_lines.append(f"{'Oy' if uz else 'Месяц'}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}")
+        if month.by_category:
+            fin_lines.append(f"{'Eng ko`p' if uz else 'Больше всего'}: {cats.label(month.by_category[0][0], lang)} {fin.fmt_money(month.by_category[0][1])}")
     if recurring:
         remaining, pending = fin.recurring_remaining(recurring, today)
         if remaining > 0:
-            fin_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)} → {'erkin' if uz else 'свободно'} <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
+            fin_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)}")
+            fin_lines.append(f"{'Erkin' if uz else 'Свободно'}: <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
     if limits and month:
-        for b in fin.budget_statuses(month, limits)[:4]:
-            flag = "🚫 " if b.ratio >= 1 else "⚠️ " if b.ratio >= 0.8 else "🎯 "
-            fin_lines.append(f"{flag}{cats.label(b.category, lang)} {fin.fmt_money(b.spent)} / {fin.fmt_money(b.limit)} {fin.bar(min(b.ratio, 1.0), 8)} {ui.pct(b.ratio)}")
-    debts = []
+        for st in fin.budget_statuses(month, limits)[:4]:
+            flag = "🚫" if st.ratio >= 1 else "⚠️" if st.ratio >= 0.8 else "🎯"
+            fin_lines.append(f"{flag} {cats.label(st.category, lang)}: {fin.fmt_money(st.spent)} / {fin.fmt_money(st.limit)} · {ui.pct(st.ratio)}")
+    if b["lent"] or b["debt"]:
+        fin_lines.append("")
     if b["lent"]:
-        debts.append(f"🤝 {'menga qarz' if uz else 'мне должны'} {fin.fmt_money(b['lent'])}")
+        fin_lines.append(f"🤝 {'Menga qarz' if uz else 'Мне должны'}: {fin.fmt_money(b['lent'])}")
     if b["debt"]:
-        debts.append(f"📌 {'mening qarzim' if uz else 'я должен'} {fin.fmt_money(b['debt'])}")
-    if debts:
-        fin_lines.append(" · ".join(debts))
+        fin_lines.append(f"📌 {'Mening qarzim' if uz else 'Я должен'}: {fin.fmt_money(b['debt'])}")
     finance_card = ui.card(f"{pe.WALLET} <b>{'Moliya' if uz else 'Финансы'}</b>", fin_lines)
 
     # --- питание
@@ -78,7 +87,8 @@ async def build_dashboard(profile: Profile) -> str:
         left = max(0.0, target - eaten)
         nut_lines = [
             f"{fin.bar(ratio, 12)} {ui.pct(ratio)}",
-            f"<b>{int(eaten)}</b> / {int(target)} {'kkal' if uz else 'ккал'} · {'qoldi' if uz else 'осталось'} {int(left)} · {int(totals['meals'])} {'qabul' if uz else 'приёмов'}",
+            f"<b>{int(eaten)}</b> / {int(target)} {'kkal' if uz else 'ккал'}",
+            f"{'Qoldi' if uz else 'Осталось'}: {int(left)} · {int(totals['meals'])} {'qabul' if uz else 'приёмов'}",
         ]
         if logs:
             nut_lines.append(ui.muted(" · ".join(h(str(r.get("meal_desc") or "")[:22]) for r in logs[:4])))
