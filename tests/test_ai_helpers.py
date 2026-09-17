@@ -27,12 +27,12 @@ def test_extract_json_raises_when_absent():
 
 
 def test_extract_phones_uz_number():
-    assert extract_phones("звоните +998 90 123 45 67") == ["+998 90 123 45 67"]
+    assert extract_phones("звоните +998901234567") == ["+998901234567"]
 
 
 def test_extract_phones_dedupes_and_ignores_salary():
-    text = "Maosh 5 000 000 so'm. Tel: 901234567, +998901234567, +998 93 555 66 77"
-    assert extract_phones(text) == ["+998 90 123 45 67", "+998 93 555 66 77"]
+    text = "Maosh 5 000 000 so'm. Tel: 901234567, +998901234567, +998935556677"
+    assert extract_phones(text) == ["+998901234567", "+998935556677"]
 
 
 def test_extract_phones_none_for_garbage():

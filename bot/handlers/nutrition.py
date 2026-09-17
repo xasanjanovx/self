@@ -98,8 +98,9 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
     day_lines = [
         goal_line,
         f"{fin.bar(ratio, 12)} {ui.pct(ratio)}",
-        f"<b>{int(eaten)}</b> / {int(target)} {unit} · {'qoldi' if uz else 'осталось'} <b>{int(left)}</b>",
-        f"🥩 {int(totals['protein'])}/{int(p)}   🧈 {int(totals['fat'])}/{int(f_)}   🍞 {int(totals['carbs'])}/{int(c)} g",
+        f"<b>{int(eaten)}</b> / {int(target)} {unit}",
+        f"{'Qoldi' if uz else 'Осталось'}: <b>{int(left)}</b> {unit}",
+        f"🥩 {int(totals['protein'])}/{int(p)} · 🧈 {int(totals['fat'])}/{int(f_)} · 🍞 {int(totals['carbs'])}/{int(c)} g",
     ]
     day_card = ui.card(f"<b>{'Bugun' if uz else 'Сегодня'}</b>", day_lines)
 

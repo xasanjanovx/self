@@ -470,8 +470,23 @@ def parse_local(text: str) -> list[dict[str, Any]] | None:
         category = cats.guess_from_text(rest_clean, kind)
         if category is None:
             return None
-        result.append({"kind": kind, "amount": amount, "category": category, "note": rest_clean[:60], "bucket": bucket})
+        result.append({"kind": kind, "amount": amount, "category": category, "note": tidy_note(rest_clean, category), "bucket": bucket})
     return result or None
+
+
+_NOTE_PREP_RE = re.compile(r"^(за|на|для|с|в|по|uchun|ga)\s+", re.IGNORECASE)
+
+
+def tidy_note(note: str, category: str) -> str | None:
+    """«за транспорт» при категории «Транспорт» — лишний комментарий, убираем."""
+    text = _NOTE_PREP_RE.sub("", str(note or "").strip()).strip(" ,.;:-")
+    if not text:
+        return None
+    cat = cats.get(category)
+    low = text.casefold()
+    if cat and (low in {cat.ru.casefold(), cat.uz.casefold()} or low in {a.strip().casefold() for a in cat.aliases}):
+        return None
+    return text[:60]
 
 
 def looks_like_finance(text: str) -> bool:

@@ -63,38 +63,49 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
 
     header = ui.title(pe.WALLET, "Moliya" if uz else "Финансы", ui.human_date(snap.today, lang))
 
+    # Телефон узкий: одна строка — один факт, без склеек через «·».
     balance_lines = [
         f"💼 <b>{fin.fmt_money(snap.wallet)} {cur}</b>",
-        f"💳 {'Karta' if uz else 'Карта'} {fin.fmt_money(b['card'])}   💵 {'Naqd' if uz else 'Наличные'} {fin.fmt_money(b['cash'])}",
+        f"💳 {'Karta' if uz else 'Карта'}: {fin.fmt_money(b['card'])}",
+        f"💵 {'Naqd' if uz else 'Наличные'}: {fin.fmt_money(b['cash'])}",
     ]
     if recurring:
         remaining, pending = fin.recurring_remaining(recurring, snap.today)
         if remaining > 0:
             nxt = pending[0]
             nxt_day = fin.recurring_due_day(int(nxt.get("day_of_month") or 1), snap.today.year, snap.today.month)
-            balance_lines.append(
-                f"🔁 {'To`lovlar' if uz else 'Обязательные'}: {fin.fmt_money(remaining)} → {'erkin' if uz else 'свободно'} <b>{fin.fmt_money(snap.wallet - remaining)}</b>"
-            )
-            balance_lines.append(ui.muted(f"{'keyingi' if uz else 'ближайший'}: {nxt_day:02d} · {h(nxt.get('title'))} · {fin.fmt_money(float(nxt.get('amount') or 0))}"))
+            balance_lines.append("")
+            balance_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)}")
+            balance_lines.append(f"{'Erkin' if uz else 'Свободно'}: <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
+            balance_lines.append(ui.muted(f"{'keyingi' if uz else 'ближайший'} {nxt_day:02d}: {h(nxt.get('title'))} {fin.fmt_money(float(nxt.get('amount') or 0))}"))
     debts = []
     if b["lent"]:
-        debts.append(f"🤝 {'Qarzga berilgan' if uz else 'Дал в долг'} {fin.fmt_money(b['lent'])}")
+        debts.append(f"🤝 {'Menga qarz' if uz else 'Мне должны'}: {fin.fmt_money(b['lent'])}")
     if b["debt"]:
-        debts.append(f"📌 {'Mening qarzim' if uz else 'Мои долги'} {fin.fmt_money(b['debt'])}")
+        debts.append(f"📌 {'Mening qarzim' if uz else 'Я должен'}: {fin.fmt_money(b['debt'])}")
     credit = float(snap.settings.get("monthly_credit_payment") or 0)
     if credit:
-        debts.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'} {fin.fmt_money(credit)}")
+        debts.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'}: {fin.fmt_money(credit)}")
     if debts:
-        balance_lines.append(" · ".join(debts))
+        balance_lines.append("")
+        balance_lines.extend(debts)
     balance_card = ui.card(f"<b>{'Balans' if uz else 'Баланс'}</b>", balance_lines)
 
-    period_lines = [f"{'Bugun' if uz else 'Сегодня'}: {pe.EXPENSE} {fin.fmt_money(snap.today_expense)}   {pe.INCOME} {fin.fmt_money(snap.today_income)}"]
+    today_parts = []
+    if snap.today_expense:
+        today_parts.append(f"{pe.EXPENSE} {fin.fmt_money(snap.today_expense)}")
+    if snap.today_income:
+        today_parts.append(f"{pe.INCOME} {fin.fmt_money(snap.today_income)}")
+    period_lines = [f"{'Bugun' if uz else 'Сегодня'}: " + (" · ".join(today_parts) if today_parts else ("hali yo'q" if uz else "пока ничего"))]
     if month:
         change = month.expense_change_pct()
         change_text = f" ({'▲' if change > 0 else '▼'}{abs(change):.0f}%)" if change is not None else ""
-        period_lines.append(f"{fin.period_title(month.period, lang)}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}   {pe.INCOME} {fin.fmt_money(month.income)}")
+        period_lines.append(f"{'Oy' if uz else 'Месяц'}: {pe.EXPENSE} {fin.fmt_money(month.expense)}{change_text}")
+        if month.income:
+            period_lines.append(f"{'Kirim' if uz else 'Доход'}: {pe.INCOME} {fin.fmt_money(month.income)}")
         if month.by_category:
-            period_lines.append(ui.muted(" · ".join(f"{cats.label(k, lang)} {fin.fmt_money(a)}" for k, a, _ in month.by_category[:3])))
+            period_lines.append("")
+            period_lines.extend(f"{cats.label(k, lang)}: {fin.fmt_money(a)}" for k, a, _ in month.by_category[:3])
         if limits:
             period_lines.extend(fin.budget_warnings(fin.budget_statuses(month, limits), lang=lang)[:3])
     period_card = ui.card(f"<b>{'Xarajatlar' if uz else 'Расходы'}</b>", period_lines)
@@ -104,9 +115,9 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
         today_card = ui.card(f"<b>{'Bugungi operatsiyalar' if uz else 'Операции сегодня'}</b>", ["• " + _entry_line(row, lang) for row in snap.today_entries[:6]])
 
     hint = ui.muted(
-        "✍️ <code>taksi 25000</code> · <code>oylik 5 mln</code> · <code>qarzga berdim 200000</code> · <code>25000</code>"
+        "✍️ <code>taksi 25000</code> · <code>oylik 5 mln</code>\n<code>qarzga berdim 200000</code> · <code>25000</code>"
         if uz else
-        "✍️ <code>такси 25000</code> · <code>зарплата 5 млн</code> · <code>дал в долг 200000</code> · просто <code>25000</code>"
+        "✍️ <code>такси 25000</code> · <code>зарплата 5 млн</code>\n<code>дал в долг 200000</code> · просто <code>25000</code>"
     )
     return ui.join(header, balance_card, period_card, today_card, hint), labels, snap.quick
 
@@ -726,13 +737,16 @@ def build_stats_text(stats: fin.Stats, profile: Profile, limits: dict[str, float
         change_text = ""
     net = stats.net
     total_lines = [
-        f"{pe.EXPENSE} {'Chiqim' if uz else 'Расход'}: <b>{fin.fmt_money(stats.expense)} {cur}</b>{change_text}",
+        f"{pe.EXPENSE} {'Chiqim' if uz else 'Расход'}: <b>{fin.fmt_money(stats.expense)} {cur}</b>",
         f"{pe.INCOME} {'Kirim' if uz else 'Доход'}: <b>{fin.fmt_money(stats.income)} {cur}</b>",
         f"{'Natija' if uz else 'Итог'}: <b>{ui.signed(net, fin.fmt_money)} {cur}</b>",
     ]
+    if change_text:
+        total_lines.append(change_text.strip())
     if stats.expense > 0 and p.days > 1:
-        total_lines.append(ui.muted(f"{'kuniga o`rtacha' if uz else 'в среднем в день'} {fin.fmt_money(stats.avg_per_day)}"
-                                    + (f" · {'eng qimmat kun' if uz else 'максимум'} {stats.top_day[0].strftime('%d.%m')} — {fin.fmt_money(stats.top_day[1])}" if stats.top_day else "")))
+        total_lines.append(ui.muted(f"{'kuniga o`rtacha' if uz else 'в среднем в день'}: {fin.fmt_money(stats.avg_per_day)}"))
+        if stats.top_day:
+            total_lines.append(ui.muted(f"{'eng qimmat kun' if uz else 'максимум'} {stats.top_day[0].strftime('%d.%m')}: {fin.fmt_money(stats.top_day[1])}"))
     if stats.transfers:
         total_lines.append(ui.muted(f"{'o`tkazmalar' if uz else 'переводов между счетами'}: {stats.transfers}"))
     totals_card = ui.card(f"<b>{'Jami' if uz else 'Итого'}</b>", total_lines)
@@ -752,11 +766,12 @@ def build_stats_text(stats: fin.Stats, profile: Profile, limits: dict[str, float
             if limit:
                 ratio = amount / limit
                 flag = "🚫 " if ratio >= 1 else "⚠️ " if ratio >= 0.8 else ""
-                cat_lines.append(f"{flag}{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> / {fin.fmt_money(limit)} · {ui.pct(ratio)}{delta}")
-                cat_lines.append(f"{fin.bar(min(ratio, 1.0), 12)} <i>×{count}</i>")
+                cat_lines.append(f"{flag}{cats.label(key, lang)}{delta}")
+                cat_lines.append(f"<b>{fin.fmt_money(amount)}</b> / {fin.fmt_money(limit)} · {ui.pct(ratio)}")
+                cat_lines.append(f"{fin.bar(min(ratio, 1.0), 10)} <i>×{count}</i>")
             else:
-                cat_lines.append(f"{cats.label(key, lang)} — <b>{fin.fmt_money(amount)}</b> · {ui.pct(share)}{delta}")
-                cat_lines.append(f"{fin.bar(share, 12)} <i>×{count}</i>")
+                cat_lines.append(f"{cats.label(key, lang)}{delta}")
+                cat_lines.append(f"<b>{fin.fmt_money(amount)}</b> · {ui.pct(share)} {fin.bar(share, 8)} <i>×{count}</i>")
     else:
         cat_lines.append(ui.muted("Bu davrda xarajatlar yo'q." if uz else "Расходов за период нет."))
     cats_card = ui.card(f"<b>{'Xarajatlar toifalar bo`yicha' if uz else 'Расходы по категориям'}</b>", cat_lines)

@@ -102,10 +102,11 @@ def extract_phones(text: str) -> list[str]:
 
 
 def _pretty_phone(raw: str) -> str:
+    """Номер слитно: +998901234567 (так удобнее копировать и нажимать)."""
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 12 and digits.startswith("998"):
-        return f"+998 {digits[3:5]} {digits[5:8]} {digits[8:10]} {digits[10:12]}"
-    return raw
+        return f"+{digits}"
+    return re.sub(r"[\s().-]", "", raw)
 
 
 def username_from_telegram(value: str | None) -> str | None:
@@ -189,41 +190,41 @@ def _short(value: str | None, limit: int = 60) -> str | None:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def build_image_prompt(data: VacancyData, *, scene: str | None = None) -> str:
+PROMPT_MAX_LEN = 256  # лимит текста кнопки «копировать» в Telegram
+
+
+def build_image_prompt(data: VacancyData, *, scene: str | None = None, max_len: int = PROMPT_MAX_LEN) -> str:
     """Промпт для ChatGPT: сочный баннер 16:9 с ключевыми данными вакансии на узбекском (латиница).
-    Текст для картинки берём из уже готового поста, поэтому он всегда на узбекском и без ошибок."""
-    scene = _short(scene, 400) or (
-        f"реалистичная сцена по теме вакансии «{data.headline}»: современное рабочее место, "
-        "довольные сотрудники за работой, тёплый свет, яркие живые цвета"
-    )
-    facts: list[str] = []
-    if data.salary:
-        facts.append(f"«Maosh: {_short(data.salary)}»")
-    if data.schedule:
-        facts.append(f"«Ish vaqti: {_short(data.schedule)}»")
+    Компактный (≤256 символов), чтобы уходить кнопкой «копировать». Данные добавляются по приоритету,
+    пока влезают: заголовок → зарплата → место → график → плюс → фон."""
     region = region_name(data.region_tag)
-    addr = _short(data.address, 50)
+    addr = _short(data.address, 28)
     place = addr if addr and region.lower() in addr.lower() else f"{addr}, {region}" if addr else region
-    facts.append(f"«Manzil: {place}»")
-    for benefit in data.benefits[:2]:
-        short = _short(benefit, 45)
-        if short:
-            facts.append(f"«✓ {short}»")
-    if data.phone:
-        facts.append(f"«Tel: {data.phone.split('|')[0].strip()}»")
-    bullets = "\n".join(f"• {f}" for f in facts)
-    return (
-        "Создай яркий рекламный баннер-превью для вакансии в Telegram. Горизонтальный формат 16:9.\n"
-        f"Сцена (фон): {scene}.\n"
-        "Дизайн: сочный, современный, премиальный — насыщенные контрастные цвета, градиенты, крупная чёткая типографика, "
-        "текст на плашках/карточках поверх фото, лёгкие 3D и глянцевые элементы, чтобы хотелось нажать.\n"
-        "На баннере ОБЯЗАТЕЛЬНО такой текст на узбекском языке (латиница) — пиши ровно как указано, без перевода "
-        "и без ошибок в буквах o‘, g‘, sh, ch:\n"
-        f"• Заголовок крупно: «{_short(data.headline, 70)}»\n"
-        f"{bullets}\n"
-        "• Внизу мелко: «@ishdasiz»\n"
-        "Другого текста и логотипов не добавляй."
-    )
+    head = "Сочный премиальный баннер 16:9 для вакансии. Текст на узбекской латинице, ровно так: "
+    tail = " Без другого текста."
+    optional: list[str] = []
+    if data.salary:
+        optional.append(f"Maosh: {_short(data.salary, 34)}")
+    optional.append(place)
+    if data.schedule:
+        optional.append(f"Ish vaqti: {_short(data.schedule, 30)}")
+    if data.benefits:
+        optional.append(f"✓ {_short(data.benefits[0], 30)}")
+    scene_part = f" Фон: {_short(scene, 45)}." if scene else ""
+
+    def _compose(parts: list[str], with_scene: bool) -> str:
+        return head + " · ".join(parts + ["@ishdasiz"]) + "." + (scene_part if with_scene else "") + tail
+
+    chosen: list[str] = [f"«{_short(data.headline, 60)}»"]
+    for part in optional:
+        if len(_compose(chosen + [part], False)) <= max_len:
+            chosen.append(part)
+    text = _compose(chosen, True)  # фон — самый низкий приоритет: добавляем, только если влезает
+    if len(text) > max_len:
+        text = _compose(chosen, False)
+    if len(text) > max_len:  # крайний случай — режем хвост
+        text = text[: max_len - 1] + "…"
+    return text
 
 
 def default_image_prompt(headline: str) -> str:
@@ -290,16 +291,6 @@ def format_vacancy_post(data: VacancyData, *, premium: bool = True, footer_url: 
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines)
-
-
-def format_image_prompt_message(prompt: str, lang: str = "ru") -> str:
-    title = "🖼 <b>Rasm uchun prompt (ChatGPT)</b>" if lang == "uz" else "🖼 <b>Промпт для картинки (ChatGPT)</b>"
-    hint = (
-        "Bosib nusxalang va ChatGPT/DALL·E ga yuboring."
-        if lang == "uz"
-        else "Нажми на текст — скопируется. Вставь в ChatGPT."
-    )
-    return f"{title}\n<code>{_h(prompt)}</code>\n<i>{hint}</i>"
 
 
 # ------------------------------------------------------------------ detect

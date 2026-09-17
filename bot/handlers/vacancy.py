@@ -9,7 +9,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from .. import emoji as pe
-from .. import screen as screen_mod
 from .. import vacancy as vac
 from ..context import ai, settings
 from ..keyboards import vacancy_channel_keyboard, vacancy_panel_keyboard, vacancy_result_keyboard
@@ -95,11 +94,8 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
 
     await state.set_state(BotStates.waiting_vacancy_input)
     await state.update_data(vacancy_post=post, vacancy_contact_url=contact_url, vacancy_photo_id=photo_id, vacancy_prompt=data.image_prompt)
-    kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel))
+    kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel), image_prompt=data.image_prompt)
     await show_panel(message, state, post, kb)
-    # Промпт — отдельным сообщением снизу (в пост канала он не попадает).
-    if data.image_prompt:
-        await screen_mod.send_ephemeral(message.bot, message.chat.id, vac.format_image_prompt_message(data.image_prompt, lang), keep_previous=True)
 
 
 @router.message(BotStates.waiting_vacancy_input)
@@ -127,18 +123,6 @@ async def msg_input(message: Message, state: FSMContext) -> None:
         )
         return
     await process_vacancy(message, state, profile, raw_text)
-
-
-@router.callback_query(F.data == "vacancy:prompt")
-async def cb_prompt(callback: CallbackQuery, state: FSMContext) -> None:
-    profile = await get_profile(callback.from_user)
-    prompt = (await state.get_data()).get("vacancy_prompt")
-    if not prompt:
-        await answer_now(callback, profile.tr("Промпта нет — сначала оформи вакансию", "Prompt yo'q — avval vakansiyani tayyorlang"), alert=True)
-        return
-    await answer_now(callback)
-    if callback.message is not None:
-        await screen_mod.send_ephemeral(callback.bot, callback.message.chat.id, vac.format_image_prompt_message(prompt, profile.lang))
 
 
 @router.callback_query(F.data == "vacancy:publish")

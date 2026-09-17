@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import categories as cats
 from . import emoji as _pe
@@ -16,13 +16,16 @@ def _btn(
     url: str | None = None,
     style: str | None = None,
     icon: str | None = None,
+    copy_text: str | None = None,
 ) -> InlineKeyboardButton:
-    """Кнопка с опциональным цветом (Bot API 9.4) и премиум-иконкой."""
+    """Кнопка с опциональным цветом (Bot API 9.4) и премиум-иконкой. copy_text — «копировать» (≤256 символов)."""
     kwargs: dict[str, object] = {"text": text[:64]}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
     if url is not None:
         kwargs["url"] = url
+    if copy_text:
+        kwargs["copy_text"] = CopyTextButton(text=copy_text[:256])
     if style:
         kwargs["style"] = style
     if icon:
@@ -80,7 +83,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "vacancy_contact": "📩 Связаться",
         "vacancy_publish": "Опубликовать в канал",
         "vacancy_copy": "Чистая копия для канала",
-        "vacancy_prompt": "Промпт для картинки",
+        "vacancy_prompt": "Скопировать промпт для фото",
         "goal_loss": "Снижение",
         "goal_maintain": "Поддержание",
         "goal_gain": "Набор",
@@ -143,7 +146,7 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "vacancy_contact": "📩 Bog'lanish",
         "vacancy_publish": "Kanalga joylash",
         "vacancy_copy": "Kanal uchun toza nusxa",
-        "vacancy_prompt": "Rasm uchun prompt",
+        "vacancy_prompt": "Rasm promptini nusxalash",
         "goal_loss": "Kamayish",
         "goal_maintain": "Ushlab turish",
         "goal_gain": "Vazn yig'ish",
@@ -562,18 +565,17 @@ def vacancy_result_keyboard(
     contact_url: str | None = None,
     *,
     can_publish: bool = False,
+    image_prompt: str | None = None,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if contact_url:
         rows.append([_btn(t(lang, "vacancy_contact"), url=contact_url, style="primary")])
     publish_key = "vacancy_publish" if can_publish else "vacancy_copy"
     rows.append([_btn(t(lang, publish_key), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
-    rows.append(
-        [
-            _btn(t(lang, "vacancy_prompt"), "vacancy:prompt", icon=_pe.ID_STAR),
-            _btn(t(lang, "vacancy_again"), "vacancy:again", icon=_pe.ID_REFRESH),
-        ]
-    )
+    if image_prompt:
+        # нажатие копирует промпт в буфер — сам текст в чате не показываем
+        rows.append([_btn(t(lang, "vacancy_prompt"), icon=_pe.ID_STAR, copy_text=image_prompt)])
+    rows.append([_btn(t(lang, "vacancy_again"), "vacancy:again", icon=_pe.ID_REFRESH)])
     rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
