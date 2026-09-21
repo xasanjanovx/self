@@ -942,16 +942,19 @@ async def _get_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         "brief_morning": us.get("brief_morning"), "brief_morning_time": us.get("brief_morning_time"),
         "brief_evening": us.get("brief_evening"), "brief_evening_time": us.get("brief_evening_time"),
         "report_enabled": prefs.get("enabled"), "report_frequency": prefs.get("frequency"),
+        "proactive": us.get("proactive", True), "voice_reply": us.get("voice_reply", True),
         "language": ctx.profile.lang, "timezone": ctx.profile.tz_name, "currency": ctx.profile.currency,
     }
 
 
 @tool(
     "update_settings",
-    "Изменить настройки: сводки (вкл/выкл, время), авто-отчёт (вкл/выкл, weekly|monthly), язык (ru|uz).",
+    "Изменить настройки: сводки (вкл/выкл, время), авто-отчёт (вкл/выкл, weekly|monthly), проактивные подсказки, голосовые ответы, язык (ru|uz).",
     {
         "brief_morning": P("BOOLEAN", "утренняя сводка"), "brief_morning_time": P("STRING", "HH:MM"),
         "brief_evening": P("BOOLEAN", "вечерняя сводка"), "brief_evening_time": P("STRING", "HH:MM"),
+        "proactive": P("BOOLEAN", "проактивные подсказки бота (долги, всплески трат, питание, цели)"),
+        "voice_reply": P("BOOLEAN", "отвечать голосом на голосовые сообщения"),
         "report_enabled": P("BOOLEAN", "авто-отчёт"), "report_frequency": P("STRING", "weekly | monthly", enum=["weekly", "monthly"]),
         "language": P("STRING", "ru | uz", enum=["ru", "uz"]),
     },
@@ -959,7 +962,7 @@ async def _get_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 async def _update_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     changed: dict[str, Any] = {}
     us_fields: dict[str, Any] = {}
-    for key in ("brief_morning", "brief_evening"):
+    for key in ("brief_morning", "brief_evening", "proactive", "voice_reply"):
         if (v := _bool(a.get(key))) is not None:
             us_fields[key] = v
     for key in ("brief_morning_time", "brief_evening_time"):
@@ -1090,7 +1093,13 @@ async def snapshot(profile: Profile) -> str:
             what = f"{v['from']}→{v['to']}" if v["kind"] == "transfer" else f"{'+' if v['kind'] == 'income' else '−'}{v.get('category')}"
             lines.append(f"[{v['id']}] {v['date']} {m(v['amount'])} {what}{(' «' + v['note'] + '»') if v.get('note') else ''}")
         parts.append("Последние операции (id, дата, сумма, категория): " + "; ".join(lines))
+    try:
+        parts.extend(await agent_tools_assistant.snapshot_lines(profile))
+    except Exception:
+        logger.debug("assistant snapshot failed", exc_info=True)
     return "\n".join(parts)
 
+
+from . import agent_tools_assistant  # noqa: E402  — регистрирует инструменты заметок/задач/целей/сроков
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

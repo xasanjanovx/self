@@ -55,6 +55,12 @@ async def morning_brief(profile: Profile) -> str:
                 when = ("bugun" if lang == "uz" else "сегодня") if day == today.day else f"{day:02d}"
                 lines.append(f"   • {when}: {h(p.get('title'))} — {fin.fmt_money(float(p.get('amount') or 0))}")
 
+    # --- дела на сегодня, сроки долгов, цели
+    extra = await _assistant_lines(profile, today, lang)
+    if extra:
+        lines.append("")
+        lines.extend(extra)
+
     lines.append("")
     if nutrition_profile:
         target = int(nutrition_profile.get("daily_calories") or 0)
@@ -76,6 +82,56 @@ async def morning_brief(profile: Profile) -> str:
     lines.append("<i>" + ("Yaxshi kun tilayman! Xarajatni bir qatorda yozing: «taksi 25000»." if lang == "uz"
                          else "Хорошего дня! Расход — одной строкой: «такси 25000».") + "</i>")
     return "\n".join(lines)
+
+
+async def _assistant_lines(profile: Profile, today: Any, lang: str) -> list[str]:
+    from datetime import date
+
+    uz = lang == "uz"
+    out: list[str] = []
+    tasks, deadlines, goals = await asyncio.gather(services.tasks(profile.telegram_id), services.debt_deadlines(profile.telegram_id), services.goals(profile.telegram_id))
+    today_tasks, overdue = [], []
+    for t in tasks:
+        due = str(t.get("due_date") or "")[:10]
+        if not due:
+            continue
+        try:
+            d = date.fromisoformat(due)
+        except ValueError:
+            continue
+        if d == today:
+            today_tasks.append(t)
+        elif d < today:
+            overdue.append(t)
+    if today_tasks or overdue:
+        out.append(f"📝 <b>{'Bugungi ishlar' if uz else 'Дела на сегодня'}</b>")
+        for t in today_tasks[:5]:
+            out.append(f"   • {h(t.get('text'))}" + (f" · {t['due_time']}" if t.get("due_time") else ""))
+        for t in overdue[:3]:
+            out.append(f"   ⚠️ {h(t.get('text'))} " + ("(kechikkan)" if uz else "(просрочено)"))
+    soon = []
+    for r in deadlines:
+        try:
+            d = date.fromisoformat(str(r.get("due_date"))[:10])
+        except ValueError:
+            continue
+        left = (d - today).days
+        if -30 <= left <= 7:
+            soon.append((left, d, r))
+    for left, d, r in sorted(soon, key=lambda x: x[0])[:3]:
+        who = h(r.get("person"))
+        if left < 0:
+            out.append(f"⚠️ {who}: " + (f"muddat {-left} kun oldin o'tgan" if uz else f"срок прошёл {-left} дн. назад"))
+        elif left == 0:
+            out.append(f"⏳ {who}: " + ("bugun qaytarish muddati" if uz else "сегодня срок возврата"))
+        else:
+            out.append(f"⏳ {who}: " + (f"qaytarish {d:%d.%m} ({left} kun)" if uz else f"возврат {d:%d.%m} ({left} дн.)"))
+    for g in goals[:2]:
+        target = float(g.get("target_amount") or 0)
+        saved = float(g.get("saved_amount") or 0)
+        if target > 0:
+            out.append(f"🎯 {h(g.get('title'))}: {fin.fmt_money(saved)} / {fin.fmt_money(target)} ({int(saved / target * 100)}%)")
+    return out
 
 
 async def evening_brief(profile: Profile) -> str | None:

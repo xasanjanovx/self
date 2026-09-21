@@ -229,3 +229,33 @@ async def reminders(uid: int) -> list[dict[str, Any]]:
 
 def invalidate_reminders(uid: int) -> None:
     cache.invalidate(uid, "reminders")
+
+
+# ------------------------------------------------------------------ 005: notes / tasks / goals / debt deadlines
+async def notes(uid: int) -> list[dict[str, Any]]:
+    if not db.available("notes"):
+        return []
+    return await cache.remember(uid, ("notes",), 600, lambda: db.list_notes(uid))
+
+
+async def tasks(uid: int) -> list[dict[str, Any]]:
+    if not db.available("tasks"):
+        return []
+    return await cache.remember(uid, ("tasks",), 600, lambda: db.list_tasks(uid))
+
+
+async def goals(uid: int) -> list[dict[str, Any]]:
+    if not db.available("savings_goals"):
+        return []
+    return await cache.remember(uid, ("goals",), 600, lambda: db.list_goals(uid))
+
+
+async def debt_deadlines(uid: int) -> list[dict[str, Any]]:
+    if not db.available("debt_deadlines"):
+        return []
+    return await cache.remember(uid, ("debt_deadlines",), 600, lambda: db.list_debt_deadlines(uid))
+
+
+def invalidate(uid: int, *prefixes: str) -> None:
+    for p in prefixes:
+        cache.invalidate(uid, p)

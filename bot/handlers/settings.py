@@ -43,6 +43,7 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             ui.card("<b>🌅 Ertalabki xulosa</b> · 08:00", ["balans, hafta xarajati, bugungi kaloriya rejasi, yaqin to'lovlar"]),
             ui.card("<b>🌙 Kechki eslatma</b> · 21:00", ["ovqat yoki xarajat yozilmagan bo'lsa — eslatadi; hammasi yozilgan bo'lsa — kun natijasi"]),
             ui.card("<b>📊 Avto-hisobot</b>", ["yakshanba 20:00 (haftalik) yoki oyning 1-kuni (oylik)"]),
+            ui.card("<b>💡 Jarvis maslahatlari</b>", ["qarz muddatlari, xarajat sakrashlari, limit va maqsadlar, ovqatlanish, hafta yakuni — faqat gap bo'lganda"]),
         )
     else:
         text = ui.join(
@@ -50,6 +51,7 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             ui.card("<b>🌅 Утренняя сводка</b> · 08:00", ["баланс, траты за неделю, план калорий на день, ближайшие платежи"]),
             ui.card("<b>🌙 Вечернее напоминание</b> · 21:00", ["если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня"]),
             ui.card("<b>📊 Авто-отчёт</b>", ["воскресенье 20:00 (недельный) или 1-го числа (месячный)"]),
+            ui.card("<b>💡 Подсказки Джарвиса</b>", ["сроки долгов, всплески трат, лимиты и цели под угрозой, питание, итог недели — только когда есть что сказать"]),
         )
     from .. import reminders as rem
 
@@ -68,8 +70,30 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             report_enabled=bool(prefs.get("enabled", True)),
             report_frequency=str(prefs.get("frequency") or "weekly"),
             reminders=[(str(r.get("id")), rem.title(r)) for r in rems],
+            proactive=bool(us.get("proactive", True)),
+            voice=bool(us.get("voice_reply", True)),
         ),
     )
+
+
+@router.callback_query(F.data.startswith("settings:toggle:"))
+async def cb_toggle(callback: CallbackQuery) -> None:
+    """Переключатели: проактивные подсказки, голосовые ответы (колонки миграции 005)."""
+    profile = await get_profile(callback.from_user)
+    field = callback.data.split(":")[-1]
+    if field not in {"proactive", "voice_reply"} or not await db.ensure_available("user_settings"):
+        await answer_now(callback)
+        return
+    us = await services.user_settings(profile.telegram_id)
+    new_value = not bool(us.get(field, True))
+    try:
+        await services.save_user_settings(profile.telegram_id, {field: new_value})
+    except Exception:
+        logger.warning("toggle %s failed (migration 005?)", field, exc_info=True)
+        await answer_now(callback, profile.tr("Нужна миграция 005_assistant.sql", "005_assistant.sql migratsiyasi kerak"), alert=True)
+        return
+    await answer_now(callback, "✅" if new_value else "⛔")
+    await render_settings(callback, profile)
 
 
 @router.callback_query(F.data == "menu:settings")

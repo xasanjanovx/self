@@ -19,6 +19,10 @@
   restore_nutrition_profile {profile}
   restore_user_settings {fields}
   restore_report_prefs {enabled, frequency}
+  delete_notes {ids} · restore_notes {rows}
+  delete_tasks {ids} · restore_tasks {rows} · task_fields {task_id, fields}
+  delete_goals {ids} · restore_goals {rows} · goal_fields {goal_id, fields}
+  restore_debt_deadline {person, side, row|None}
 """
 from __future__ import annotations
 
@@ -173,6 +177,43 @@ async def _apply_step(uid: int, step: dict[str, Any], *, tz_name: str) -> None:
     elif kind == "restore_report_prefs":
         await db.save_report_preferences(uid, enabled=bool(step.get("enabled", True)), frequency=str(step.get("frequency") or "weekly"))
         cache.invalidate(uid, "report_prefs")
+    elif kind == "delete_notes":
+        await db.delete_notes(uid, step.get("ids") or [])
+        cache.invalidate(uid, "notes")
+    elif kind == "restore_notes":
+        for r in step.get("rows") or []:
+            await db.add_note(uid, str(r.get("text") or ""))
+        cache.invalidate(uid, "notes")
+    elif kind == "restore_notes_text":
+        await db.update_note(uid, step["note_id"], {"text": step.get("text") or ""})
+        cache.invalidate(uid, "notes")
+    elif kind == "delete_tasks":
+        await db.delete_tasks(uid, step.get("ids") or [])
+        cache.invalidate(uid, "tasks")
+    elif kind == "restore_tasks":
+        for r in step.get("rows") or []:
+            await db.add_task(uid, text=str(r.get("text") or ""), due_date=r.get("due_date"), due_time=r.get("due_time"))
+        cache.invalidate(uid, "tasks")
+    elif kind == "task_fields":
+        await db.update_task(uid, step["task_id"], step.get("fields") or {})
+        cache.invalidate(uid, "tasks")
+    elif kind == "delete_goals":
+        await db.delete_goals(uid, step.get("ids") or [])
+        cache.invalidate(uid, "goals")
+    elif kind == "restore_goals":
+        for r in step.get("rows") or []:
+            await db.add_goal(uid, title=str(r.get("title") or ""), target_amount=float(r.get("target_amount") or 0), saved_amount=float(r.get("saved_amount") or 0), deadline=r.get("deadline"))
+        cache.invalidate(uid, "goals")
+    elif kind == "goal_fields":
+        await db.update_goal(uid, step["goal_id"], step.get("fields") or {})
+        cache.invalidate(uid, "goals")
+    elif kind == "restore_debt_deadline":
+        row = step.get("row")
+        if row:
+            await db.upsert_debt_deadline(uid, person=str(row.get("person")), side=str(row.get("side")), due_date=str(row.get("due_date"))[:10], note=row.get("note"))
+        else:
+            await db.delete_debt_deadline(uid, person=str(step.get("person")), side=str(step.get("side")))
+        cache.invalidate(uid, "debt_deadlines")
     else:
         logger.warning("unknown undo step: %s", kind)
 

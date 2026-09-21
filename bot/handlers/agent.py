@@ -88,7 +88,8 @@ def system_prompt(profile: Profile, snapshot: str) -> str:
         f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
         f"Язык пользователя по умолчанию: {lang} — отвечай на том языке, на котором он пишет.\n\n"
         "ЧТО ТЫ УМЕЕШЬ (инструменты): смотреть и менять операции (расходы/доходы/переводы/долги), счета, лимиты, регулярные платежи, "
-        "напоминания, дневник питания, план КБЖУ, настройки сводок и отчётов; считать статистику; открывать экраны; передавать записи парсерам.\n\n"
+        "напоминания, дневник питания, план КБЖУ, настройки сводок и отчётов; заметки («запомни»), задачи, цели накоплений, сроки возврата долгов; "
+        "считать статистику и глубокий анализ; открывать экраны; передавать записи парсерам.\n\n"
         "ПРАВИЛА:\n"
         "1. Команды выполняй СРАЗУ и без вопросов «точно?» — у пользователя есть кнопка «Отменить». Массовые действия (удалить всё за месяц, очистить дневник) тоже выполняй сразу.\n"
         "2. Никогда не выдумывай id. Бери id из «Данные» ниже или из результата list_*. Если подходящих записей в «Данных» нет — сначала вызови list_* с фильтром.\n"
@@ -109,7 +110,13 @@ def system_prompt(profile: Profile, snapshot: str) -> str:
         "«Дал Асилбеку не 2 млн, а 1 млн» = итог по человеку должен стать 1 000 000: посмотри его долговые операции и исправь сумму / удали лишнюю, чтобы итог сошёлся.\n"
         "13. «Проанализируй мои данные / где переплачиваю / прогноз до конца месяца / сделай отчёт» → deep_analysis, затем разбор: главный тренд; 3–5 конкретных находок с цифрами "
         "(что выросло и на сколько, аномалии, прогноз остатка, лимиты под угрозой); 2–3 совета с конкретными суммами. Тут можно длиннее — до 15 строк; смысловые блоки разделяй пустой строкой, блок начинай с эмодзи. "
-        "Названия категорий бери из category_labels, не показывай ключи (food → Еда (кафе)).\n\n"
+        "Названия категорий бери из category_labels, не показывай ключи (food → Еда (кафе)).\n"
+        "14. «Запомни, что …» → add_note (факт коротко). Если это событие с датой (день рождения, встреча, срок) — ещё и add_task с due_date (год — ближайший будущий). "
+        "«Купить лампочку», «позвонить маме завтра в 18:00», «мои дела на сегодня», «сделал/готово/купил» → задачи (add_task / list_tasks / complete_tasks). "
+        "Вопрос о фактах из прошлого («когда у брата день рождения?», «какой у меня размер?») — смотри «Заметки» ниже или list_notes.\n"
+        "15. «Хочу накопить 10 млн на ноутбук к январю» → add_goal; «отложил 500к на ноутбук» → update_goal(add_amount); «как дела с целью?» → list_goals и ответ: накоплено, осталось, нужно в месяц, успеваем ли.\n"
+        "16. Долг со сроком: «дал Асилбеку 1 млн, вернёт до 5 октября» → add_finance_entries (transfer card→lent, note=имя) + set_debt_deadline; «Асилбек вернёт до пятницы» → только set_debt_deadline. "
+        "«Напиши сообщение Асилбеку про долг» — напиши вежливый короткий текст на языке пользователя с суммой и сроком.\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
         f"ДАННЫЕ:\n{snapshot}"
@@ -265,9 +272,10 @@ def _reply_kb(lang: str, *, undo_available: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str, *, own_message: bool = True) -> bool:
+async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str, *, own_message: bool = True, voice: bool = False) -> bool:
     """Прогнать фразу через агента. Возвращает False только если агент недоступен (ошибка AI).
-    own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем."""
+    own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем.
+    voice=True — пришло голосом: если включены голосовые ответы, продублируем ответ голосом."""
     uid = profile.telegram_id
     await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
     undo.begin_turn(uid)
@@ -300,7 +308,30 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
         return True
     await state.clear()
     await show_panel(message, state, reply, _reply_kb(profile.lang, undo_available=mutated))
+    if voice:
+        await _send_voice_reply(message, profile, result.text)
     return True
+
+
+async def _send_voice_reply(message: Message, profile: Profile, text: str) -> None:
+    """Голосовой ответ на голосовой вопрос (настройка voice_reply, нужны TTS-модель и ffmpeg)."""
+    from .. import services
+    from .. import voice as voice_mod
+    from aiogram.types import BufferedInputFile
+
+    try:
+        if not voice_mod.available():
+            return
+        us = await services.user_settings(profile.telegram_id)
+        if not us.get("voice_reply", True):
+            return
+        data = await voice_mod.make_voice(text)
+        if not data:
+            return
+        sent = await message.bot.send_voice(message.chat.id, BufferedInputFile(data, filename="jarvis.ogg"))
+        screen_mod.track_ephemeral(message.chat.id, sent.message_id)
+    except Exception:
+        logger.warning("voice reply failed", exc_info=True)
 
 
 async def _dispatch_handoff(message: Message, state: FSMContext, profile: Profile, module: str, text: str) -> None:

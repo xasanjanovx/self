@@ -318,3 +318,37 @@ def _used_categories(data: dict[str, Any]) -> set[str]:
 
 
 __all__ = ["full_analysis", "monthly_trend", "category_trends", "forecast", "anomalies", "overpaying", "nutrition_analysis"]
+
+
+# ------------------------------------------------------------------ savings goals
+def months_between(start: date, end: date) -> float:
+    """Сколько месяцев (дробно) от start до end; минимум 0.25."""
+    days = (end - start).days
+    return max(0.25, days / 30.4375)
+
+
+def goal_status(goal: dict[str, Any], today: date, *, projected_saving_month: float | None = None) -> dict[str, Any]:
+    """Прогресс цели: сколько осталось, сколько нужно откладывать в месяц и успеваем ли при текущем темпе."""
+    target = float(goal.get("target_amount") or 0)
+    saved = float(goal.get("saved_amount") or 0)
+    remaining = max(0.0, target - saved)
+    ratio = min(1.0, saved / target) if target > 0 else 0.0
+    out: dict[str, Any] = {
+        "id": str(goal.get("id")), "title": goal.get("title"), "target": _r(target), "saved": _r(saved), "remaining": _r(remaining),
+        "ratio": round(ratio, 3), "deadline": str(goal.get("deadline") or "")[:10] or None, "done": bool(goal.get("done")) or remaining <= 0,
+    }
+    deadline = None
+    try:
+        deadline = date.fromisoformat(str(goal.get("deadline"))[:10]) if goal.get("deadline") else None
+    except ValueError:
+        deadline = None
+    if deadline and remaining > 0:
+        months = months_between(today, deadline)
+        out["months_left"] = round(months, 1)
+        out["needed_per_month"] = _r(remaining / months)
+        if projected_saving_month is not None:
+            out["projected_saving_month"] = _r(projected_saving_month)
+            out["on_track"] = projected_saving_month >= remaining / months
+            if projected_saving_month > 0:
+                out["months_at_current_pace"] = round(remaining / projected_saving_month, 1)
+    return out

@@ -82,7 +82,7 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
     if credit:
         balance_lines.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'}: {fin.fmt_money(credit)}")
     balance_card = ui.card(f"<b>{'Balans' if uz else 'Баланс'}</b>", balance_lines)
-    debts_card = _debts_card(snap, lang)
+    debts_card = _debts_card(snap, lang, await services.debt_deadlines(profile.telegram_id))
 
     today_parts = []
     if snap.today_expense:
@@ -118,30 +118,50 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
 _DEBT_ROWS = 5  # строк на сторону — чтобы карточка помещалась на экран телефона
 
 
-def _debts_card(snap: services.FinanceSnapshot, lang: str) -> str | None:
-    """Карточка «Долги»: кто должен мне и кому должен я — по именам, компактно (одна строка — один человек)."""
+def _deadline_tag(name: str, side: str, deadlines: list[dict[str, Any]], today: date, lang: str) -> str:
+    """« · до 05.10» или « ⚠️ просрочено 3 дн.» для строки долга."""
+    for r in deadlines:
+        if r.get("side") != side or str(r.get("person") or "").casefold() != name.casefold():
+            continue
+        try:
+            due = date.fromisoformat(str(r.get("due_date"))[:10])
+        except ValueError:
+            return ""
+        left = (due - today).days
+        if left < 0:
+            return f" ⚠️ {ui.muted(f'{-left} kun kechikdi' if lang == 'uz' else f'просрочено {-left} дн.')}"
+        if left == 0:
+            return " · " + ui.muted("bugun" if lang == "uz" else "сегодня")
+        return " · " + ui.muted(f"{due:%d.%m} gacha" if lang == "uz" else f"до {due:%d.%m}")
+    return ""
+
+
+def _debts_card(snap: services.FinanceSnapshot, lang: str, deadlines: list[dict[str, Any]] | None = None) -> str | None:
+    """Карточка «Долги»: кто должен мне и кому должен я — по именам, компактно (одна строка — один человек), со сроками."""
     uz = lang == "uz"
     b = snap.balances
     if not b["lent"] and not b["debt"]:
         return None
     ledger = fin.debt_ledger(snap.entries, snap.settings)
+    deadlines = deadlines or []
 
-    def _side(icon: str, title: str, total: float, items: list[tuple[str, float]], negative_word: str) -> list[str]:
+    def _side(icon: str, title: str, total: float, items: list[tuple[str, float]], negative_word: str, side: str) -> list[str]:
         if not total and not items:
             return []
         lines = [f"{icon} {title}: <b>{fin.fmt_money(total)}</b>"]
         for name, amount in items[:_DEBT_ROWS]:
             label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
+            tag = _deadline_tag(name, side, deadlines, snap.today, lang) if name else ""
             if amount >= 0:
-                lines.append(f"• {label} — {fin.fmt_money(amount)}")
+                lines.append(f"• {label} — {fin.fmt_money(amount)}{tag}")
             else:
                 lines.append(f"• {label} — {fin.fmt_money(abs(amount))} {ui.muted(negative_word)}")
         if len(items) > _DEBT_ROWS:
             lines.append(ui.muted(f"… +{len(items) - _DEBT_ROWS}"))
         return lines
 
-    lent = _side("🤝", "Menga qarz" if uz else "Мне должны", b["lent"], ledger["lent"], "ortiqcha qaytardi" if uz else "вернул больше")
-    debt = _side("📌", "Mening qarzim" if uz else "Я должен", b["debt"], ledger["debt"], "ortiqcha to'landi" if uz else "переплата")
+    lent = _side("🤝", "Menga qarz" if uz else "Мне должны", b["lent"], ledger["lent"], "ortiqcha qaytardi" if uz else "вернул больше", "lent")
+    debt = _side("📌", "Mening qarzim" if uz else "Я должен", b["debt"], ledger["debt"], "ortiqcha to'landi" if uz else "переплата", "debt")
     lines = lent + ([""] if lent and debt else []) + debt
     return ui.card(f"<b>{'Qarzlar' if uz else 'Долги'}</b>", lines)
 
@@ -250,7 +270,7 @@ async def handle_finance_text(
     if items is None:
         await show_progress(message, profile.tr("⏳ Разбираю операцию…", "⏳ Operatsiya tahlil qilinmoqda…"))
         try:
-            items = await ai.parse_finance_ops(raw_text)
+            items = await ai.parse_finance_ops(raw_text, today=profile.today.isoformat())
         except Exception as exc:
             logger.exception("parse_finance_ops failed")
             await render_panel(message, state, profile, notice=f"{pe.CROSS} {profile.tr('Ошибка разбора', 'Tahlil xatosi')}: {h(str(exc)[:120])}")
@@ -334,7 +354,24 @@ async def commit_items(target: Message | CallbackQuery, state: FSMContext, profi
         else:
             await show_panel(target, state, text, back_to_menu_keyboard(profile.lang))
         return
+    await _save_debt_deadlines(profile, items)
     await finish_save(target, state, profile, items, inserted)
+
+
+async def _save_debt_deadlines(profile: Profile, items: list[dict[str, Any]]) -> None:
+    """«Дал Асилбеку 1 млн, вернёт до 5 октября» — срок сохраняем рядом с долгом."""
+    if not db.available("debt_deadlines"):
+        return
+    for it in items:
+        due, name = it.get("due_date"), str(it.get("note") or "").strip()
+        if it.get("kind") != "transfer" or not due or not name:
+            continue
+        side = "lent" if "lent" in (it.get("from_bucket"), it.get("to_bucket")) else "debt"
+        try:
+            await db.upsert_debt_deadline(profile.telegram_id, person=name, side=side, due_date=str(due)[:10])
+        except Exception:
+            logger.warning("save debt deadline failed", exc_info=True)
+    cache.invalidate(profile.telegram_id, "debt_deadlines")
 
 
 async def ask_confirm(

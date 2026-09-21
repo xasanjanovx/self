@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 import logging
 
 from aiogram import F, Router
@@ -26,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 async def build_dashboard(profile: Profile) -> str:
     """Один экран: финансы + питание. Все выборки — параллельно."""
-    nutrition_profile, logs, snap, recurring, limits = await asyncio.gather(
+    nutrition_profile, logs, snap, recurring, limits, goals, tasks = await asyncio.gather(
         services.nutrition_profile(profile.telegram_id),
         services.today_calorie_logs(profile),
         services.finance_snapshot(profile),
         services.recurring(profile.telegram_id),
         services.budgets(profile.telegram_id),
+        services.goals(profile.telegram_id),
+        services.tasks(profile.telegram_id),
     )
     lang, cur = profile.lang, profile.currency
     uz = lang == "uz"
@@ -96,8 +99,55 @@ async def build_dashboard(profile: Profile) -> str:
         nut_lines = [ui.muted("Profil sozlanmagan — «Oziqlanish» bo'limini oching" if uz else "Профиль не настроен — открой раздел «Питание»")]
     nutrition_card = ui.card(f"{pe.NUTRITION} <b>{'Oziqlanish' if uz else 'Питание'}</b>", nut_lines)
 
+    # --- цели и дела (только если есть)
+    assistant_card = _assistant_card(goals, tasks, today, lang)
+
     hint = ui.muted("✍️ «taksi 25000» · «osh yedim» · rasm · ovoz" if uz else "✍️ «такси 25000» · «съел плов» · фото · голос")
-    return ui.join(header, finance_card, nutrition_card, hint)
+    return ui.join(header, finance_card, nutrition_card, assistant_card, hint)
+
+
+def _assistant_card(goals: list[dict], tasks: list[dict], today: date, lang: str) -> str | None:
+    """Карточка «Цели и дела»: прогресс накоплений + задачи на сегодня/просроченные."""
+    uz = lang == "uz"
+    lines: list[str] = []
+    for g in goals[:2]:
+        target = float(g.get("target_amount") or 0)
+        saved = float(g.get("saved_amount") or 0)
+        ratio = min(1.0, saved / target) if target > 0 else 0.0
+        tail = ""
+        if g.get("deadline"):
+            try:
+                dl = date.fromisoformat(str(g["deadline"])[:10])
+                tail = " · " + ui.muted(f"{dl:%d.%m} gacha" if uz else f"до {dl:%d.%m}")
+            except ValueError:
+                tail = ""
+        lines.append(f"🎯 {h(g.get('title'))}: {fin.bar(ratio, 8)} {ui.pct(ratio)}")
+        lines.append(f"   {fin.fmt_money(saved)} / {fin.fmt_money(target)}{tail}")
+    due_tasks = []
+    for t_ in tasks:
+        due = str(t_.get("due_date") or "")[:10]
+        if not due:
+            continue
+        try:
+            d = date.fromisoformat(due)
+        except ValueError:
+            continue
+        if d <= today:
+            due_tasks.append((d, t_))
+    if due_tasks:
+        if lines:
+            lines.append("")
+        for d, t_ in sorted(due_tasks, key=lambda x: x[0])[:3]:
+            flag = "⚠️" if d < today else "📝"
+            when = f" {t_['due_time']}" if t_.get("due_time") else ""
+            lines.append(f"{flag} {h(t_.get('text'))}{when}")
+        if len(due_tasks) > 3:
+            lines.append(ui.muted(f"… +{len(due_tasks) - 3}"))
+    if not lines and tasks:
+        lines.append(ui.muted(f"{len(tasks)} ta ochiq vazifa" if uz else f"открытых дел: {len(tasks)}"))
+    if not lines:
+        return None
+    return ui.card(f"🎯 <b>{'Maqsad va ishlar' if uz else 'Цели и дела'}</b>", lines)
 
 
 async def render_dashboard(

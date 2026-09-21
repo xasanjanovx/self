@@ -87,6 +87,7 @@ class Database:
         names = (
             "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
             "user_settings", "budgets", "recurring_payments",
+            "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
         )
 
         async def probe(name: str) -> str | None:
@@ -411,6 +412,8 @@ class Database:
             "brief_evening_time": str(row.get("brief_evening_time") or "21:00")[:5],
             "last_morning_key": row.get("last_morning_key"),
             "last_evening_key": row.get("last_evening_key"),
+            "proactive": bool(row.get("proactive", True)),
+            "voice_reply": bool(row.get("voice_reply", True)),
         }
 
     async def save_user_settings(self, telegram_id: int, fields: dict[str, Any]) -> None:
@@ -499,6 +502,90 @@ class Database:
         if not ids:
             return
         await self._table("finance_entries").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    # ---------------------------------------------------------- 005: notes / tasks / goals / debt deadlines / alerts
+    async def list_notes(self, telegram_id: int) -> list[dict[str, Any]]:
+        res = await self._table("notes").select("*").eq("telegram_id", telegram_id).order("created_at", desc=True).limit(200).execute()
+        return res.data or []
+
+    async def add_note(self, telegram_id: int, text: str) -> dict[str, Any]:
+        res = await self._table("notes").insert({"telegram_id": telegram_id, "text": text}).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def update_note(self, telegram_id: int, note_id: str | int, fields: dict[str, Any]) -> None:
+        await self._table("notes").update(fields).eq("telegram_id", telegram_id).eq("id", note_id).execute()
+
+    async def delete_notes(self, telegram_id: int, ids: list[Any]) -> None:
+        if ids:
+            await self._table("notes").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    async def list_tasks(self, telegram_id: int, *, include_done: bool = False) -> list[dict[str, Any]]:
+        q = self._table("tasks").select("*").eq("telegram_id", telegram_id)
+        if not include_done:
+            q = q.eq("done", False)
+        res = await q.order("due_date", desc=False, nullsfirst=False).order("created_at").limit(300).execute()
+        return res.data or []
+
+    async def list_tasks_all(self) -> list[dict[str, Any]]:
+        """Открытые задачи со временем — для напоминаний воркером."""
+        res = await self._table("tasks").select("*").eq("done", False).not_.is_("due_time", "null").execute()
+        return res.data or []
+
+    async def add_task(self, telegram_id: int, *, text: str, due_date: str | None, due_time: str | None) -> dict[str, Any]:
+        res = await self._table("tasks").insert({"telegram_id": telegram_id, "text": text, "due_date": due_date, "due_time": due_time}).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def update_task(self, telegram_id: int, task_id: str | int, fields: dict[str, Any]) -> None:
+        await self._table("tasks").update(fields).eq("telegram_id", telegram_id).eq("id", task_id).execute()
+
+    async def delete_tasks(self, telegram_id: int, ids: list[Any]) -> None:
+        if ids:
+            await self._table("tasks").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    async def list_goals(self, telegram_id: int, *, include_done: bool = False) -> list[dict[str, Any]]:
+        q = self._table("savings_goals").select("*").eq("telegram_id", telegram_id)
+        if not include_done:
+            q = q.eq("done", False)
+        res = await q.order("created_at").execute()
+        return res.data or []
+
+    async def add_goal(self, telegram_id: int, *, title: str, target_amount: float, saved_amount: float = 0.0, deadline: str | None = None) -> dict[str, Any]:
+        res = await self._table("savings_goals").insert(
+            {"telegram_id": telegram_id, "title": title, "target_amount": float(target_amount), "saved_amount": float(saved_amount), "deadline": deadline}
+        ).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def update_goal(self, telegram_id: int, goal_id: str | int, fields: dict[str, Any]) -> None:
+        payload = {**fields, "updated_at": datetime.now(timezone.utc).isoformat()}
+        await self._table("savings_goals").update(payload).eq("telegram_id", telegram_id).eq("id", goal_id).execute()
+
+    async def delete_goals(self, telegram_id: int, ids: list[Any]) -> None:
+        if ids:
+            await self._table("savings_goals").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    async def list_debt_deadlines(self, telegram_id: int) -> list[dict[str, Any]]:
+        res = await self._table("debt_deadlines").select("*").eq("telegram_id", telegram_id).order("due_date").execute()
+        return res.data or []
+
+    async def upsert_debt_deadline(self, telegram_id: int, *, person: str, side: str, due_date: str, note: str | None = None) -> dict[str, Any]:
+        res = await self._table("debt_deadlines").upsert(
+            {"telegram_id": telegram_id, "person": person, "side": side, "due_date": due_date, "note": note}, on_conflict="telegram_id,person,side"
+        ).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def delete_debt_deadline(self, telegram_id: int, *, person: str, side: str) -> None:
+        await self._table("debt_deadlines").delete().eq("telegram_id", telegram_id).eq("person", person).eq("side", side).execute()
+
+    async def alert_was_sent(self, telegram_id: int, key: str) -> bool:
+        res = await self._table("alerts_log").select("key").eq("telegram_id", telegram_id).eq("key", key).limit(1).execute()
+        return bool(res.data)
+
+    async def mark_alert_sent(self, telegram_id: int, key: str) -> None:
+        await self._table("alerts_log").upsert({"telegram_id": telegram_id, "key": key, "sent_at": datetime.now(timezone.utc).isoformat()}, on_conflict="telegram_id,key").execute()
 
     async def delete_all_recurring(self, telegram_id: int) -> None:
         await self._table("recurring_payments").delete().eq("telegram_id", telegram_id).execute()

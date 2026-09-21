@@ -16,7 +16,7 @@ from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
 from .middlewares import AccessMiddleware, DedupeMiddleware, global_error_handler
-from .workers import brief_worker, reminder_worker, report_worker
+from .workers import brief_worker, proactive_worker, reminder_worker, report_worker
 
 logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
@@ -60,6 +60,7 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(report_worker(bot), name="report-worker"))
     background_tasks.append(asyncio.create_task(brief_worker(bot), name="brief-worker"))
     background_tasks.append(asyncio.create_task(reminder_worker(bot), name="reminder-worker"))
+    background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
     logger.info("Bot started. Allowed users: %s", sorted(settings.allowed_telegram_ids) or "everyone")
 
 

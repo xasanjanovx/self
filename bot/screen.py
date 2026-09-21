@@ -95,6 +95,11 @@ def track_screen(chat_id: int, message_id: int | None) -> None:
         pending.remove(message_id)
 
 
+def track_ephemeral(chat_id: int, message_id: int) -> None:
+    """Пометить уже отправленное сообщение (голос, файл) как временное."""
+    _ephemerals[chat_id].append(message_id)
+
+
 async def clear_ephemerals(bot: Bot, chat_id: int) -> None:
     ids = _ephemerals.pop(chat_id, [])
     if not ids:

@@ -8,10 +8,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# matplotlib runtime deps (freetype + libpng); tzdata уже в slim
+# matplotlib runtime deps (freetype + libpng); ffmpeg — голосовые ответы (PCM → OGG/Opus)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libfreetype6 \
     libpng16-16 \
+    ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

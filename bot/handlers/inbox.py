@@ -69,8 +69,9 @@ async def route_text(
         await safe_delete(message)
         await send_main_menu(message, profile, force_new=True)
         return True
+    voice = transcript is not None
     if agent.looks_like_command(text) and not vac.looks_like_vacancy(text):
-        if await agent.handle_command(message, state, profile, text):
+        if await agent.handle_command(message, state, profile, text, voice=voice):
             return True
     if vac.looks_like_vacancy(text):
         await vacancy_h.process_vacancy(message, state, profile, text)
@@ -83,7 +84,7 @@ async def route_text(
         return True
     # Всё остальное — «Джарвис»: команды без ключевых слов, вопросы по данным, уточнения
     # к предыдущей реплике («вторую», «да, её»), свободный чат.
-    return await agent.handle_command(message, state, profile, text)
+    return await agent.handle_command(message, state, profile, text, voice=voice)
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:

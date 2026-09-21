@@ -52,6 +52,10 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "brief_morning_off": "🌅 Утро 08:00: выкл",
         "brief_evening_on": "🌙 Вечер 21:00: вкл",
         "brief_evening_off": "🌙 Вечер 21:00: выкл",
+        "proactive_on": "💡 Подсказки Джарвиса: вкл",
+        "proactive_off": "💡 Подсказки Джарвиса: выкл",
+        "voice_on": "🎙 Голосовые ответы: вкл",
+        "voice_off": "🎙 Голосовые ответы: выкл",
         "rec_add": "Добавить платёж",
         "rec_pay_now": "Записать оплату",
         "rec_pause": "Пауза",
@@ -115,6 +119,10 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "brief_morning_off": "🌅 Ertalab 08:00: o'chiq",
         "brief_evening_on": "🌙 Kechqurun 21:00: yoq",
         "brief_evening_off": "🌙 Kechqurun 21:00: o'chiq",
+        "proactive_on": "💡 Jarvis maslahatlari: yoniq",
+        "proactive_off": "💡 Jarvis maslahatlari: o'chiq",
+        "voice_on": "🎙 Ovozli javoblar: yoniq",
+        "voice_off": "🎙 Ovozli javoblar: o'chiq",
         "rec_add": "To'lov qo'shish",
         "rec_pay_now": "To'lovni yozish",
         "rec_pause": "Pauza",
@@ -207,7 +215,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
 
 def settings_keyboard(
     lang: str, *, morning: bool, evening: bool, report_enabled: bool, report_frequency: str,
-    reminders: list[tuple[str, str]] | None = None,
+    reminders: list[tuple[str, str]] | None = None, proactive: bool = True, voice: bool = True,
 ) -> InlineKeyboardMarkup:
     status = t(lang, "status_on") if report_enabled else t(lang, "status_off")
     if report_enabled:
@@ -215,6 +223,8 @@ def settings_keyboard(
     rows = [
         [_btn(t(lang, "brief_morning_on" if morning else "brief_morning_off"), "settings:brief:morning", style="success" if morning else None)],
         [_btn(t(lang, "brief_evening_on" if evening else "brief_evening_off"), "settings:brief:evening", style="success" if evening else None)],
+        [_btn(t(lang, "proactive_on" if proactive else "proactive_off"), "settings:toggle:proactive", style="success" if proactive else None)],
+        [_btn(t(lang, "voice_on" if voice else "voice_off"), "settings:toggle:voice_reply", style="success" if voice else None)],
         [_btn(status, "noop")],
         [
             _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),

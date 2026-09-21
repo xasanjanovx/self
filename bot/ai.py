@@ -146,6 +146,7 @@ class AIService:
         self.vision_model = settings.gemini_vision_model
         self.transcribe_model = settings.gemini_transcribe_model
         self.agent_model = settings.agent_model
+        self.tts_model: str | None = None  # выбирается в ensure_models, если доступна
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=15.0),
@@ -197,6 +198,8 @@ class AIService:
         self.vision_model = pick(self.vision_model)
         self.transcribe_model = pick(self.transcribe_model)
         self.agent_model = pick(self.agent_model)
+        self.tts_model = next((m for m in ("gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts") if m in available), None)
+        logger.info("Gemini TTS model: %s", self.tts_model or "unavailable")
         logger.info("Gemini models: text=%s vision=%s transcribe=%s agent=%s", self.text_model, self.vision_model, self.transcribe_model, self.agent_model)
 
     # ------------------------------------------------------------- core call
@@ -304,6 +307,21 @@ class AIService:
             logger.warning("Gemini agent hit MAX_TOKENS for model %s", model)
         return AgentStep(parts=parts, text="\n".join(texts).strip(), calls=calls, finish=finish)
 
+    async def synthesize(self, text: str, *, voice: str = "Kore") -> bytes | None:
+        """Текст → речь (PCM s16le, 24 kHz, mono). None, если TTS-модель недоступна."""
+        if not self.tts_model or not text.strip():
+            return None
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
+        }
+        candidate = self._first_candidate(await self._post(self.tts_model, payload))
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            blob = part.get("inlineData") if isinstance(part, dict) else None
+            if blob and blob.get("data"):
+                return base64.b64decode(blob["data"])
+        return None
+
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
         text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)
         return extract_json(text)
@@ -387,12 +405,15 @@ class AIService:
         return text.strip()
 
     # ------------------------------------------------------------- routing
-    async def parse_finance_ops(self, raw_text: str) -> list[dict[str, Any]]:
+    async def parse_finance_ops(self, raw_text: str, *, today: str | None = None) -> list[dict[str, Any]]:
         """Возвращает список операций:
         income/expense: {"kind","amount","category"(ключ),"note","account"(card|cash)}
-        transfer:       {"kind":"transfer","amount","from","to","note"}"""
+        transfer:       {"kind":"transfer","amount","from","to","note","due_date"?}"""
+        today_line = f"Сегодня: {today}. " if today else ""
         prompt = (
             "Ты — финансовый ассистент. Разбери сообщение на список операций и верни ТОЛЬКО JSON-массив.\n\n"
+            + today_line + "Если у долга (lent/debt) назван срок возврата («вернёт до 5 октября», «через неделю», «до пятницы») — "
+            "добавь полю операции due_date (YYYY-MM-DD); иначе поле не добавляй.\n"
             "Счета: \"card\" (карта), \"cash\" (наличные). Виртуальные: \"lent\" (мне должны), \"debt\" (я должен), "
             "\"init\" (долг уже существовал раньше — деньги СЕЙЧАС не двигаются).\n"
             "kind: \"expense\" | \"income\" | \"transfer\".\n"
@@ -465,7 +486,11 @@ class AIService:
                 dst = str(item.get("to") or "").strip().lower()
                 if src not in buckets or dst not in buckets or src == dst:
                     continue
-                result.append({"kind": "transfer", "amount": amount, "from_bucket": src, "to_bucket": dst, "note": note, "confidence": confidence})
+                op: dict[str, Any] = {"kind": "transfer", "amount": amount, "from_bucket": src, "to_bucket": dst, "note": note, "confidence": confidence}
+                due = _clean_text(item.get("due_date"), max_len=10)
+                if due and re.fullmatch(r"\d{4}-\d{2}-\d{2}", due) and ("lent" in (src, dst) or "debt" in (src, dst)):
+                    op["due_date"] = due
+                result.append(op)
                 continue
             entry_type = "income" if kind == "income" else "expense"
             account = str(item.get("account") or "card").strip().lower()

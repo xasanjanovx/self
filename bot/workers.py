@@ -212,11 +212,106 @@ async def _reminder_tick(bot: Bot) -> None:
         services.invalidate_reminders(telegram_id)
 
 
+async def _task_tick(bot: Bot) -> None:
+    """Задачи со временем («позвонить маме в 18:00») — напоминание в срок."""
+    from . import proactive
+    from .keyboards import back_to_menu_keyboard
+
+    if not db.available("tasks"):
+        return
+    try:
+        rows = await db.list_tasks_all()
+    except Exception:
+        logger.debug("tasks table unavailable", exc_info=True)
+        return
+    by_user: dict[int, list[dict]] = {}
+    for row in rows:
+        by_user.setdefault(int(row.get("telegram_id") or 0), []).append(row)
+    for telegram_id, tasks in by_user.items():
+        if not settings.is_allowed(telegram_id):
+            continue
+        profile = await profile_by_id(telegram_id)
+        now = datetime.now(timezone.utc).astimezone(profile.tz)
+        for t in proactive.due_tasks(tasks, now):
+            text = f"📝 <b>{profile.tr('Напоминание', 'Eslatma')}:</b> {h(t.get('text'))}"
+            try:
+                await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang))
+            except Exception:
+                logger.exception("task reminder failed for %s", telegram_id)
+                continue
+            await db.update_task(telegram_id, t["id"], {"notified_key": now.date().isoformat()})
+        services.invalidate(telegram_id, "tasks")
+
+
+async def _proactive_tick(bot: Bot) -> None:
+    """Подсказки по правилам (bot/proactive.py): раз в 10 минут, только новые (журнал alerts_log)."""
+    from . import proactive
+    from . import screen as screen_mod
+    from .keyboards import _btn, back_to_menu_keyboard
+    from aiogram.types import InlineKeyboardMarkup
+
+    if not db.available("alerts_log") or not db.available("user_settings"):
+        return
+    user_ids = sorted(settings.allowed_telegram_ids) or [int(u["telegram_id"]) for u in await db.list_users()]
+    for telegram_id in user_ids:
+        profile = await profile_by_id(telegram_id)
+        us = await services.user_settings(telegram_id)
+        if not us.get("proactive", True):
+            continue
+        try:
+            alerts = await proactive.collect(profile)
+        except Exception:
+            logger.exception("proactive collect failed for %s", telegram_id)
+            continue
+        for alert in alerts:
+            try:
+                if await db.alert_was_sent(telegram_id, alert.key):
+                    continue
+                await db.mark_alert_sent(telegram_id, alert.key)  # сначала отмечаем — не задвоим при ошибке отправки
+                text = alert.text
+                if alert.prompt:
+                    from . import agent_tools
+                    from .handlers.agent import render_reply, run_agent
+
+                    result = await run_agent(profile, alert.prompt, [], snapshot=await agent_tools.snapshot(profile))
+                    text = render_reply(result.text) if result.text else None
+                if not text:
+                    continue
+                if alert.copy_text:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [_btn("📋 " + profile.tr("Скопировать сообщение", "Xabarni nusxalash"), copy_text=alert.copy_text[:256])],
+                        [_btn(profile.tr("В меню", "Menyuga"), "menu:open")],
+                    ])
+                else:
+                    kb = back_to_menu_keyboard(profile.lang)
+                if alert.persistent:
+                    await bot.send_message(telegram_id, text, reply_markup=kb)
+                else:
+                    await screen_mod.send_ephemeral(bot, telegram_id, text, reply_markup=kb, keep_previous=True)
+                logger.info("proactive alert %s sent to %s", alert.key, telegram_id)
+            except Exception:
+                logger.exception("proactive alert %s failed for %s", alert.key, telegram_id)
+
+
+async def proactive_worker(bot: Bot) -> None:
+    logger.info("Proactive worker started")
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await _proactive_tick(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Proactive worker iteration failed")
+        await asyncio.sleep(600)
+
+
 async def reminder_worker(bot: Bot) -> None:
     logger.info("Reminder worker started")
     while True:
         try:
             await _reminder_tick(bot)
+            await _task_tick(bot)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -224,4 +319,4 @@ async def reminder_worker(bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
-__all__ = ["report_worker", "brief_worker", "reminder_worker"]
+__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker"]
