@@ -49,11 +49,13 @@ class CalorieEstimate:
 
 
 @dataclass
-class InboxIntent:
-    module: str  # finance | calorie | vacancy | question | menu | unknown
-    mode: str  # process | open | answer | unknown
-    confidence: float
-    cleaned_text: str | None = None
+class AgentStep:
+    """Ответ модели за один ход агента."""
+
+    parts: list[dict[str, Any]]  # сырые части ответа (для истории)
+    text: str  # текст ответа (если модель не зовёт инструменты)
+    calls: list[tuple[str, dict[str, Any]]]  # вызовы инструментов (name, args)
+    finish: str = ""
 
 
 @dataclass
@@ -143,6 +145,7 @@ class AIService:
         self.text_model = settings.gemini_model
         self.vision_model = settings.gemini_vision_model
         self.transcribe_model = settings.gemini_transcribe_model
+        self.agent_model = settings.agent_model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=15.0),
@@ -193,9 +196,46 @@ class AIService:
         self.text_model = pick(self.text_model)
         self.vision_model = pick(self.vision_model)
         self.transcribe_model = pick(self.transcribe_model)
-        logger.info("Gemini models: text=%s vision=%s transcribe=%s", self.text_model, self.vision_model, self.transcribe_model)
+        self.agent_model = pick(self.agent_model)
+        logger.info("Gemini models: text=%s vision=%s transcribe=%s agent=%s", self.text_model, self.vision_model, self.transcribe_model, self.agent_model)
 
     # ------------------------------------------------------------- core call
+    async def _post(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST generateContent с коротким retry на временные ошибки. Возвращает сырой JSON."""
+        url = f"{self.base_url}/{model}:generateContent"
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = await self._client.post(url, json=payload)
+                if response.status_code in _RETRY_STATUSES:
+                    raise httpx.HTTPStatusError(
+                        f"Gemini transient {response.status_code}: {response.text[:200]}",
+                        request=response.request,
+                        response=response,
+                    )
+                response.raise_for_status()
+                return response.json()
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and status not in _RETRY_STATUSES:
+                    body = getattr(getattr(exc, "response", None), "text", "")
+                    logger.error("Gemini request rejected (%s): %s %s", status, exc, str(body)[:300])
+                    raise
+                if attempt >= _MAX_ATTEMPTS:
+                    logger.error("Gemini call failed after %d attempts (%s): %s", attempt, model, exc)
+                    raise
+                delay = _backoff(attempt)
+                logger.warning("Gemini transient error %d/%d (%s): %s — retry in %.1fs", attempt, _MAX_ATTEMPTS, model, exc, delay)
+                await asyncio.sleep(delay)
+        raise RuntimeError("unreachable")
+
+    @staticmethod
+    def _first_candidate(data: dict[str, Any]) -> dict[str, Any]:
+        candidates = data.get("candidates") or []
+        if not candidates:
+            reason = (data.get("promptFeedback") or {}).get("blockReason")
+            raise ValueError(f"Gemini returned no candidates (block={reason})")
+        return candidates[0]
+
     async def generate(
         self,
         parts: list[dict[str, Any]],
@@ -213,39 +253,7 @@ class AIService:
         if thinking_budget is not None and "2.5" in model:
             gen_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
         payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": gen_config}
-        url = f"{self.base_url}/{model}:generateContent"
-
-        data: dict[str, Any] | None = None
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            try:
-                response = await self._client.post(url, json=payload)
-                if response.status_code in _RETRY_STATUSES:
-                    raise httpx.HTTPStatusError(
-                        f"Gemini transient {response.status_code}: {response.text[:200]}",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                data = response.json()
-                break
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if status is not None and status not in _RETRY_STATUSES:
-                    logger.error("Gemini request rejected (%s): %s", status, exc)
-                    raise
-                if attempt >= _MAX_ATTEMPTS:
-                    logger.error("Gemini call failed after %d attempts (%s): %s", attempt, model, exc)
-                    raise
-                delay = _backoff(attempt)
-                logger.warning("Gemini transient error %d/%d (%s): %s — retry in %.1fs", attempt, _MAX_ATTEMPTS, model, exc, delay)
-                await asyncio.sleep(delay)
-
-        assert data is not None
-        candidates = data.get("candidates") or []
-        if not candidates:
-            reason = (data.get("promptFeedback") or {}).get("blockReason")
-            raise ValueError(f"Gemini returned no candidates (block={reason})")
-        candidate = candidates[0]
+        candidate = self._first_candidate(await self._post(model, payload))
         content_parts = (candidate.get("content") or {}).get("parts") or []
         text = "\n".join(p.get("text", "") for p in content_parts if isinstance(p, dict) and p.get("text")).strip()
         if not text:
@@ -253,6 +261,48 @@ class AIService:
         if candidate.get("finishReason") == "MAX_TOKENS":
             logger.warning("Gemini hit MAX_TOKENS for model %s", model)
         return text
+
+    async def agent_step(
+        self,
+        contents: list[dict[str, Any]],
+        *,
+        system: str,
+        tools: list[dict[str, Any]],
+        model: str | None = None,
+        temperature: float = 0.2,
+        thinking_budget: int | None = 0,
+        max_tokens: int = 2048,
+    ) -> AgentStep:
+        """Один ход агента с function calling: модель либо зовёт инструменты, либо отвечает текстом.
+
+        `contents` — полная история (user/model/functionResponse) в формате Gemini; части ответа
+        модели возвращаются как есть (включая thoughtSignature), чтобы их можно было положить в историю."""
+        model = model or self.agent_model
+        gen_config: dict[str, Any] = {"temperature": temperature, "maxOutputTokens": max_tokens}
+        if thinking_budget is not None and "2.5" in model:
+            gen_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "tools": [{"functionDeclarations": tools}],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": gen_config,
+        }
+        candidate = self._first_candidate(await self._post(model, payload))
+        parts = [p for p in ((candidate.get("content") or {}).get("parts") or []) if isinstance(p, dict)]
+        calls: list[tuple[str, dict[str, Any]]] = []
+        texts: list[str] = []
+        for part in parts:
+            call = part.get("functionCall")
+            if isinstance(call, dict) and call.get("name"):
+                args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                calls.append((str(call["name"]), args))
+            elif part.get("text") and not part.get("thought"):
+                texts.append(str(part["text"]))
+        finish = str(candidate.get("finishReason") or "")
+        if finish == "MAX_TOKENS":
+            logger.warning("Gemini agent hit MAX_TOKENS for model %s", model)
+        return AgentStep(parts=parts, text="\n".join(texts).strip(), calls=calls, finish=finish)
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
         text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)
@@ -337,34 +387,6 @@ class AIService:
         return text.strip()
 
     # ------------------------------------------------------------- routing
-    async def classify_inbox_intent(self, raw_text: str, *, has_photo: bool = False, has_voice: bool = False) -> InboxIntent:
-        prompt = (
-            "Определи, к какому разделу личного Telegram-бота относится сообщение.\n"
-            "module: finance (деньги: расход/доход/долг/перевод), calorie (еда, что съел), "
-            "vacancy (текст вакансии), question (вопрос о своих данных: сколько потратил, сколько съел и т.п.), "
-            "menu (просит меню/старт), unknown.\n"
-            "mode: process (в сообщении уже есть данные для записи), open (просит открыть раздел), "
-            "answer (вопрос, нужен ответ), unknown.\n"
-            'Ответ только JSON: {"module":"...","mode":"...","confidence":0.0,"cleaned_text":"..."}\n\n'
-            f"has_photo={str(has_photo).lower()}, has_voice={str(has_voice).lower()}\nmessage: {raw_text}"
-        )
-        try:
-            data = await self.generate_json(prompt, temperature=0.0, max_tokens=512)
-        except Exception:
-            logger.exception("classify_inbox_intent failed")
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        module = str(data.get("module") or "unknown").strip().lower()
-        mode = str(data.get("mode") or "unknown").strip().lower()
-        if module not in {"finance", "calorie", "vacancy", "question", "menu", "unknown"}:
-            module = "unknown"
-        if mode not in {"process", "open", "answer", "unknown"}:
-            mode = "unknown"
-        confidence = max(0.0, min(1.0, _num(data.get("confidence")) or 0.0))
-        return InboxIntent(module=module, mode=mode, confidence=confidence, cleaned_text=_clean_text(data.get("cleaned_text"), max_len=1200))
-
-    # ------------------------------------------------------------- finance
     async def parse_finance_ops(self, raw_text: str) -> list[dict[str, Any]]:
         """Возвращает список операций:
         income/expense: {"kind","amount","category"(ключ),"note","account"(card|cash)}

@@ -1,49 +1,67 @@
-"""«Джарвис»: свободная команда → действие.
+"""«Джарвис»: свободная фраза → агент с инструментами (Gemini function calling).
 
-Удалить/исправить операцию, убрать долг «без имени», лимиты, регулярные платежи,
-напоминания (в т.ч. видео-уроки по расписанию), совет по еде. Выполняем сразу;
-спрашиваем только если нашли несколько подходящих операций или не хватает времени
-для напоминания. Любое изменение можно откатить кнопкой «↩️ Отменить».
+Как работает:
+- модель получает системный промпт (кто она, правила, срез данных с id) + историю
+  последних реплик + инструменты из `bot/agent_tools.py`;
+- в цикле (до MAX_STEPS) модель либо зовёт инструменты (мы выполняем и возвращаем
+  результат), либо отвечает текстом — это и есть ответ пользователю;
+- всё выполняется сразу, без «точно?»: любой ход можно откатить кнопкой «↩️ Отменить»
+  (см. bot/undo.py); если кандидатов несколько — модель сама покажет список и спросит;
+- «сообщил трату/еду/вакансию» — модель передаёт текст специализированному парсеру
+  (hand_off), у которого свой экран подтверждения;
+- история диалога хранится в памяти 30 минут, поэтому работают «удали её», «нет, вторую».
 """
 from __future__ import annotations
 
+import copy
+import html
 import json
 import logging
 import re
-from datetime import date, timedelta
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from .. import agent_tools as tools
 from .. import cache
 from .. import categories as cats
 from .. import emoji as pe
-from .. import finance as fin
-from .. import nutrition as nutri
 from .. import screen as screen_mod
-from .. import services
-from .. import ui
-from ..context import ai, db
+from .. import undo
+from ..context import ai, settings
 from ..keyboards import _btn, t
-from ..profile import Profile, h
-from ..states import BotStates
+from ..profile import Profile
 from .common import answer_now, get_profile, safe_delete, safe_edit, show_panel, show_progress
 
 router = Router(name="agent")
 logger = logging.getLogger(__name__)
 
-# Слова-триггеры: такие фразы идут в командный слой раньше финансового парсера.
+MAX_STEPS = 8
+HISTORY_TTL = 1800.0
+HISTORY_MAX_MESSAGES = 24
+HISTORY_MAX_CHARS = 16000
+REPLY_MAX_CHARS = 3500
+
+# Слова-триггеры: такие фразы идут к агенту раньше финансового/пищевого парсера
+# (важно внутри экранов «Финансы»/«Питание», где любой текст иначе считается записью).
 _COMMAND_HINTS = (
-    "удали", "удалить", "убери", "убрать", "сотри", "отмени последн", "исправ", "поправ", "ошиб", "не правильно", "неправильно",
-    "измени", "поменяй", "замени", "лимит", "бюджет", "больше нет", "больше нету", "нету больше", "нет больше",
+    "удали", "удалить", "убери", "убрать", "сотри", "отмени", "исправ", "поправ", "ошиб", "не правильно", "неправильно",
+    "измени", "поменяй", "замени", "перенеси", "лимит", "бюджет", "больше нет", "больше нету", "нету больше", "нет больше",
     "напомни", "напоминай", "напоминание", "отправляй", "присылай", "каждый день", "каждое утро", "каждый вечер", "по будням",
     "что мне поесть", "что поесть", "что съесть", "посоветуй", "чем перекусить", "что приготовить",
+    "покажи", "открой", "выключи", "включи", "поставь", "установи", "настрой", "сколько", "какой", "какие", "почему", "что ", "как ",
     "o'chir", "ochir", "tuzat", "xato", "limit", "eslat", "har kuni", "yubor", "nima yeyin", "nima yesam", "maslahat",
+    "ko'rsat", "korsat", "och", "qancha", "qanday", "nega", "o'zgartir", "ozgartir",
     "не 1", "не 2", "не 3", "не 4", "не 5", "не 6", "не 7", "не 8", "не 9",
 )
 _NOT_A_COMMAND = ("должен", "qarz", "дал ", "взял", "вернул")
+_STRONG = (
+    "удали", "убери", "исправ", "поправ", "ошиб", "измени", "поменяй", "лимит", "напомин", "отправляй", "присылай", "больше нет",
+    "покажи", "открой", "выключи", "включи", "o'chir", "tuzat", "eslat", "ko'rsat",
+)
 
 
 def looks_like_command(text: str) -> bool:
@@ -51,557 +69,308 @@ def looks_like_command(text: str) -> bool:
     if not any(k in low for k in _COMMAND_HINTS):
         return False
     # «дал Алишеру 200000, а он вернул» — это операции, а не команда; но «удали …» — команда всегда
-    strong = ("удали", "убери", "исправ", "поправ", "ошиб", "измени", "лимит", "напомин", "отправляй", "присылай", "больше нет", "o'chir", "tuzat", "eslat")
-    if any(k in low for k in strong):
+    if any(k in low for k in _STRONG):
         return True
     return not any(k in low for k in _NOT_A_COMMAND)
 
 
-# ------------------------------------------------------------------ helpers
-def _undo_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_btn("↩️ " + t(lang, "cancel"), "agent:undo", icon=pe.id_for("🔄")), _btn(t(lang, "to_menu"), "menu:open", icon=pe.ID_HOME)]])
+# ------------------------------------------------------------------ system prompt
+_WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-def _menu_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_btn(t(lang, "to_menu"), "menu:open", style="primary", icon=pe.ID_HOME)]])
-
-
-async def _say(message: Message, state: FSMContext, profile: Profile, text: str, *, undo: bool = False) -> None:
-    await state.clear()
-    kb = _undo_kb(profile.lang) if undo else _menu_kb(profile.lang)
-    await show_panel(message, state, text, kb)
-
-
-def _remember_undo(uid: int, payload: dict[str, Any]) -> None:
-    cache.put(uid, ("undo",), payload, 1800)
-
-
-def _entry_line(row: dict[str, Any], lang: str) -> str:
-    amount = float(row.get("amount") or 0)
-    day = str(row.get("entry_date") or "")[:10]
-    try:
-        day = date.fromisoformat(day).strftime("%d.%m")
-    except Exception:
-        pass
-    note = fin.clean_note(row.get("note"))
-    transfer = fin.transfer_from_note(row.get("note"))
-    if transfer:
-        return f"{day} · ↔ {fin.fmt_money(amount)} · {fin.transfer_label(transfer[0], transfer[1], lang)}" + (f" · {h(note)}" if note else "")
-    sign = "+" if row.get("entry_type") == "income" else "−"
-    return f"{day} · {sign}{fin.fmt_money(amount)} · {cats.label(fin.entry_category_key(row), lang)}" + (f" · {h(note)}" if note else "")
-
-
-def _parse_date(value: Any, today: date) -> date | None:
-    v = str(value or "").strip().lower()
-    if not v or v == "null":
-        return None
-    if v == "today":
-        return today
-    if v == "yesterday":
-        return today - timedelta(days=1)
-    try:
-        return date.fromisoformat(v[:10])
-    except Exception:
-        return None
-
-
-def _match_entries(entries: list[dict[str, Any]], flt: dict[str, Any], today: date) -> list[dict[str, Any]]:
-    """Подбор операций под фильтр из команды. Возвращает кандидатов (новые сверху)."""
-    kind = str(flt.get("kind") or "any").lower()
-    category = cats.normalize(flt.get("category"), "expense") if flt.get("category") and cats.get(str(flt.get("category"))) else None
-    if flt.get("category") and not category:
-        category = str(flt.get("category")).lower()
-    amount = fin.parse_amount(str(flt.get("amount"))) if flt.get("amount") not in (None, "", "null") else None
-    amount_val = amount[0] if amount else None
-    note = str(flt.get("note") or "").strip().casefold() or None
-    day = _parse_date(flt.get("date"), today)
-    unnamed = bool(flt.get("unnamed"))
-
-    out = []
-    for row in entries:
-        transfer = fin.transfer_from_note(row.get("note"))
-        row_kind = "transfer" if transfer else str(row.get("entry_type") or "expense")
-        if kind in {"lent", "debt"}:
-            if not transfer or kind not in transfer:
-                continue
-        elif kind != "any" and row_kind != kind:
-            continue
-        if category and not transfer and fin.entry_category_key(row) != category:
-            continue
-        if amount_val is not None and abs(float(row.get("amount") or 0) - amount_val) > 0.5:
-            continue
-        clean = (fin.clean_note(row.get("note")) or "").casefold()
-        if note and note not in clean:
-            continue
-        if unnamed and clean:
-            continue
-        if day is not None and str(row.get("entry_date") or "")[:10] != day.isoformat():
-            continue
-        out.append(row)
-    return out
-
-
-async def _context(profile: Profile) -> str:
-    entries, limits, recurring, rems = (
-        await services.finance_entries(profile.telegram_id),
-        await services.budgets(profile.telegram_id),
-        await services.recurring(profile.telegram_id),
-        await services.reminders(profile.telegram_id),
+def system_prompt(profile: Profile, snapshot: str) -> str:
+    now = profile.now
+    name = profile.first_name or "пользователя"
+    lang = "узбекский (латиница)" if profile.lang == "uz" else "русский"
+    return (
+        f"Ты — Джарвис, личный ассистент {name} внутри Telegram-бота Self (финансы, питание, напоминания, вакансии). "
+        "Ты умный, точный и немногословный; действуешь, а не переспрашиваешь.\n"
+        f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
+        f"Язык пользователя по умолчанию: {lang} — отвечай на том языке, на котором он пишет.\n\n"
+        "ЧТО ТЫ УМЕЕШЬ (инструменты): смотреть и менять операции (расходы/доходы/переводы/долги), счета, лимиты, регулярные платежи, "
+        "напоминания, дневник питания, план КБЖУ, настройки сводок и отчётов; считать статистику; открывать экраны; передавать записи парсерам.\n\n"
+        "ПРАВИЛА:\n"
+        "1. Команды выполняй СРАЗУ и без вопросов «точно?» — у пользователя есть кнопка «Отменить». Массовые действия (удалить всё за месяц, очистить дневник) тоже выполняй сразу.\n"
+        "2. Никогда не выдумывай id. Бери id из «Данные» ниже или из результата list_*. Если подходящих записей в «Данных» нет — сначала вызови list_* с фильтром.\n"
+        "3. Если под описание подходит НЕСКОЛЬКО записей и из фразы неясно, какая именно — не угадывай: покажи нумерованный список (дата · сумма · категория · комментарий) и спроси, какую. "
+        "Если ясно («последнее такси», «вчерашний обед», «все такси за неделю») — выполняй.\n"
+        "4. Пользователь СООБЩАЕТ о трате/доходе/долге сегодня («такси 25000», «дал Алишеру 200к») → hand_off(finance). Сообщает, что съел («съел плов») → hand_off(food). "
+        "Прислал текст вакансии → hand_off(vacancy). После hand_off ничего не пиши. Исключения — add_* напрямую: явная дата в прошлом («вчера», «3 сентября»), несколько операций с разными датами, или уже известные ккал.\n"
+        "5. Вопросы по данным («сколько потратил на еду в этом месяце», «что я ел вчера», «кто мне должен») — возьми цифры инструментом и ответь конкретно.\n"
+        "6. Совет по питанию («что поесть») — посмотри get_nutrition_summary и предложи 2–4 варианта с граммами и ккал под остаток дня, простые продукты, доступные в Узбекистане; ночью — лёгкое и белковое.\n"
+        "7. Всё остальное (общие вопросы, перевод, объяснения, болтовня) — отвечай как умный дружелюбный ассистент, зная контекст данных пользователя.\n"
+        "8. Формат ответа: коротко (1–8 строк), БЕЗ markdown (никаких **, #, таблиц, code-блоков), можно эмодзи и списки через «•». "
+        "Суммы — с пробелами между тысячами (1 250 000) без валюты или с «сум». После действия — что именно сделано (что удалено/изменено, сколько).\n"
+        "9. Суммы в речи: «10 тыс»=10000, «700к»=700000, «1.5 млн»=1500000, «40к»=40000. Категории — только ключи из списка ниже. "
+        "«Без имени» в долгах → clear_unnamed_debt. «На карте сейчас 500к» → set_account_balance. «Напомни через 2 часа» → add_reminder с временем = сейчас + 2 ч, days=once, date=сегодня.\n"
+        "10. Ошибка инструмента — объясни по-человечески, не показывай JSON. Никогда не придумывай цифры и записи: если инструмент их не вернул — скажи, что данных нет.\n"
+        "11. «Покажи/открой лимиты / финансы / питание / статистику / регулярные» → open_screen: экран сам покажет данные, перечислять их не нужно.\n\n"
+        f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
+        "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
+        f"ДАННЫЕ:\n{snapshot}"
     )
-    recent = entries[:12]
-    parts = [f"Сегодня {profile.today.isoformat()}, время {profile.now.strftime('%H:%M')}."]
-    if recent:
-        parts.append("Последние операции: " + "; ".join(_entry_line(r, "ru") for r in recent))
-    if limits:
-        parts.append("Лимиты: " + ", ".join(f"{k}={fin.fmt_money(v)}" for k, v in limits.items()))
-    if recurring:
-        parts.append("Регулярные платежи: " + ", ".join(f"{r.get('title')} {fin.fmt_money(float(r.get('amount') or 0))}" for r in recurring))
-    if rems:
-        parts.append("Напоминания: " + ", ".join(_reminder_title(r) for r in rems))
-    return "\n".join(parts)
 
 
-# ------------------------------------------------------------------ reminders storage helpers
-def _reminder_payload(row: dict[str, Any]) -> dict[str, Any]:
-    raw = str(row.get("reminder_text") or "")
-    if raw.startswith("R1:"):
-        try:
-            return json.loads(raw[3:])
-        except Exception:
-            pass
-    return {"text": raw, "links": [], "idx": 0}
+# ------------------------------------------------------------------ history
+def _compact(value: Any, depth: int = 0) -> Any:
+    """Сжать результат инструмента для хранения в истории: длинные списки → первые 10 элементов."""
+    if isinstance(value, list):
+        items = value[:10]
+        out = [_compact(v, depth + 1) for v in items]
+        if len(value) > 10:
+            out.append(f"… ещё {len(value) - 10}")
+        return out
+    if isinstance(value, dict):
+        return {k: _compact(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, str) and len(value) > 400:
+        return value[:400] + "…"
+    return value
 
 
-def _reminder_title(row: dict[str, Any]) -> str:
-    p = _reminder_payload(row)
-    return f"{str(row.get('reminder_time') or '')[:5]} {p.get('text') or ''}".strip()
+def compact_message(msg: dict[str, Any]) -> dict[str, Any]:
+    parts = []
+    for part in msg.get("parts") or []:
+        if isinstance(part, dict) and isinstance(part.get("functionResponse"), dict):
+            fr = dict(part["functionResponse"])
+            fr["response"] = _compact(fr.get("response"))
+            parts.append({"functionResponse": fr})
+        else:
+            parts.append(part)
+    return {"role": msg.get("role"), "parts": parts}
 
 
-def reminder_message(row: dict[str, Any]) -> tuple[str, int]:
-    """Текст для отправки и следующий индекс ссылки (ротация по кругу)."""
-    p = _reminder_payload(row)
-    links = [x for x in (p.get("links") or []) if x]
-    idx = int(p.get("idx") or 0)
-    text = f"⏰ <b>{h(p.get('text') or 'Напоминание')}</b>"
-    if links:
-        link = links[idx % len(links)]
-        text += f"\n{link}"
-        if len(links) > 1:
-            text += f"\n<i>{idx % len(links) + 1} / {len(links)}</i>"
-        return text, (idx + 1) % len(links)
-    return text, 0
-
-
-def _days_from(value: Any) -> list[int]:
-    v = value
-    if isinstance(v, list):
-        out = sorted({int(x) for x in v if str(x).isdigit() and 1 <= int(x) <= 7})
-        return out or [1, 2, 3, 4, 5, 6, 7]
-    v = str(v or "daily").lower()
-    if v == "weekdays":
-        return [1, 2, 3, 4, 5]
-    if v == "weekend":
-        return [6, 7]
-    return [1, 2, 3, 4, 5, 6, 7]
-
-
-_URL_RE = re.compile(r"https?://\S+")
-
-
-async def _create_reminder(profile: Profile, params: dict[str, Any], time_hhmm: str) -> str:
-    links = [str(x) for x in (params.get("links") or []) if x]
-    text = str(params.get("text") or "").strip()
-    text = _URL_RE.sub("", text).strip(" :—-") or ("Напоминание" if profile.lang != "uz" else "Eslatma")
-    days = _days_from(params.get("days"))
-    once = str(params.get("days") or "").lower() == "once"
-    payload = {"text": text, "links": links, "idx": 0, "once": once, "date": params.get("date")}
-    await db.add_reminder(profile.telegram_id, text="R1:" + json.dumps(payload, ensure_ascii=False), reminder_time=time_hhmm, days_of_week=days, tz_name=profile.tz_name)
-    services.invalidate_reminders(profile.telegram_id)
-    when = {"daily": "каждый день", "weekdays": "по будням", "weekend": "по выходным", "once": "один раз"}.get(str(params.get("days") or "daily").lower(), "каждый день")
-    if profile.lang == "uz":
-        when = {"каждый день": "har kuni", "по будням": "ish kunlari", "по выходным": "dam olish kunlari", "один раз": "bir marta"}[when]
-    extra = f" · {len(links)} {'ta havola, har kuni navbatma-navbat' if profile.lang == 'uz' else ('ссылка' if len(links) == 1 else 'ссылок, по одной в день по кругу')}" if links else ""
-    return f"⏰ {'Eslatma yaratildi' if profile.lang == 'uz' else 'Напоминание создано'}: <b>{h(text)}</b> · {when} · {time_hhmm}{extra}"
-
-
-# ------------------------------------------------------------------ main entry
-async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str) -> bool:
-    """Возвращает True, если фраза была командой и обработана."""
-    await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
+def _size(msg: dict[str, Any]) -> int:
     try:
-        plan = await ai.plan_command(text, await _context(profile))
+        return len(json.dumps(msg, ensure_ascii=False))
     except Exception:
-        logger.exception("plan_command failed")
-        return False
-    action, params, conf = plan["action"], plan["params"], plan["confidence"]
-    logger.info("agent: %s conf=%.2f params=%s", action, conf, json.dumps(params, ensure_ascii=False)[:300])
-    if action == "none" or conf < 0.4:
-        return False
-    await safe_delete(message)
-    lang = profile.lang
-    uid = profile.telegram_id
-    today = profile.today
-
-    # «удали без имени из долгов» — это сумма из «Счетов» (base) + операции без имени
-    if action == "delete_entry" and params.get("unnamed") and str(params.get("kind") or "") in {"lent", "debt"}:
-        action, params = "clear_unnamed_debt", {"side": params.get("kind")}
-
-    # ---------- удалить операцию
-    if action == "delete_entry":
-        entries = await services.finance_entries(uid)
-        found = _match_entries(entries, params, today)
-        if not found:
-            await _say(message, state, profile, profile.tr("Не нашёл такую операцию.", "Bunday operatsiya topilmadi."))
-            return True
-        if len(found) > 1 and not params.get("unnamed"):
-            await _ask_pick(message, state, profile, found[:8], mode="delete", params=params)
-            return True
-        rows = found if params.get("unnamed") else found[:1]
-        await db.delete_finance_entries(uid, [r["id"] for r in rows])
-        cache.invalidate(uid, "fin_entries")
-        _remember_undo(uid, {"type": "restore_entries", "rows": rows})
-        lines = [f"🗑 {_entry_line(r, lang)}" for r in rows]
-        await _say(message, state, profile, profile.tr("Удалил:\n", "O'chirdim:\n") + "\n".join(lines), undo=True)
-        return True
-
-    # ---------- исправить операцию
-    if action == "edit_entry":
-        entries = await services.finance_entries(uid)
-        find = params.get("find") if isinstance(params.get("find"), dict) else {}
-        changes = params.get("set") if isinstance(params.get("set"), dict) else {}
-        found = _match_entries(entries, find, today)
-        if not found and find.get("amount") is not None:
-            # возможно, сумма «неправильная» стоит в set — попробуем без суммы
-            found = _match_entries(entries, {k: v for k, v in find.items() if k != "amount"}, today)
-        if not found:
-            await _say(message, state, profile, profile.tr("Не нашёл операцию для исправления.", "Tuzatish uchun operatsiya topilmadi."))
-            return True
-        if len(found) > 1:
-            await _ask_pick(message, state, profile, found[:8], mode="edit", params=params)
-            return True
-        await _apply_edit(message, state, profile, found[0], changes)
-        return True
-
-    # ---------- убрать «без имени» из долгов
-    if action == "clear_unnamed_debt":
-        side = "lent" if str(params.get("side") or "lent") == "lent" else "debt"
-        settings_ = dict(await services.finance_settings(uid))
-        entries = await services.finance_entries(uid)
-        unnamed = [r for r in entries if (tr := fin.transfer_from_note(r.get("note"))) and side in tr and not fin.clean_note(r.get("note"))]
-        before_base = float(settings_.get(f"{side}_base") or 0)
-        settings_[f"{side}_base"] = 0.0
-        await services.save_finance_settings(uid, settings_)
-        if unnamed:
-            await db.delete_finance_entries(uid, [r["id"] for r in unnamed])
-            cache.invalidate(uid, "fin_entries")
-        _remember_undo(uid, {"type": "restore_debt", "side": side, "base": before_base, "rows": unnamed})
-        label = ("Дал в долг" if side == "lent" else "Мои долги") if lang != "uz" else ("Qarzga berilgan" if side == "lent" else "Mening qarzim")
-        await _say(message, state, profile, f"✅ {label}: {'«без имени» убрано' if lang != 'uz' else '«nomsiz» olib tashlandi'} ({fin.fmt_money(before_base + sum(float(r.get('amount') or 0) for r in unnamed))}).", undo=True)
-        return True
-
-    # ---------- остаток счёта
-    if action == "set_base":
-        bucket = fin.normalize_bucket(params.get("bucket"))
-        parsed = fin.parse_amount(str(params.get("amount") or ""))
-        if parsed is None or bucket == fin.INIT:
-            return False
-        snap = await services.finance_snapshot(profile)
-        live = fin.compute_balances(snap.entries)
-        settings_ = dict(snap.settings)
-        before = dict(settings_)
-        settings_[f"{bucket}_base"] = parsed[0] - live[bucket]
-        await services.save_finance_settings(uid, settings_)
-        _remember_undo(uid, {"type": "restore_settings", "settings": before})
-        await _say(message, state, profile, f"✅ {fin.bucket_label(bucket, lang)}: <b>{fin.fmt_money(parsed[0])} {profile.currency}</b>", undo=True)
-        return True
-
-    # ---------- лимиты
-    if action in {"set_budget", "remove_budget"}:
-        if not await db.ensure_available("budgets"):
-            await _say(message, state, profile, profile.tr("Лимиты недоступны: нужна миграция 004.", "Limitlar ishlamaydi: 004 migratsiyasi kerak."))
-            return True
-        raw_cat = str(params.get("category") or "")
-        if action == "remove_budget" and raw_cat.lower() == "all":
-            limits = await services.budgets(uid)
-            for k in list(limits):
-                await services.set_budget(uid, k, 0)
-            _remember_undo(uid, {"type": "restore_budgets", "limits": limits})
-            await _say(message, state, profile, profile.tr("✅ Все лимиты убраны.", "✅ Barcha limitlar o'chirildi."), undo=True)
-            return True
-        key = cats.normalize(raw_cat, "expense") if raw_cat else None
-        if not key or key == "other" and "проч" not in raw_cat.lower() and "other" != raw_cat.lower():
-            await _say(message, state, profile, profile.tr("Не понял категорию. Например: «лимит на еду 700 тыс».", "Kategoriya tushunarsiz. Masalan: «ovqatga limit 700 ming»."))
-            return True
-        limits = await services.budgets(uid)
-        prev = limits.get(key, 0.0)
-        if action == "remove_budget":
-            await services.set_budget(uid, key, 0)
-            _remember_undo(uid, {"type": "restore_budgets", "limits": {key: prev}})
-            await _say(message, state, profile, f"✅ {cats.label(key, lang)}: {'лимит убран' if lang != 'uz' else 'limit o`chirildi'}", undo=True)
-            return True
-        parsed = fin.parse_amount(str(params.get("amount") or ""))
-        if parsed is None or parsed[0] <= 0:
-            await _say(message, state, profile, profile.tr("Не понял сумму лимита.", "Limit summasi tushunarsiz."))
-            return True
-        await services.set_budget(uid, key, parsed[0])
-        _remember_undo(uid, {"type": "restore_budgets", "limits": {key: prev}})
-        statuses = await services.month_budget_statuses(profile)
-        st = next((b for b in statuses if b.category == key), None)
-        used = f"\n{fin.bar(min(st.ratio, 1.0), 12)} {ui.pct(st.ratio)} · {'sarflandi' if lang == 'uz' else 'потрачено'} {fin.fmt_money(st.spent)}" if st else ""
-        await _say(message, state, profile, f"🎯 {cats.label(key, lang)}: {'лимит на месяц' if lang != 'uz' else 'oylik limit'} <b>{fin.fmt_money(parsed[0])} {profile.currency}</b>{used}\n"
-                   + ui.muted("Показывается на главном экране и в статистике." if lang != "uz" else "Asosiy ekranda va statistikada ko'rinadi."), undo=True)
-        return True
-
-    # ---------- регулярные платежи
-    if action in {"clear_recurring", "pause_recurring", "resume_recurring"}:
-        items = await services.recurring(uid)
-        title = str(params.get("title") or "all").strip().casefold()
-        targets = items if title == "all" else [r for r in items if title in str(r.get("title") or "").casefold()]
-        if not targets:
-            await _say(message, state, profile, profile.tr("Регулярных платежей не найдено.", "Doimiy to'lovlar topilmadi."))
-            return True
-        if action == "clear_recurring":
-            for r in targets:
-                await db.delete_recurring(uid, r["id"])
-            _remember_undo(uid, {"type": "restore_recurring", "rows": targets})
-            msg = profile.tr("✅ Регулярные платежи убраны: ", "✅ Doimiy to'lovlar o'chirildi: ")
-        else:
-            enabled = action == "resume_recurring"
-            for r in targets:
-                await db.update_recurring(uid, r["id"], {"enabled": enabled})
-            _remember_undo(uid, {"type": "recurring_enabled", "ids": [r["id"] for r in targets], "enabled": not enabled})
-            msg = profile.tr("⏸ На паузе: " if not enabled else "▶️ Включены: ", "⏸ Pauza: " if not enabled else "▶️ Yoqildi: ")
-        services.invalidate_recurring(uid)
-        await _say(message, state, profile, msg + ", ".join(h(r.get("title")) for r in targets), undo=True)
-        return True
-
-    # ---------- напоминания
-    if action == "add_reminder":
-        links = [str(x) for x in (params.get("links") or []) if x] or _URL_RE.findall(text)
-        params["links"] = links
-        time_hhmm = str(params.get("time") or "").strip()
-        if not re.fullmatch(r"\d{1,2}:\d{2}", time_hhmm):
-            await state.set_state(BotStates.waiting_reminder_time)
-            await state.update_data(pending_reminder=params)
-            await show_panel(message, state, ui.join(ui.title("⏰", "Eslatma" if lang == "uz" else "Напоминание"),
-                                                     ui.card(f"<b>{h(params.get('text') or '')}</b>", [h(x) for x in links] or [ui.muted("—")]),
-                                                     f"<b>{'Soat nechada yuboray?' if lang == 'uz' else 'Во сколько присылать?'}</b> " + ui.muted("masalan 20:00" if lang == "uz" else "например 20:00")),
-                             _menu_kb(lang))
-            return True
-        hh, mm = time_hhmm.split(":")
-        result = await _create_reminder(profile, params, f"{int(hh):02d}:{int(mm):02d}")
-        await _say(message, state, profile, result)
-        return True
-
-    if action == "delete_reminder":
-        rems = await services.reminders(uid)
-        frag = str(params.get("text") or "all").strip().casefold()
-        targets = rems if frag == "all" else [r for r in rems if frag in _reminder_title(r).casefold()]
-        if not targets:
-            await _say(message, state, profile, profile.tr("Напоминаний не найдено.", "Eslatmalar topilmadi."))
-            return True
-        for r in targets:
-            await db.delete_reminder(uid, r["id"])
-        services.invalidate_reminders(uid)
-        _remember_undo(uid, {"type": "restore_reminders", "rows": targets})
-        await _say(message, state, profile, profile.tr("✅ Удалено: ", "✅ O'chirildi: ") + ", ".join(h(_reminder_title(r)) for r in targets), undo=True)
-        return True
-
-    if action == "list_reminders":
-        rems = await services.reminders(uid)
-        body = [f"• {h(_reminder_title(r))}" for r in rems] or [ui.muted("yo'q" if lang == "uz" else "нет")]
-        await _say(message, state, profile, ui.card(f"<b>⏰ {'Eslatmalar' if lang == 'uz' else 'Напоминания'}</b>", body))
-        return True
-
-    # ---------- питание
-    if action == "food_advice":
-        ctx = await _nutrition_context(profile)
-        try:
-            answer = await ai.food_advice(str(params.get("question") or text), ctx, lang)
-        except Exception:
-            logger.exception("food_advice failed")
-            answer = profile.tr("Не смог подобрать сейчас, попробуй позже.", "Hozir tanlay olmadim, keyinroq urining.")
-        await _say(message, state, profile, f"{pe.IDEA} {h(answer)}")
-        return True
-
-    if action == "log_food":
-        from .nutrition import handle_text as nutrition_handle
-
-        await nutrition_handle(message, state, profile, str(params.get("text") or text), reroute=False)
-        return True
-
-    if action == "question":
-        from .finance import answer_question
-
-        await answer_question(message, profile, str(params.get("question") or text))
-        return True
-
-    return False
+        return 0
 
 
-async def _nutrition_context(profile: Profile) -> str:
-    np_, logs = await services.nutrition_profile(profile.telegram_id), await services.today_calorie_logs(profile)
-    totals = nutri.totals(logs)
-    parts = [f"Время: {profile.now.strftime('%H:%M')}."]
-    if np_:
-        parts.append(f"План на день: {np_.get('daily_calories')} ккал, белки {np_.get('protein')} г, жиры {np_.get('fat')} г, углеводы {np_.get('carbs')} г. Цель: {np_.get('title')}.")
-        left = float(np_.get("daily_calories") or 0) - totals["calories"]
-        parts.append(f"Съедено сегодня: {int(totals['calories'])} ккал, Б {int(totals['protein'])} / Ж {int(totals['fat'])} / У {int(totals['carbs'])} г. Осталось: {int(left)} ккал, белка {int(float(np_.get('protein') or 0) - totals['protein'])} г.")
-    if logs:
-        parts.append("Сегодня ел: " + ", ".join(str(r.get("meal_desc") or "") for r in logs[:8]))
-    return "\n".join(parts)
+def trim_history(contents: list[dict[str, Any]], *, max_messages: int = HISTORY_MAX_MESSAGES, max_chars: int = HISTORY_MAX_CHARS) -> list[dict[str, Any]]:
+    """Оставить хвост истории: не длиннее max_messages/max_chars и начинающийся с текстовой реплики пользователя
+    (чтобы не оборвать пару functionCall/functionResponse)."""
+    msgs = [compact_message(m) for m in contents]
+    while msgs and (len(msgs) > max_messages or sum(_size(m) for m in msgs) > max_chars):
+        msgs.pop(0)
+    while msgs and not _is_user_text(msgs[0]):
+        msgs.pop(0)
+    return msgs
 
 
-async def _apply_edit(message: Message | CallbackQuery, state: FSMContext, profile: Profile, row: dict[str, Any], changes: dict[str, Any]) -> None:
-    fields: dict[str, Any] = {}
-    if changes.get("amount") not in (None, "", "null"):
-        parsed = fin.parse_amount(str(changes.get("amount")))
-        if parsed:
-            fields["amount"] = parsed[0]
-    if changes.get("category") and cats.get(cats.normalize(str(changes["category"]), "income" if row.get("entry_type") == "income" else "expense")):
-        fields["category"] = cats.normalize(str(changes["category"]), "income" if row.get("entry_type") == "income" else "expense")
-    if changes.get("note") not in (None, "", "null"):
-        transfer = fin.transfer_from_note(row.get("note"))
-        fields["note"] = fin.note_with_transfer(str(changes["note"]), *transfer) if transfer else fin.note_with_bucket(str(changes["note"]), fin.bucket_from_note(row.get("note")))
-    if not fields:
-        text = profile.tr("Не понял, что именно изменить.", "Nimani o'zgartirishni tushunmadim.")
-        if isinstance(message, CallbackQuery):
-            await safe_edit(message, text, _menu_kb(profile.lang))
-        else:
-            await _say(message, state, profile, text)
-        return
-    before = {k: row.get(k) for k in fields}
-    await db.update_finance_entry(profile.telegram_id, row["id"], fields)
-    cache.invalidate(profile.telegram_id, "fin_entries")
-    _remember_undo(profile.telegram_id, {"type": "restore_fields", "entry_id": row["id"], "fields": before})
-    after = {**row, **fields}
-    text = f"✏️ {_entry_line(row, profile.lang)}\n→ {_entry_line(after, profile.lang)}"
-    await state.clear()
-    if isinstance(message, CallbackQuery):
-        await safe_edit(message, text, _undo_kb(profile.lang))
+def _is_user_text(msg: dict[str, Any]) -> bool:
+    return msg.get("role") == "user" and any(isinstance(p, dict) and p.get("text") for p in (msg.get("parts") or []))
+
+
+def load_history(uid: int) -> list[dict[str, Any]]:
+    value = cache.get(uid, ("agent_history",))
+    return copy.deepcopy(value) if isinstance(value, list) else []
+
+
+def save_history(uid: int, contents: list[dict[str, Any]]) -> None:
+    cache.put(uid, ("agent_history",), trim_history(contents), HISTORY_TTL)
+
+
+def forget_history(uid: int) -> None:
+    cache.put(uid, ("agent_history",), None, 1)
+
+
+# ------------------------------------------------------------------ reply rendering
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_BULLET_RE = re.compile(r"^\s*[\*\-–]\s+", re.MULTILINE)
+_HEADER_RE = re.compile(r"^\s*#{1,6}\s*", re.MULTILINE)
+
+
+def render_reply(text: str) -> str:
+    """Текст модели → безопасный HTML: экранируем, **жирный** оставляем, маркеры списков → «•»."""
+    clean = html.escape(str(text or "").strip())
+    clean = _HEADER_RE.sub("", clean)
+    clean = _BULLET_RE.sub("• ", clean)
+    clean = _BOLD_RE.sub(r"<b>\1</b>", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    if len(clean) > REPLY_MAX_CHARS:
+        clean = clean[: REPLY_MAX_CHARS - 1].rstrip() + "…"
+    return clean
+
+
+# ------------------------------------------------------------------ agent loop
+@dataclass
+class AgentResult:
+    text: str
+    ctx: tools.ToolContext
+    contents: list[dict[str, Any]]
+    steps: int
+
+
+StepFn = Callable[..., Awaitable[Any]]
+RunFn = Callable[[str, dict[str, Any], tools.ToolContext], Awaitable[dict[str, Any]]]
+
+
+async def run_agent(
+    profile: Profile,
+    text: str,
+    history: list[dict[str, Any]],
+    *,
+    snapshot: str,
+    step_fn: StepFn | None = None,
+    run_tool: RunFn | None = None,
+    max_steps: int = MAX_STEPS,
+) -> AgentResult:
+    """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст."""
+    step_fn = step_fn or ai.agent_step
+    run_tool = run_tool or tools.run
+    ctx = tools.ToolContext(profile=profile, text=text)
+    contents = list(history) + [{"role": "user", "parts": [{"text": text}]}]
+    system = system_prompt(profile, snapshot)
+    decls = tools.declarations()
+    final = ""
+    steps = 0
+    for steps in range(1, max_steps + 1):
+        step = await step_fn(contents, system=system, tools=decls, thinking_budget=settings.agent_thinking_budget)
+        contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "…"}]})
+        if not step.calls:
+            final = step.text or final
+            break
+        responses = []
+        for name, args in step.calls:
+            logger.info("agent tool %s %s", name, json.dumps(args, ensure_ascii=False)[:300])
+            result = await run_tool(name, args, ctx)
+            responses.append({"functionResponse": {"name": name, "response": result}})
+        contents.append({"role": "user", "parts": responses})
+        if ctx.handoff:
+            # парсер покажет свой экран; в историю кладём отметку, чтобы пары call/response были закрыты
+            final = ""
+            contents.append({"role": "model", "parts": [{"text": f"(передано в {ctx.handoff[0]})"}]})
+            break
+        if step.text and not ctx.handoff:
+            final = step.text  # модель могла ответить текстом и одновременно позвать инструмент
     else:
-        await show_panel(message, state, text, _undo_kb(profile.lang))
+        final = final or ("Juda ko'p qadam, to'xtadim. Aniqroq yozing." if profile.lang == "uz" else "Слишком много шагов, остановился. Уточни запрос.")
+    if not final and not ctx.handoff:
+        final = ("Bajarildi." if profile.lang == "uz" else "Готово.") if ctx.mutated else ("Tushunmadim, boshqacha yozing." if profile.lang == "uz" else "Не понял, напиши иначе.")
+        contents.append({"role": "model", "parts": [{"text": final}]})
+    return AgentResult(text=final, ctx=ctx, contents=contents, steps=steps)
 
 
-async def _ask_pick(message: Message, state: FSMContext, profile: Profile, found: list[dict[str, Any]], *, mode: str, params: dict[str, Any]) -> None:
-    lang = profile.lang
-    rows = [[_btn(_entry_line(r, lang)[:60], f"agent:pick:{i}")] for i, r in enumerate(found)]
-    rows.append([_btn(t(lang, "cancel"), "menu:open", style="danger", icon=pe.ID_CANCEL)])
-    await state.set_state(BotStates.waiting_agent_pick)
-    await state.update_data(agent_pick={"mode": mode, "ids": [r["id"] for r in found], "params": params})
-    title = ("Qaysi birini o'chiray?" if mode == "delete" else "Qaysi birini tuzatay?") if lang == "uz" else ("Какую удалить?" if mode == "delete" else "Какую исправить?")
-    await show_panel(message, state, f"🤔 <b>{title}</b>", InlineKeyboardMarkup(inline_keyboard=rows))
+# ------------------------------------------------------------------ telegram glue
+def _reply_kb(lang: str, *, undo_available: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if undo_available:
+        rows.append([_btn("↩️ " + t(lang, "cancel"), "agent:undo", icon=pe.id_for("🔄"))])
+    rows.append([_btn(t(lang, "to_menu"), "menu:open", style="primary", icon=pe.ID_HOME)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.callback_query(F.data.startswith("agent:pick:"))
-async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
-    profile = await get_profile(callback.from_user)
-    data = (await state.get_data()).get("agent_pick") or {}
+async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str) -> bool:
+    """Прогнать фразу через агента. Возвращает False только если агент недоступен (ошибка AI)."""
+    uid = profile.telegram_id
+    await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
+    undo.begin_turn(uid)
     try:
-        idx = int(callback.data.split(":")[-1])
-        entry_id = data["ids"][idx]
+        snapshot = await tools.snapshot(profile)
     except Exception:
-        await answer_now(callback)
-        return
-    await answer_now(callback)
-    row = await db.get_finance_entry(profile.telegram_id, entry_id)
-    if not row:
-        await safe_edit(callback, profile.tr("Операция уже удалена.", "Operatsiya allaqachon o'chirilgan."), _menu_kb(profile.lang))
-        return
-    if data.get("mode") == "delete":
-        await db.delete_finance_entries(profile.telegram_id, [entry_id])
-        cache.invalidate(profile.telegram_id, "fin_entries")
-        _remember_undo(profile.telegram_id, {"type": "restore_entries", "rows": [row]})
+        logger.exception("agent snapshot failed")
+        snapshot = "(данные временно недоступны)"
+    try:
+        result = await run_agent(profile, text, load_history(uid), snapshot=snapshot)
+    except Exception:
+        logger.exception("agent failed")
+        undo.end_turn(uid)
+        return False
+    mutated = undo.end_turn(uid)
+    save_history(uid, result.contents)
+    ctx = result.ctx
+    logger.info("agent: steps=%d tools=%s mutated=%s handoff=%s", result.steps, ctx.calls, mutated, ctx.handoff)
+
+    if ctx.handoff:
+        module, payload = ctx.handoff
+        await _dispatch_handoff(message, state, profile, module, payload)
+        return True
+
+    await safe_delete(message)
+    reply = render_reply(result.text)
+    if ctx.open_screen:
+        await _open_screen(message, state, profile, ctx.open_screen, notice=reply, undo_available=mutated)
+        return True
+    await state.clear()
+    await show_panel(message, state, reply, _reply_kb(profile.lang, undo_available=mutated))
+    return True
+
+
+async def _dispatch_handoff(message: Message, state: FSMContext, profile: Profile, module: str, text: str) -> None:
+    if module == "finance":
+        from .finance import handle_finance_text
+
+        await handle_finance_text(message, state, profile, text, source="text", reroute=False)
+    elif module == "food":
+        from .nutrition import handle_text
+
+        await handle_text(message, state, profile, text, reroute=False)
+    else:
+        from .vacancy import process_vacancy
+
+        await process_vacancy(message, state, profile, text)
+
+
+async def _open_screen(message: Message, state: FSMContext, profile: Profile, screen: str, *, notice: str, undo_available: bool) -> None:
+    if screen == "finance":
+        from .finance import render_panel
+
+        await render_panel(message, state, profile, notice=notice)
+    elif screen == "nutrition":
+        from .nutrition import render_panel as render_nutrition
+
+        await render_nutrition(message, state, profile, notice=notice)
+    elif screen == "budgets":
+        from .finance_extra import render_budgets
+
+        await render_budgets(message, state, profile, notice=notice)
+    elif screen == "recurring":
+        from .finance_extra import render_recurring
+
+        await render_recurring(message, state, profile, notice=notice)
+    elif screen == "stats":
+        from .. import finance as fin
+        from .. import services
+        from ..keyboards import finance_stats_keyboard
+        from .finance import build_stats_text
+
+        entries, limits = await services.finance_entries(profile.telegram_id), await services.budgets(profile.telegram_id)
+        stats = fin.compute_stats(entries, fin.period_for("month", profile.today))
         await state.clear()
-        await safe_edit(callback, profile.tr("Удалил:\n", "O'chirdim:\n") + f"🗑 {_entry_line(row, profile.lang)}", _undo_kb(profile.lang))
-        return
-    changes = (data.get("params") or {}).get("set") or {}
-    await _apply_edit(callback, state, profile, row, changes)
+        await show_panel(message, state, build_stats_text(stats, profile, limits) + (f"\n\n{notice}" if notice else ""), finance_stats_keyboard("month", profile.lang))
+    else:
+        from .menu import render_dashboard
 
-
-@router.message(BotStates.waiting_reminder_time, F.text)
-async def msg_reminder_time(message: Message, state: FSMContext) -> None:
-    profile = await get_profile(message.from_user)
-    raw = (message.text or "").strip().replace(".", ":").replace(" ", "")
-    await safe_delete(message)
-    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", raw)
-    params = (await state.get_data()).get("pending_reminder") or {}
-    if not m or not params:
-        await show_panel(message, state, profile.tr("Напиши время, например <code>20:00</code>", "Vaqtni yozing, masalan <code>20:00</code>"), _menu_kb(profile.lang))
-        return
-    hh, mm = int(m.group(1)), int(m.group(2) or 0)
-    if not (0 <= hh <= 23 and 0 <= mm <= 59):
-        await show_panel(message, state, profile.tr("Время от 00:00 до 23:59", "Vaqt 00:00 dan 23:59 gacha"), _menu_kb(profile.lang))
-        return
-    result = await _create_reminder(profile, params, f"{hh:02d}:{mm:02d}")
-    await _say(message, state, profile, result)
-
-
-@router.message(BotStates.waiting_reminder_time)
-async def msg_reminder_time_other(message: Message) -> None:
-    await safe_delete(message)
+        await render_dashboard(message, state, profile, notice=notice, undo=undo_available)
 
 
 @router.callback_query(F.data == "agent:undo")
 async def cb_undo(callback: CallbackQuery, state: FSMContext) -> None:
     profile = await get_profile(callback.from_user)
     uid = profile.telegram_id
-    payload = cache.get(uid, ("undo",))
-    if not payload:
+    if not undo.peek(uid):
         await answer_now(callback, profile.tr("Отменять нечего", "Bekor qiladigan narsa yo'q"), alert=True)
         return
     await answer_now(callback, profile.tr("Отменено ↩️", "Bekor qilindi ↩️"))
-    cache.put(uid, ("undo",), None, 1)
-    kind = payload.get("type")
     try:
-        if kind == "restore_entries":
-            rows = payload.get("rows") or []
-            for r in rows:
-                await db.add_finance_entries(uid, [{"entry_type": r.get("entry_type"), "amount": r.get("amount"), "category": r.get("category"), "note": r.get("note"), "source": r.get("source") or "restored"}],
-                                             entry_date=date.fromisoformat(str(r.get("entry_date"))[:10]))
-            cache.invalidate(uid, "fin_entries")
-        elif kind == "restore_fields":
-            await db.update_finance_entry(uid, payload["entry_id"], payload["fields"])
-            cache.invalidate(uid, "fin_entries")
-        elif kind == "delete_entries":
-            await db.delete_finance_entries(uid, payload.get("ids") or [])
-            cache.invalidate(uid, "fin_entries")
-        elif kind == "delete_calorie_logs":
-            for log_id in payload.get("ids") or []:
-                await services.delete_calorie_log(uid, log_id)
-        elif kind == "restore_debt":
-            settings_ = dict(await services.finance_settings(uid))
-            settings_[f"{payload['side']}_base"] = payload.get("base") or 0.0
-            await services.save_finance_settings(uid, settings_)
-            for r in payload.get("rows") or []:
-                await db.add_finance_entries(uid, [{"entry_type": r.get("entry_type"), "amount": r.get("amount"), "category": r.get("category"), "note": r.get("note"), "source": "restored"}],
-                                             entry_date=date.fromisoformat(str(r.get("entry_date"))[:10]))
-            cache.invalidate(uid, "fin_entries")
-        elif kind == "restore_settings":
-            await services.save_finance_settings(uid, payload["settings"])
-        elif kind == "restore_budgets":
-            for k, v in (payload.get("limits") or {}).items():
-                await services.set_budget(uid, k, float(v or 0))
-        elif kind == "restore_recurring":
-            for r in payload.get("rows") or []:
-                await db.add_recurring(uid, title=r.get("title"), amount=float(r.get("amount") or 0), category=r.get("category") or "home", bucket=r.get("bucket") or "card", day_of_month=int(r.get("day_of_month") or 1))
-            services.invalidate_recurring(uid)
-        elif kind == "recurring_enabled":
-            for rid in payload.get("ids") or []:
-                await db.update_recurring(uid, rid, {"enabled": bool(payload.get("enabled"))})
-            services.invalidate_recurring(uid)
-        elif kind == "restore_reminders":
-            for r in payload.get("rows") or []:
-                await db.add_reminder(uid, text=r.get("reminder_text") or "", reminder_time=str(r.get("reminder_time") or "20:00")[:5], days_of_week=r.get("days_of_week") or [1, 2, 3, 4, 5, 6, 7], tz_name=r.get("timezone") or profile.tz_name)
-            services.invalidate_reminders(uid)
+        await undo.apply(uid, tz_name=profile.tz_name)
     except Exception:
         logger.exception("undo failed")
-        await safe_edit(callback, profile.tr("Не удалось отменить.", "Bekor qilib bo'lmadi."), _menu_kb(profile.lang))
+        await safe_edit(callback, profile.tr("Не удалось отменить.", "Bekor qilib bo'lmadi."), _reply_kb(profile.lang, undo_available=False))
         return
-    from .menu import build_dashboard
+    # агент должен знать, что действие откатили
+    history = load_history(uid)
+    if history:
+        history.append({"role": "user", "parts": [{"text": "(нажал «Отменить»: последнее действие откачено)"}]})
+        history.append({"role": "model", "parts": [{"text": "Понял, откатил."}]})
+        save_history(uid, history)
     from ..keyboards import main_menu_keyboard
+    from .menu import build_dashboard
 
     await state.clear()
     if callback.message is not None:
         await screen_mod.drop_chart(callback.bot, callback.message.chat.id)
     await safe_edit(callback, await build_dashboard(profile), main_menu_keyboard(profile.lang))
+
+
+__all__ = ["router", "looks_like_command", "handle_command", "run_agent", "render_reply", "trim_history", "system_prompt", "AgentResult"]

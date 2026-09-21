@@ -1,7 +1,9 @@
 """Свободный ввод без выбранного раздела: сам определяем, куда отправить.
 
-Порядок: быстрые правила (регулярки/ключевые слова) → AI-классификатор только
-если правила не сработали. Голос транскрибируется один раз."""
+Порядок: быстрые правила (регулярки/ключевые слова — дёшево и мгновенно) →
+всё остальное отдаём агенту «Джарвис», который сам решает: выполнить команду,
+ответить на вопрос по данным, передать запись парсеру или просто поговорить.
+Голос транскрибируется один раз."""
 from __future__ import annotations
 
 import logging
@@ -15,7 +17,6 @@ from .. import finance as fin
 from .. import nutrition as nutri
 from .. import screen as screen_mod
 from .. import vacancy as vac
-from ..context import ai
 from ..profile import Profile, h
 from . import agent
 from . import finance as finance_h
@@ -77,55 +78,12 @@ async def route_text(
     if not skip_finance and fin.looks_like_finance(text) and not _is_question(text):
         await finance_h.handle_finance_text(message, state, profile, text, source=source, reroute=False)
         return True
-    if _is_question(text):
-        await safe_delete(message)
-        await finance_h.answer_question(message, profile, text)
-        return True
-    if not skip_food and nutri.looks_like_food(text):
+    if not skip_food and nutri.looks_like_food(text) and not _is_question(text):
         await nutrition_h.handle_text(message, state, profile, text, transcript=transcript, reroute=False)
         return True
-
-    # Ничего не подошло — спрашиваем AI (быстрый вызов без «размышлений»).
-    try:
-        intent = await ai.classify_inbox_intent(text, has_photo=has_photo, has_voice=transcript is not None)
-    except Exception:
-        return False
-    if intent.confidence < 0.55 or intent.module == "unknown":
-        return await agent.handle_command(message, state, profile, text)
-    cleaned = (intent.cleaned_text or text).strip() or text
-    if intent.module == "menu":
-        await safe_delete(message)
-        await send_main_menu(message, profile, force_new=True)
-        return True
-    if intent.module == "vacancy":
-        if intent.mode == "process":
-            await vacancy_h.process_vacancy(message, state, profile, text)
-        else:
-            await safe_delete(message)
-            await vacancy_h.open_panel(message, state, profile)
-        return True
-    if intent.module == "finance":
-        if intent.mode == "process":
-            await finance_h.handle_finance_text(message, state, profile, cleaned, source=source, reroute=False)
-        elif intent.mode == "answer":
-            await safe_delete(message)
-            await finance_h.answer_question(message, profile, cleaned)
-        else:
-            await safe_delete(message)
-            await finance_h.render_panel(message, state, profile)
-        return True
-    if intent.module == "question":
-        await safe_delete(message)
-        await finance_h.answer_question(message, profile, cleaned)
-        return True
-    if intent.module == "calorie":
-        if intent.mode == "process":
-            await nutrition_h.handle_text(message, state, profile, cleaned, transcript=transcript, reroute=False)
-        else:
-            await safe_delete(message)
-            await nutrition_h.render_panel(message, state, profile)
-        return True
-    return False
+    # Всё остальное — «Джарвис»: команды без ключевых слов, вопросы по данным, уточнения
+    # к предыдущей реплике («вторую», «да, её»), свободный чат.
+    return await agent.handle_command(message, state, profile, text)
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:

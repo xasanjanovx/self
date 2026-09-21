@@ -163,9 +163,8 @@ async def brief_worker(bot: Bot) -> None:
 
 async def _reminder_tick(bot: Bot) -> None:
     """Напоминания (в т.ч. видео-уроки): раз в минуту, по локальному времени пользователя."""
-    from .handlers.agent import reminder_message, _reminder_payload
+    from . import reminders as rem
     from .keyboards import back_to_menu_keyboard
-    import json
 
     now_utc = datetime.now(timezone.utc)
     try:
@@ -185,7 +184,7 @@ async def _reminder_tick(bot: Bot) -> None:
         days = {int(d) for d in (row.get("days_of_week") or [1, 2, 3, 4, 5, 6, 7])}
         if (local_now.weekday() + 1) not in days:
             continue
-        payload = _reminder_payload(row)
+        payload = rem.payload_of(row)
         if payload.get("date") and str(payload["date"])[:10] != today_key:
             continue
         hhmm = str(row.get("reminder_time") or "")[:5]
@@ -198,7 +197,7 @@ async def _reminder_tick(bot: Bot) -> None:
             if minutes_now - (hh * 60 + mm) > 180:
                 await db.update_reminder(telegram_id, row["id"], {"last_sent_key": today_key})
             continue
-        text, next_idx = reminder_message(row)
+        text, next_idx = rem.message(row)
         try:
             await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang), link_preview_options=LinkPreviewOptions(is_disabled=False, prefer_large_media=True))
         except Exception:
@@ -208,7 +207,7 @@ async def _reminder_tick(bot: Bot) -> None:
         payload["idx"] = next_idx
         if payload.get("once"):
             fields["enabled"] = False
-        fields["reminder_text"] = "R1:" + json.dumps(payload, ensure_ascii=False)
+        fields["reminder_text"] = rem.encode(payload)
         await db.update_reminder(telegram_id, row["id"], fields)
         services.invalidate_reminders(telegram_id)
 

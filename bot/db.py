@@ -236,6 +236,8 @@ class Database:
                 "carbs": item.get("carbs"),
                 "confidence": item.get("confidence"),
                 "advice": item.get("advice"),
+                # агент может записать еду задним числом
+                **({"created_at": str(item["created_at"])} if item.get("created_at") else {}),
             }
             for item in items
             if str(item.get("meal_desc") or "").strip()
@@ -244,6 +246,14 @@ class Database:
             return []
         res = await self._table("calorie_logs").insert(payload).execute()
         return list(res.data or [])
+
+    async def update_calorie_log(self, telegram_id: int, log_id: str | int, fields: dict[str, Any]) -> None:
+        await self._table("calorie_logs").update(fields).eq("telegram_id", telegram_id).eq("id", log_id).execute()
+
+    async def delete_calorie_logs(self, telegram_id: int, ids: list[Any]) -> None:
+        if not ids:
+            return
+        await self._table("calorie_logs").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
 
     async def list_calorie_logs_between(
         self, telegram_id: int, start_utc: datetime, end_utc: datetime, *, columns: str = CALORIE_COLUMNS
@@ -317,7 +327,7 @@ class Database:
                 "amount": float(entry.get("amount") or 0),
                 "category": str(entry.get("category") or "other"),
                 "note": entry.get("note"),
-                "entry_date": entry_date.isoformat(),
+                "entry_date": str(entry.get("entry_date") or entry_date.isoformat())[:10],
                 "source": str(entry.get("source") or source),
             }
             for entry in entries

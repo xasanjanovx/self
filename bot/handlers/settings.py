@@ -51,10 +51,10 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             ui.card("<b>🌙 Вечернее напоминание</b> · 21:00", ["если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня"]),
             ui.card("<b>📊 Авто-отчёт</b>", ["воскресенье 20:00 (недельный) или 1-го числа (месячный)"]),
         )
-    from .agent import _reminder_title
+    from .. import reminders as rem
 
     rems = await services.reminders(profile.telegram_id)
-    rem_lines = [f"• {h(_reminder_title(r))}" for r in rems] or [ui.muted(
+    rem_lines = [f"• {h(rem.title(r))}" for r in rems] or [ui.muted(
         "Yo'q. Yozing: «har kuni 20:00 da menga shu havolani yubor …»" if lang == "uz"
         else "Нет. Напиши: «каждый день в 20:00 отправляй мне это видео …»")]
     text = ui.join(text, ui.card(f"<b>⏰ {'Eslatmalar' if lang == 'uz' else 'Напоминания'}</b>", rem_lines))
@@ -67,7 +67,7 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             evening=bool(us.get("brief_evening", True)),
             report_enabled=bool(prefs.get("enabled", True)),
             report_frequency=str(prefs.get("frequency") or "weekly"),
-            reminders=[(str(r.get("id")), _reminder_title(r)) for r in rems],
+            reminders=[(str(r.get("id")), rem.title(r)) for r in rems],
         ),
     )
 

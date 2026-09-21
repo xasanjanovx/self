@@ -18,6 +18,9 @@ class Settings:
     gemini_model: str
     gemini_vision_model: str
     gemini_transcribe_model: str
+    # «Джарвис»: модель агента (по умолчанию = GEMINI_MODEL) и бюджет «размышлений» (0 = быстрее).
+    agent_model: str
+    agent_thinking_budget: int
     app_timezone: str
     default_currency: str
     default_language: str
@@ -107,6 +110,8 @@ def load_settings() -> Settings:
         gemini_model=_gemini_model("GEMINI_MODEL"),
         gemini_vision_model=_gemini_model("GEMINI_VISION_MODEL"),
         gemini_transcribe_model=_gemini_model("GEMINI_TRANSCRIBE_MODEL"),
+        agent_model=_gemini_model("AGENT_MODEL", _gemini_model("GEMINI_MODEL")),
+        agent_thinking_budget=_int("AGENT_THINKING_BUDGET", 0),
         app_timezone=os.getenv("APP_TIMEZONE", "Asia/Tashkent"),
         default_currency=os.getenv("DEFAULT_CURRENCY", "UZS"),
         default_language=os.getenv("DEFAULT_LANGUAGE", "ru"),
