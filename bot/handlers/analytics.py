@@ -81,6 +81,24 @@ async def cb_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
     await render_dashboard(callback, profile, code)
 
 
+@router.callback_query(F.data == "dash:deep")
+async def cb_deep(callback: CallbackQuery, state: FSMContext) -> None:
+    """Полный разбор через Джарвиса: тренды, аномалии, прогноз, «где переплачиваю»."""
+    from .agent import handle_command
+
+    await answer_now(callback, "🧠")
+    profile = await get_profile(callback.from_user)
+    if callback.message is None:
+        return
+    await screen_mod.drop_chart(callback.bot, callback.message.chat.id)
+    text = profile.tr(
+        "Сделай полный анализ моих данных: тренды за 3 месяца, аномалии, прогноз до конца месяца, где я переплачиваю, питание.",
+        "Ma'lumotlarimni to'liq tahlil qil: 3 oylik trendlar, anomaliyalar, oy oxirigacha prognoz, qayerda ortiqcha sarflayapman, ovqatlanish.",
+    )
+    if not await handle_command(callback.message, state, profile, text, own_message=False):
+        await answer_now(callback, profile.tr("Не удалось построить анализ", "Tahlil tuzilmadi"), alert=True)
+
+
 @router.callback_query(F.data.startswith("dash:kcal:") | F.data.startswith("dash:cats:"))
 async def cb_chart(callback: CallbackQuery) -> None:
     profile = await get_profile(callback.from_user)

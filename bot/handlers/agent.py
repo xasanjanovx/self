@@ -106,7 +106,10 @@ def system_prompt(profile: Profile, snapshot: str) -> str:
         "10. Ошибка инструмента — объясни по-человечески, не показывай JSON. Никогда не придумывай цифры и записи: если инструмент их не вернул — скажи, что данных нет.\n"
         "11. «Покажи/открой лимиты / финансы / питание / статистику / регулярные» → open_screen: экран сам покажет данные, перечислять их не нужно.\n"
         "12. Имена людей в долгах могут быть записаны иначе, чем сказал пользователь («Асельбек» vs «Асилбек» — голосовой ввод): смотри «Долги по людям» ниже и подбирай похожее имя; note_contains ищет нечётко. "
-        "«Дал Асилбеку не 2 млн, а 1 млн» = итог по человеку должен стать 1 000 000: посмотри его долговые операции и исправь сумму / удали лишнюю, чтобы итог сошёлся.\n\n"
+        "«Дал Асилбеку не 2 млн, а 1 млн» = итог по человеку должен стать 1 000 000: посмотри его долговые операции и исправь сумму / удали лишнюю, чтобы итог сошёлся.\n"
+        "13. «Проанализируй мои данные / где переплачиваю / прогноз до конца месяца / сделай отчёт» → deep_analysis, затем разбор: главный тренд; 3–5 конкретных находок с цифрами "
+        "(что выросло и на сколько, аномалии, прогноз остатка, лимиты под угрозой); 2–3 совета с конкретными суммами. Тут можно длиннее — до 15 строк; смысловые блоки разделяй пустой строкой, блок начинай с эмодзи. "
+        "Названия категорий бери из category_labels, не показывай ключи (food → Еда (кафе)).\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
         f"ДАННЫЕ:\n{snapshot}"
@@ -262,8 +265,9 @@ def _reply_kb(lang: str, *, undo_available: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str) -> bool:
-    """Прогнать фразу через агента. Возвращает False только если агент недоступен (ошибка AI)."""
+async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str, *, own_message: bool = True) -> bool:
+    """Прогнать фразу через агента. Возвращает False только если агент недоступен (ошибка AI).
+    own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем."""
     uid = profile.telegram_id
     await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
     undo.begin_turn(uid)
@@ -288,7 +292,8 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
         await _dispatch_handoff(message, state, profile, module, payload)
         return True
 
-    await safe_delete(message)
+    if own_message:
+        await safe_delete(message)
     reply = render_reply(result.text)
     if ctx.open_screen:
         await _open_screen(message, state, profile, ctx.open_screen, notice=reply, undo_available=mutated)

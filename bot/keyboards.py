@@ -600,6 +600,7 @@ def dashboard_keyboard(active: str, lang: str = "ru") -> InlineKeyboardMarkup:
                 _btn("🍱 " + ("Kaloriya" if lang == "uz" else "Калории"), f"dash:kcal:{active}"),
                 _btn("🏷 " + ("Toifalar" if lang == "uz" else "Категории"), f"dash:cats:{active}"),
             ],
+            [_btn("🧠 " + ("Chuqur tahlil" if lang == "uz" else "Глубокий анализ"), "dash:deep", style="success")],
             [_btn(t(lang, "menu_settings"), "menu:settings", icon=_pe.ID_SETTINGS), _back(lang)],
         ]
     )

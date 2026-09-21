@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from . import analysis
 from . import cache
 from . import categories as cats
 from . import finance as fin
@@ -995,6 +996,27 @@ async def _update_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
         return {"error": "nothing to change"}
     ctx.mutated = True
     return {"changed": changed}
+
+
+# ------------------------------------------------------------------ deep analysis
+@tool(
+    "deep_analysis",
+    "Полный разбор данных: тренды по месяцам (3 мес.), изменения по категориям, прогноз расходов и остатка до конца месяца, "
+    "лимиты под угрозой, аномалии (крупные траты, дорогие дни, дубли), «где переплачиваю» (частые мелкие траты, повторы, кафе vs продукты, "
+    "скрытые подписки), долги, питание (среднее, будни/выходные, перебор/недобор). Для «проанализируй», «сделай отчёт», «где я переплачиваю», «прогноз».",
+    {"focus": P("STRING", "all | finance | nutrition", enum=["all", "finance", "nutrition"])},
+)
+async def _deep_analysis(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    focus = (_str(a.get("focus")) or "all").lower()
+    snap = await services.finance_snapshot(ctx.profile)
+    logs, plan, recurring, budgets = (
+        await services.calorie_logs(ctx.profile, 30), await services.nutrition_profile(ctx.uid),
+        await services.recurring(ctx.uid), await services.budgets(ctx.uid),
+    )
+    return analysis.full_analysis(
+        entries=snap.entries, logs=logs, today=ctx.profile.today, tz=ctx.profile.tz, balances=snap.balances, settings=snap.settings,
+        recurring=recurring, budgets=budgets, plan=plan, focus=focus if focus in {"all", "finance", "nutrition"} else "all",
+    )
 
 
 # ------------------------------------------------------------------ hand-off / navigation
