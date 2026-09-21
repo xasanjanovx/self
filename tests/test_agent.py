@@ -308,3 +308,13 @@ def test_compact_message_leaves_model_parts_untouched():
 def test_tool_context_uid():
     ctx = tools.ToolContext(profile=_profile(), text="")
     assert ctx.uid == 1 and isinstance(ctx, SimpleNamespace) is False
+
+
+def test_fuzzy_name_matching():
+    assert tools.fuzzy_contains("Асельбек", "Асилбек")
+    assert tools.fuzzy_contains("асадбек", "Асадбек ака")
+    assert tools.fuzzy_contains("uzum", "UZUM BANK")
+    assert tools.fuzzy_contains("Иззатилло", "Иззатилло ака")
+    assert not tools.fuzzy_contains("такси", "обед")
+    found = tools.filter_entries(ENTRIES, today=TODAY, note_contains="Алишир")
+    assert [r["id"] for r in found] == [5]

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -204,6 +205,33 @@ def entry_view(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_TRANSLIT = str.maketrans({"ё": "е", "ъ": "", "ь": "", "ў": "у", "қ": "к", "ғ": "г", "ҳ": "х", "'": "", "ʼ": "", "’": ""})
+
+
+def _norm(text: str) -> str:
+    return str(text or "").casefold().translate(_TRANSLIT).strip()
+
+
+def fuzzy_contains(fragment: str, text: str) -> bool:
+    """«Асельбек» найдёт «Асилбек», «uzum» — «UZUM BANK»: подстрока, общий префикс или близость слов."""
+    frag, body = _norm(fragment), _norm(text)
+    if not frag or not body:
+        return False
+    if frag in body:
+        return True
+    frag_words = frag.split()
+    body_words = body.split()
+    for fw in frag_words:
+        if len(fw) < 3:
+            continue
+        for bw in body_words:
+            if len(bw) >= 4 and len(fw) >= 4 and fw[:4] == bw[:4]:
+                return True
+            if difflib.SequenceMatcher(None, fw, bw).ratio() >= 0.75:
+                return True
+    return False
+
+
 def entry_kind(row: dict[str, Any]) -> str:
     return "transfer" if fin.transfer_from_note(row.get("note")) else ("income" if row.get("entry_type") == "income" else "expense")
 
@@ -232,7 +260,7 @@ def filter_entries(
         cat = cat_raw.lower()  # неизвестная категория — ищем как есть
     exact = _num(amount)
     lo, hi = _num(min_amount), _num(max_amount)
-    frag = (_str(note_contains) or "").casefold()
+    frag = _str(note_contains) or ""
     only_unnamed = bool(_bool(unnamed))
 
     out = []
@@ -258,8 +286,8 @@ def filter_entries(
             continue
         if hi is not None and val > hi:
             continue
-        clean = (fin.clean_note(row.get("note")) or "").casefold()
-        if frag and frag not in clean:
+        clean = fin.clean_note(row.get("note")) or ""
+        if frag and not fuzzy_contains(frag, clean):
             continue
         if only_unnamed and clean:
             continue
@@ -312,7 +340,11 @@ async def _list_entries(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     entries = await services.finance_entries(ctx.uid)
     found = filter_entries(entries, today=ctx.profile.today, **{k: a.get(k) for k in ("date_from", "date_to", "kind", "category", "amount", "min_amount", "max_amount", "note_contains", "unnamed")})
     lim = _limit(a.get("limit"))
-    return {"total": len(found), "entries": [entry_view(r) for r in found[:lim]], "sum": round(sum(float(r.get("amount") or 0) for r in found), 2)}
+    out: dict[str, Any] = {"total": len(found), "entries": [entry_view(r) for r in found[:lim]], "sum": round(sum(float(r.get("amount") or 0) for r in found), 2)}
+    if not found and _str(a.get("note_contains")):
+        names = sorted({fin.clean_note(r.get("note")) for r in entries if fin.clean_note(r.get("note"))}, key=str.casefold)
+        out["hint"] = "ничего не найдено по комментарию; известные комментарии/имена: " + ", ".join(names[:40])
+    return out
 
 
 def _period(a: dict[str, Any], today: date, entries: list[dict[str, Any]]) -> fin.Period:
@@ -360,10 +392,12 @@ async def _stats(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 async def _debts(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     snap = await services.finance_snapshot(ctx.profile)
     ledger = fin.debt_ledger(snap.entries, snap.settings)
+    debt_rows = [r for r in snap.entries if (tr := fin.transfer_from_note(r.get("note"))) and ("lent" in tr or "debt" in tr)]
     return {
         "lent": [{"name": n or "", "amount": round(v, 2)} for n, v in ledger["lent"]],
         "debt": [{"name": n or "", "amount": round(v, 2)} for n, v in ledger["debt"]],
         "totals": {"lent": round(snap.balances["lent"], 2), "debt": round(snap.balances["debt"], 2)},
+        "entries": [entry_view(r) for r in debt_rows[:MAX_LIST]],
     }
 
 
@@ -1005,6 +1039,14 @@ async def snapshot(profile: Profile) -> str:
         f"Балансы: карта {m(snap.balances['card'])}, наличные {m(snap.balances['cash'])}, мне должны {m(snap.balances['lent'])}, я должен {m(snap.balances['debt'])}.",
         f"Сегодня: расход {m(snap.today_expense)}, доход {m(snap.today_income)}. Этот месяц: расход {m(snap.month.expense if snap.month else 0)}, доход {m(snap.month.income if snap.month else 0)}.",
     ]
+    ledger = fin.debt_ledger(snap.entries, snap.settings)
+    if ledger["lent"] or ledger["debt"]:
+        lent_txt = ", ".join(f"{n or 'без имени'} {m(v)}" for n, v in ledger["lent"]) or "—"
+        debt_txt = ", ".join(f"{n or 'без имени'} {m(v)}" for n, v in ledger["debt"]) or "—"
+        parts.append(f"Долги по людям — мне должны: {lent_txt}. Я должен: {debt_txt}.")
+        debt_rows = [r for r in snap.entries if (tr := fin.transfer_from_note(r.get("note"))) and ("lent" in tr or "debt" in tr)][:15]
+        parts.append("Долговые операции (id, дата, сумма, счёт→счёт, имя): " + "; ".join(
+            f"[{r.get('id')}] {str(r.get('entry_date') or '')[:10]} {m(float(r.get('amount') or 0))} {'→'.join(fin.transfer_from_note(r.get('note')))} «{fin.clean_note(r.get('note')) or ''}»" for r in debt_rows))
     if limits:
         parts.append("Лимиты/мес: " + ", ".join(f"{k}={m(v)}" for k, v in limits.items()))
     if recurring:
