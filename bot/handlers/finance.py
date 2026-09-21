@@ -78,18 +78,11 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
             balance_lines.append(f"🔁 {'To`lovlar' if uz else 'Платежи'}: {fin.fmt_money(remaining)}")
             balance_lines.append(f"{'Erkin' if uz else 'Свободно'}: <b>{fin.fmt_money(snap.wallet - remaining)}</b>")
             balance_lines.append(ui.muted(f"{'keyingi' if uz else 'ближайший'} {nxt_day:02d}: {h(nxt.get('title'))} {fin.fmt_money(float(nxt.get('amount') or 0))}"))
-    debts = []
-    if b["lent"]:
-        debts.append(f"🤝 {'Menga qarz' if uz else 'Мне должны'}: {fin.fmt_money(b['lent'])}")
-    if b["debt"]:
-        debts.append(f"📌 {'Mening qarzim' if uz else 'Я должен'}: {fin.fmt_money(b['debt'])}")
     credit = float(snap.settings.get("monthly_credit_payment") or 0)
     if credit:
-        debts.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'}: {fin.fmt_money(credit)}")
-    if debts:
-        balance_lines.append("")
-        balance_lines.extend(debts)
+        balance_lines.append(f"🏦 {'Kredit/oy' if uz else 'Кредит/мес'}: {fin.fmt_money(credit)}")
     balance_card = ui.card(f"<b>{'Balans' if uz else 'Баланс'}</b>", balance_lines)
+    debts_card = _debts_card(snap, lang)
 
     today_parts = []
     if snap.today_expense:
@@ -119,7 +112,38 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
         if uz else
         "✍️ <code>такси 25000</code> · <code>зарплата 5 млн</code>\n<code>дал в долг 200000</code> · просто <code>25000</code>"
     )
-    return ui.join(header, balance_card, period_card, today_card, hint), labels, snap.quick
+    return ui.join(header, balance_card, debts_card, period_card, today_card, hint), labels, snap.quick
+
+
+_DEBT_ROWS = 5  # строк на сторону — чтобы карточка помещалась на экран телефона
+
+
+def _debts_card(snap: services.FinanceSnapshot, lang: str) -> str | None:
+    """Карточка «Долги»: кто должен мне и кому должен я — по именам, компактно (одна строка — один человек)."""
+    uz = lang == "uz"
+    b = snap.balances
+    if not b["lent"] and not b["debt"]:
+        return None
+    ledger = fin.debt_ledger(snap.entries, snap.settings)
+
+    def _side(icon: str, title: str, total: float, items: list[tuple[str, float]], negative_word: str) -> list[str]:
+        if not total and not items:
+            return []
+        lines = [f"{icon} {title}: <b>{fin.fmt_money(total)}</b>"]
+        for name, amount in items[:_DEBT_ROWS]:
+            label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
+            if amount >= 0:
+                lines.append(f"• {label} — {fin.fmt_money(amount)}")
+            else:
+                lines.append(f"• {label} — {fin.fmt_money(abs(amount))} {ui.muted(negative_word)}")
+        if len(items) > _DEBT_ROWS:
+            lines.append(ui.muted(f"… +{len(items) - _DEBT_ROWS}"))
+        return lines
+
+    lent = _side("🤝", "Menga qarz" if uz else "Мне должны", b["lent"], ledger["lent"], "ortiqcha qaytardi" if uz else "вернул больше")
+    debt = _side("📌", "Mening qarzim" if uz else "Я должен", b["debt"], ledger["debt"], "ortiqcha to'landi" if uz else "переплата")
+    lines = lent + ([""] if lent and debt else []) + debt
+    return ui.card(f"<b>{'Qarzlar' if uz else 'Долги'}</b>", lines)
 
 
 def _entry_line(row: dict[str, Any], lang: str) -> str:
@@ -923,7 +947,7 @@ async def _settings_view(profile: Profile) -> tuple[dict[str, float], dict[str, 
 def _settings_text(profile: Profile, view: dict[str, float], ledger: dict[str, list[tuple[str, float]]] | None = None) -> str:
     lang, cur = profile.lang, profile.currency
     uz = lang == "uz"
-    header = ui.title("⚙️", "Hisoblar" if uz else "Счета")
+    header = ui.title("⚙️", "Moliya sozlamalari" if uz else "Настройки финансов")
     acc_lines = [
         f"{_field_label('card', lang)}: <b>{fin.fmt_money(view['card_base'])} {cur}</b>",
         f"{_field_label('cash', lang)}: <b>{fin.fmt_money(view['cash_base'])} {cur}</b>",
@@ -931,23 +955,11 @@ def _settings_text(profile: Profile, view: dict[str, float], ledger: dict[str, l
         ui.muted("Tuzatish uchun hisobni bosing va joriy summani yozing." if uz else "Чтобы поправить — нажми счёт и введи актуальную сумму."),
     ]
     blocks = [header, ui.card(f"<b>{'Balans' if uz else 'Балансы'}</b>", acc_lines)]
-
-    ledger = ledger or {"lent": [], "debt": []}
-
-    def _lines(items: list[tuple[str, float]], negative_word: str) -> list[str]:
-        out = []
-        for name, amount in items:
-            label = h(name) if name else ui.muted("nomsiz" if uz else "без имени")
-            if amount >= 0:
-                out.append(f"• {label} — <b>{fin.fmt_money(amount)}</b>")
-            else:
-                out.append(f"• {label} — <b>{fin.fmt_money(abs(amount))}</b> {ui.muted(negative_word)}")
-        return out or [ui.muted("yo'q" if uz else "нет")]
-
-    blocks.append(ui.card(f"<b>🤝 {'Menga qarz' if uz else 'Мне должны'}</b> · {fin.fmt_money(view['lent_base'])} {cur}",
-                          _lines(ledger["lent"], "ortiqcha qaytardi" if uz else "вернул больше")))
-    blocks.append(ui.card(f"<b>📌 {'Mening qarzim' if uz else 'Я должен'}</b> · {fin.fmt_money(view['debt_base'])} {cur}",
-                          _lines(ledger["debt"], "ortiqcha to'landi" if uz else "переплата")))
+    blocks.append(ui.card(f"<b>{'Qarzlar jami' if uz else 'Долги итого'}</b>", [
+        f"🤝 {'Menga qarz' if uz else 'Мне должны'}: <b>{fin.fmt_money(view['lent_base'])} {cur}</b>",
+        f"📌 {'Mening qarzim' if uz else 'Я должен'}: <b>{fin.fmt_money(view['debt_base'])} {cur}</b>",
+        ui.muted("Kimga/kimdan — «Moliya» ekranida." if uz else "По людям — на экране «Финансы»."),
+    ]))
     blocks.append(ui.muted(
         "Eski qarzni qo'shish (pul harakatisiz): «menga Abdulaziz qarz 200000» · «men bankka qarzdorman 3 mln». "
         "Yangi: «Abdulazizga 200000 qarz berdim» · «akamdan 500000 qarz oldim» · «Abdulaziz 100000 qaytardi»."
