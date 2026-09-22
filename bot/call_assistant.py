@@ -151,14 +151,24 @@ async def _notify_failure(profile: Profile, error: str) -> None:
     }
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
+    await show_home(profile, f"📵 {profile.tr(ru, uz)}")
+
+
+async def show_home(profile: Profile, notice: str | None = None, *, undo: bool = False) -> None:
+    """Главный экран (он в чате один) + строка про звонок — вместо отдельных сообщений,
+    которые потом висят в чате. Заодно убирает экран Джарвиса, с которого звонили."""
     try:
         from . import screen as screen_mod
         from .context import bot_instance
+        from .handlers.menu import build_dashboard
+        from .keyboards import main_menu_keyboard
 
-        await screen_mod.send_ephemeral(bot_instance(), profile.telegram_id, f"📵 {profile.tr(ru, uz)}",
-                                        keep_previous=True, ttl=180)
+        text = await build_dashboard(profile)
+        if notice:
+            text += f"\n\n{notice}"
+        await screen_mod.show_screen(bot_instance(), profile.telegram_id, text, main_menu_keyboard(profile.lang, undo=undo))
     except Exception:
-        logger.debug("call failure notice failed", exc_info=True)
+        logger.debug("call home screen failed", exc_info=True)
 
 
 _running: set[int] = set()  # один звонок на человека одновременно
@@ -187,11 +197,7 @@ async def _remember_call(profile: Profile, transcript: list[str]) -> None:
 
 
 async def _send_summary(profile: Profile, actions: list[str], mutated: bool) -> None:
-    """После разговора — что изменено, одной строкой, с кнопкой «Отменить»."""
-    if not actions:
-        return
-    from .context import bot_instance
-
+    """После разговора — главный экран; если что-то изменено — одной строкой, с кнопкой «Отменить»."""
     names = {
         "add_finance_entries": ("операции", "operatsiya"), "update_finance_entry": ("правка операции", "operatsiya tahriri"),
         "delete_finance_entries": ("удаление операций", "operatsiyalarni o'chirish"), "add_calorie_logs": ("питание", "ovqat"), "delete_calorie_logs": ("удаление еды", "ovqatni o'chirish"),
@@ -205,19 +211,8 @@ async def _send_summary(profile: Profile, actions: list[str], mutated: bool) -> 
         label = profile.tr(ru, uz) if ru else None
         if label and label not in done:
             done.append(label)
-    if not done:
-        return
-    notice = "📞 " + profile.tr("После звонка: ", "Qo'ng'iroqdan so'ng: ") + ", ".join(done)
-    # не отдельным сообщением, а на главном экране (он и так один) — с кнопкой «Отменить»
-    try:
-        from . import screen as screen_mod
-        from .handlers.menu import build_dashboard
-        from .keyboards import main_menu_keyboard
-
-        text = f"{await build_dashboard(profile)}\n\n{notice}"
-        await screen_mod.show_screen(bot_instance(), profile.telegram_id, text, main_menu_keyboard(profile.lang, undo=mutated))
-    except Exception:
-        logger.debug("call summary failed", exc_info=True)
+    notice = ("📞 " + profile.tr("После звонка: ", "Qo'ng'iroqdan so'ng: ") + ", ".join(done)) if done else None
+    await show_home(profile, notice, undo=mutated and bool(done))
 
 
 def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = None) -> asyncio.Task | None:

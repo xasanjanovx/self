@@ -101,7 +101,12 @@ async def send_morning(bot: Bot, profile, us: dict | None = None, *, late_ok: bo
     if us.get("brief_morning", True) and late_ok:
         try:
             text = await briefs.morning_brief(profile)
-            await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+            p = await services.persona(telegram_id)
+            from . import voice_brief
+
+            # «Утро голосом» — Джарвис рассказывает сам; не вышло — обычный текст
+            if not (p.morning_voice and await voice_brief.send(bot, profile, p, text)):
+                await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
         except Exception:
             logger.exception("morning brief failed for %s", telegram_id)
     if db.available("recurring_payments"):
@@ -283,18 +288,23 @@ async def _proactive_tick(bot: Bot) -> None:
     for telegram_id in user_ids:
         profile = await profile_by_id(telegram_id)
         us = await services.user_settings(telegram_id)
-        if not us.get("proactive", True):
+        hints_on = us.get("proactive", True)
+        if not hints_on and not (await services.persona(telegram_id)).alert_calls:
             continue
         try:
             alerts = await proactive.collect(profile)
         except Exception:
             logger.exception("proactive collect failed for %s", telegram_id)
             continue
+        fresh: list = []
         for alert in alerts:
             try:
                 if await db.alert_was_sent(telegram_id, alert.key):
                     continue
                 await db.mark_alert_sent(telegram_id, alert.key)  # сначала отмечаем — не задвоим при ошибке отправки
+                fresh.append(alert)
+                if not hints_on:
+                    continue  # подсказки выключены — только звонок о важном (ниже)
                 text = alert.text
                 if alert.prompt:
                     from . import agent_tools
@@ -318,6 +328,45 @@ async def _proactive_tick(bot: Bot) -> None:
                 logger.info("proactive alert %s sent to %s", alert.key, telegram_id)
             except Exception:
                 logger.exception("proactive alert %s failed for %s", alert.key, telegram_id)
+        try:
+            await _maybe_alert_call(profile, fresh)
+        except Exception:
+            logger.exception("alert call failed for %s", telegram_id)
+
+
+# что достойно звонка: срок долга сегодня/просрочен, лимит под угрозой или превышен, цель отстаёт
+IMPORTANT_ALERTS = ("debt_today", "debt_overdue", "budget_proj", "goal_pace", "goal_over", "goal_day")
+ALERT_CALL_HOURS = (10, 21)
+
+
+def important_alerts(alerts: list) -> list:
+    return [a for a in alerts if str(a.key).split(":", 1)[0] in IMPORTANT_ALERTS and a.text]
+
+
+async def _maybe_alert_call(profile, fresh: list) -> bool:  # noqa: ANN001
+    """«Джарвис сам звонит, если важное» — только если включено в настройках Джарвиса,
+    не чаще раза в день и в разумное время. Тексты подсказок при этом приходят как обычно."""
+    import re
+
+    from . import call_assistant
+    from . import caller
+
+    important = important_alerts(fresh)
+    if not important or not caller.available():
+        return False
+    p = await services.persona(profile.telegram_id)
+    now = profile.now
+    if not p.alert_calls or not ALERT_CALL_HOURS[0] <= now.hour < ALERT_CALL_HOURS[1]:
+        return False
+    row = await db.get_assistant_settings(profile.telegram_id)
+    if str(row.get("alert_call_day") or "")[:10] == now.date().isoformat():
+        return False
+    await services.save_persona(profile.telegram_id, {"alert_call_day": now.date().isoformat()})
+    facts = "; ".join(re.sub(r"<[^>]+>", "", a.text) for a in important[:4])
+    topic = ("ВАЖНОЕ (ты звонишь сама, потому что это важно): " + facts
+             + ". Коротко объясни, что случилось, и предложи 1–2 конкретных шага; спроси, что сделать.")
+    logger.info("alert call for %s: %s", profile.telegram_id, [a.key for a in important])
+    return call_assistant.call_in_background(profile, topic=topic) is not None
 
 
 async def _wake_tick(bot: Bot) -> None:
@@ -386,6 +435,9 @@ async def reminder_worker(bot: Bot) -> None:
         try:
             await _reminder_tick(bot)
             await _task_tick(bot)
+            from . import screen as screen_mod
+
+            await screen_mod.sweep(bot)  # временные сообщения с вышедшим сроком (переживает перезапуск)
         except asyncio.CancelledError:
             raise
         except Exception:

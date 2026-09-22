@@ -402,6 +402,22 @@ class AIService:
             data = data[0]
         return self._estimate_from_payload(data if isinstance(data, dict) else {}, fallback_desc="Блюдо")
 
+    async def classify_photo(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        """Быстро: еда на фото или что-то другое (чек, лист с челленджем, скриншот, документ).
+        Раньше любое фото без подписи считалось едой — теперь «другое» уходит Джарвису."""
+        prompt = (
+            "Что на фото? Ответь JSON {\"kind\":\"food\"} если главное на фото — еда, напиток, блюдо или продукты, "
+            "которые человек ест/собирается съесть; иначе {\"kind\":\"other\"} (чек, квитанция, документ, лист бумаги, "
+            "таблица, чек-лист, скриншот, экран, человек, вещь, место)."
+        )
+        text = await self.generate(
+            [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}}],
+            model=self.vision_model, temperature=0.0, max_tokens=40,
+        )
+        data = extract_json(text)
+        kind = str((data or {}).get("kind") or "").lower() if isinstance(data, dict) else ""
+        return "other" if kind == "other" else "food"
+
     async def parse_nutrition_items(self, raw_text: str) -> list[CalorieEstimate]:
         prompt = (
             "Разбери сообщение о еде на отдельные блюда/приёмы пищи и оцени КБЖУ каждого (типичная порция, "

@@ -305,6 +305,24 @@ async def save_persona(uid: int, fields: dict[str, Any]) -> None:
     cache.invalidate(uid, "persona")
 
 
+async def photo_intent(uid: int) -> str | None:
+    """Договорённость «что делать с его фото» (инструмент expect_photo), если ещё действует."""
+    from datetime import datetime, timezone
+
+    if not db.available("assistant_settings"):
+        return None
+    row = await cache.remember(uid, ("persona",), 600, lambda: db.get_assistant_settings(uid))
+    intent, until = (row or {}).get("photo_intent"), (row or {}).get("photo_intent_until")
+    if not intent or not until:
+        return None
+    try:
+        if datetime.fromisoformat(str(until).replace("Z", "+00:00")) < datetime.now(timezone.utc):
+            return None
+    except ValueError:
+        return None
+    return str(intent)
+
+
 # ------------------------------------------------------------------ 008: подъём (wake)
 async def wake_settings(uid: int) -> dict[str, Any]:
     if not db.available("wake_settings"):

@@ -1,8 +1,8 @@
-"""Настройки: разделы Джарвис · Будильник · Уведомления · Напоминания · Язык.
+"""Настройки бота (Уведомления · Напоминания · Язык) и отдельный экран «Джарвис»
+(кнопка главного меню): звонок, будильник, голос и характер, звонок о важном, утро голосом.
 
-Схема одна для всех разделов: сверху карточка «что сейчас», снизу кнопки, «Назад»
-всегда ведёт на главный экран настроек. Главный экран — только разделы с кратким
-текущим состоянием каждого.
+Схема одна для всех разделов: сверху карточка «что сейчас», снизу кнопки. «Назад» из
+разделов настроек ведёт в настройки, из будильника и характера — на экран «Джарвис».
 """
 from __future__ import annotations
 
@@ -92,18 +92,12 @@ async def _user_settings(uid: int) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ главный экран
 async def render_settings(target: Message | CallbackQuery, profile: Profile) -> None:
-    from .. import persona as persona_mod
-
     uz = profile.lang == "uz"
     uid = profile.telegram_id
-    us, prefs, p, rems = await asyncio.gather(_user_settings(uid), report_prefs(uid), services.persona(uid), services.reminders(uid))
-    voice_ru, voice_uz = persona_mod.VOICES.get(p.voice, ("", ""))
+    us, prefs, rems = await asyncio.gather(_user_settings(uid), report_prefs(uid), services.reminders(uid))
     report = ("yo'q" if uz else "без отчёта") if not prefs.get("enabled", True) else (
         ("oylik hisobot" if uz else "отчёт раз в месяц") if prefs.get("frequency") == "monthly" else ("haftalik hisobot" if uz else "отчёт раз в неделю"))
     lines = [
-        f"🤖 <b>{'Jarvis' if uz else 'Джарвис'}</b> — {voice_uz if uz else voice_ru} · {'o`zbekcha' if p.lang == 'uz' else 'русский'} · "
-        f"{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}",
-        f"⏰ <b>{'Budilnik' if uz else 'Будильник'}</b> — {await alarm_summary(profile)}",
         f"🔔 <b>{'Bildirishnomalar' if uz else 'Уведомления'}</b> — {'ertalab' if uz else 'утро'} {_morning_label(us, uz)} · "
         f"{'kechqurun' if uz else 'вечер'} {_evening_label(us, uz)} · {report}",
         f"🗒 <b>{'Eslatmalar' if uz else 'Напоминания'}</b> — {len(rems) if rems else ('yo`q' if uz else 'нет')}",
@@ -343,6 +337,10 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
             await answer_now(callback, profile.tr("Уже звоню", "Allaqachon qo'ng'iroq qilyapman"))
             return
         await answer_now(callback, profile.tr("Звоню 📞", "Qo'ng'iroq qilyapman 📞"))
+        # экран Джарвиса не оставляем — возвращаем главное меню с пометкой; итог звонка придёт туда же
+        from .menu import render_dashboard
+
+        await render_dashboard(callback, state, profile, notice=profile.tr("📞 Звоню… возьми трубку", "📞 Qo'ng'iroq qilyapman… trubkani oling"))
         return
     if not await db.ensure_available("wake_settings"):
         await answer_now(callback, profile.tr("Нужна миграция 008_wake.sql", "008_wake.sql migratsiyasi kerak"), alert=True)
@@ -410,16 +408,16 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     lines = [
         f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b>",
         f"🗣 {'Qo`ng`iroq tili' if uz else 'Язык звонков'}: <b>{'o`zbekcha' if p.lang == 'uz' else 'русский'}</b>",
-        f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}</b>",
+        f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}</b>"
+        f" · <b>{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}</b>",
         f"🎭 {'Ohang' if uz else 'Тон'}: <b>{tone[1] if uz else tone[0]}</b> · {'javoblar' if uz else 'ответы'}: <b>{length[1] if uz else length[0]}</b>",
         f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
     ]
-    text = ui.join(ui.title("🤖", "Jarvis" if uz else "Джарвис"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
+    text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
     if notice:
         text += f"\n\n{notice}"
-    s_mode = "fajr"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
-                                  verbosity=p.verbosity, alarm_mode=s_mode)
+                                  verbosity=p.verbosity, honorific=p.honorific)
     await _show(target, text, kb)
 
 
@@ -450,6 +448,17 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await answer_now(callback, profile.tr("Записываю образец…", "Namuna tayyorlanmoqda…"))
         await _send_voice_sample(callback, profile)
         return
+    if action == "toggle" and value in {"alert_calls", "morning_voice"}:  # переключатели на экране «Джарвис»
+        p = await services.persona(profile.telegram_id)
+        await services.save_persona(profile.telegram_id, {value: not getattr(p, value)})
+        await answer_now(callback, "✅")
+        await render_jarvis_hub(callback, profile)
+        return
+    if action == "photo" and value == "off":
+        await services.save_persona(profile.telegram_id, {"photo_intent": None, "photo_intent_until": None})
+        await answer_now(callback, "✅")
+        await render_jarvis_hub(callback, profile)
+        return
     fields: dict[str, Any] = {}
     if action == "voice" and value in persona_mod.VOICES:
         fields["voice"] = value
@@ -461,6 +470,8 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         fields["tone"] = value
     elif action == "verbosity" and value in persona_mod.VERBOSITY:
         fields["verbosity"] = value
+    elif action == "honorific" and value in persona_mod.HONORIFICS:
+        fields["honorific"] = value
     if fields:
         await services.save_persona(profile.telegram_id, fields)
     await answer_now(callback, "✅")
@@ -485,29 +496,105 @@ async def _send_voice_sample(callback: CallbackQuery, profile: Profile) -> None:
         if not ogg:
             return
         msg = await callback.bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jarvis.ogg"))
-        screen_mod._ephemerals[profile.telegram_id].append(msg.message_id)
-        asyncio.create_task(screen_mod._delete_later(callback.bot, profile.telegram_id, msg.message_id, 60))
+        screen_mod.track_ephemeral(profile.telegram_id, msg.message_id, ttl=60)
     except Exception:
         logger.warning("voice sample failed", exc_info=True)
 
 
 # ------------------------------------------------------------------ кнопка «Джарвис» в главном меню
-@router.callback_query(F.data == "menu:jarvis")
-async def cb_jarvis_hub(callback: CallbackQuery, state: FSMContext) -> None:
+async def _call_stats(profile: Profile, uz: bool) -> str | None:
+    """«последний сегодня 01:50 · за неделю 4» — по журналу agent_log (kind=call)."""
+    if not db.available("agent_log"):
+        return None
+    try:
+        rows = [r for r in await db.list_agent_log(profile.telegram_id, days=7, limit=200) if r.get("kind") == "call"]
+    except Exception:
+        return None
+    if not rows:
+        return "hali yo'q" if uz else "пока не было"
+    from datetime import datetime
+
+    last = datetime.fromisoformat(str(rows[0]["created_at"]).replace("Z", "+00:00")).astimezone(profile.tz)
+    return (f"oxirgisi {last:%d.%m %H:%M} · haftada {len(rows)}" if uz else f"последний {last:%d.%m %H:%M} · за неделю {len(rows)}")
+
+
+async def _important_now(profile: Profile) -> list[str]:
+    """Что сейчас важно (то, из-за чего Джарвис позвонил бы сам)."""
+    import re
+
+    from .. import proactive
+    from ..workers import important_alerts
+
+    try:
+        alerts = await asyncio.wait_for(proactive.collect(profile), timeout=6)
+    except Exception:
+        return []
+    return [re.sub(r"<[^>]+>", "", a.text)[:120] for a in important_alerts(alerts)[:3]]
+
+
+async def render_jarvis_hub(target: Message | CallbackQuery, profile: Profile, *, notice: str | None = None) -> None:
+    """Экран «Джарвис»: что он сейчас делает для тебя и что помнит + все его настройки."""
+    from .. import agent_tools_extra as extra
     from .. import caller
     from .. import persona as persona_mod
+    from .. import wake as wake_mod
     from ..keyboards import jarvis_hub_keyboard
 
+    uz = profile.lang == "uz"
+    uid = profile.telegram_id
+    p, intent, mem = await asyncio.gather(services.persona(uid), services.photo_intent(uid), services.user_memory(uid))
+    voice_ru, voice_uz = persona_mod.VOICES.get(p.voice, ("", ""))
+    on, off = ("yoniq", "o'chiq") if uz else ("вкл", "выкл")
+
+    now_lines = [f"⏰ {'Budilnik' if uz else 'Будильник'}: <b>{await alarm_summary(profile)}</b>"]
+    if db.available("wake_log"):
+        history = await services.wake_history(uid, days=14)
+        if history and (stats := wake_mod.stats_line(history, profile.lang)):
+            now_lines.append(f"🔥 {stats}")
+    if (calls := await _call_stats(profile, uz)):
+        now_lines.append(f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {calls}" + ("" if caller.available() else " · ⚠️"))
+    if intent:
+        now_lines.append(f"📷 {'Rasm kutyapman' if uz else 'Жду фото'}: {h(intent[:90])}")
+
+    important = await _important_now(profile)
+    facts = extra.parse_facts((mem or {}).get("facts") or "")
+    char_lines = [
+        f"🔊 {voice_uz if uz else voice_ru} · {'o`zbekcha' if p.lang == 'uz' else 'русский'} · "
+        f"{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')} · "
+        f"{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}",
+        f"📞 {'Muhim bo`lsa qo`ng`iroq' if uz else 'Звонок о важном'}: <b>{on if p.alert_calls else off}</b> · "
+        f"🎙 {'Ertalab ovozli' if uz else 'Утро голосом'}: <b>{on if p.morning_voice else off}</b>",
+    ]
+    text = ui.join(
+        ui.title("🤖", "Jarvis" if uz else "Джарвис"),
+        ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", now_lines),
+        ui.card(f"<b>{'Muhim' if uz else 'Важно сейчас'}</b>", [f"• {h(x)}" for x in important]) if important else None,
+        ui.card(f"<b>{'Sen haqingda eslayman' if uz else 'Помню о тебе'}</b> · {len(facts)}", [f"• {h(f[:80])}" for f in facts[-3:]]) if facts else None,
+        ui.card(f"<b>{'Xarakter' if uz else 'Характер'}</b>", char_lines),
+    )
+    if notice:
+        text += f"\n\n{notice}"
+    await _show(target, text, jarvis_hub_keyboard(profile.lang, alert_calls=p.alert_calls, morning_voice=p.morning_voice, photo_intent=bool(intent)))
+
+
+@router.callback_query(F.data == "menu:jarvis")
+async def cb_jarvis_hub(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
     await state.clear()
+    await render_jarvis_hub(callback, await get_profile(callback.from_user))
+
+
+@router.callback_query(F.data == "brief:text:morning")
+async def cb_brief_text(callback: CallbackQuery) -> None:
+    """«📄 Текстом» под голосовой утренней сводкой."""
+    from .. import briefs
+    from .. import screen as screen_mod
+
     profile = await get_profile(callback.from_user)
-    uz = profile.lang == "uz"
-    p = await services.persona(profile.telegram_id)
-    voice_ru, voice_uz = persona_mod.VOICES.get(p.voice, ("", ""))
-    lines = [
-        f"⏰ {'Budilnik' if uz else 'Будильник'}: <b>{await alarm_summary(profile)}</b>",
-        f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b> · {'o`zbekcha' if p.lang == 'uz' else 'русский'}",
-        f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
-    ]
-    text = ui.join(ui.title("🤖", "Jarvis" if uz else "Джарвис"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
-    await safe_edit(callback, text, jarvis_hub_keyboard(profile.lang))
+    await answer_now(callback)
+    try:
+        text = await briefs.morning_brief(profile)
+    except Exception:
+        logger.exception("morning brief text failed")
+        return
+    await screen_mod.send_ephemeral(callback.bot, profile.telegram_id, text, keep_previous=True)

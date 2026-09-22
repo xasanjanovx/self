@@ -45,6 +45,8 @@ async def on_startup(bot: Bot) -> None:
     if missing:
         logger.error("Missing tables: %s — run sql/schema.sql and sql/migrations/* in Supabase", ", ".join(missing))
     screen_mod.configure_persistence(load=db.get_screen_message_id, save=db.set_screen_message_id)
+    if db.available("ephemeral_messages"):
+        screen_mod.configure_trash(db)
     try:
         await ai.ensure_models()
     except Exception:

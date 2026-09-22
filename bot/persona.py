@@ -19,6 +19,14 @@ VOICES: dict[str, tuple[str, str]] = {
 DEFAULT_VOICE = "Sulafat"
 TONES = ("friendly", "calm", "strict")
 VERBOSITY = ("short", "normal", "detailed")
+# как величать: подпись на кнопке (ru, uz) и слова, которые можно говорить
+HONORIFICS: dict[str, tuple[str, str]] = {
+    "mix": ("Шеф · Сэр · Босс", "Shef · Ser · Boss"),
+    "shef": ("Шеф", "Shef"),
+    "ser": ("Сэр", "Ser"),
+    "boss": ("Босс", "Boss"),
+    "none": ("Только по имени", "Faqat ism bilan"),
+}
 
 
 @dataclass
@@ -29,6 +37,9 @@ class Persona:
     tone: str = "friendly"
     verbosity: str = "short"
     call_name: str | None = None
+    honorific: str = "mix"      # как иногда величать: none | shef | ser | boss | mix
+    morning_voice: bool = False  # утренняя сводка голосом
+    alert_calls: bool = False    # звонить, если важное (бюджет, долг сегодня, цель отстаёт)
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None) -> "Persona":
@@ -41,6 +52,9 @@ class Persona:
             tone=str(row.get("tone") or "friendly") if str(row.get("tone") or "friendly") in TONES else "friendly",
             verbosity=str(row.get("verbosity") or "short") if str(row.get("verbosity") or "short") in VERBOSITY else "short",
             call_name=(str(row.get("call_name")).strip() or None) if row.get("call_name") else None,
+            honorific=str(row.get("honorific") or "mix") if str(row.get("honorific") or "mix") in HONORIFICS else "mix",
+            morning_voice=bool(row.get("morning_voice")),
+            alert_calls=bool(row.get("alert_calls")),
         )
 
     def name_for(self, first_name: str | None) -> str:
@@ -68,7 +82,17 @@ def style_rules(p: Persona, *, spoken: bool = False) -> str:
             "normal": "обычная длина ответа — до 8 строк",
             "detailed": "можно отвечать развёрнуто, с цифрами и пояснениями",
         }[p.verbosity]
-    return f"Стиль: {address}; {tone}; {length}."
+    return f"Стиль: {address}; {tone}; {length}. {honorific_rule(p)}".strip()
+
+
+def honorific_rule(p: Persona) -> str:
+    """«Шеф / Сэр / Босс» — к месту, а не в каждой фразе (как Джарвис у Тони Старка)."""
+    if p.honorific == "none":
+        return "Обращайся к нему по имени, без «шеф/сэр/босс»."
+    words = {"mix": "«Шеф», «Сэр» или «Босс» (по-узбекски «Shef», «Ser», «Boss»), чередуя",
+             "shef": "«Шеф» (по-узбекски «Shef»)", "ser": "«Сэр» (по-узбекски «Ser»)", "boss": "«Босс» (по-узбекски «Boss»)"}[p.honorific]
+    return (f"Иногда, к месту, величай его {words}: в приветствии, когда докладываешь о сделанном, "
+            "в шутку, при важной новости. Не в каждой фразе — примерно раз в 3–4 реплики, естественно.")
 
 
 LANG_CODES = {"uz": "uz-UZ", "ru": "ru-RU"}
@@ -102,4 +126,4 @@ def human_rules(p: Persona) -> str:
     )
 
 
-__all__ = ["Persona", "VOICES", "DEFAULT_VOICE", "TONES", "VERBOSITY", "LANG_CODES", "style_rules", "lang_rule", "human_rules"]
+__all__ = ["Persona", "VOICES", "DEFAULT_VOICE", "TONES", "VERBOSITY", "HONORIFICS", "LANG_CODES", "style_rules", "lang_rule", "human_rules", "honorific_rule"]

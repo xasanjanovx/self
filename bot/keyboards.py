@@ -226,7 +226,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
-                _btn("🤖 " + ("Jarvis" if lang == "uz" else "Джарвис"), "menu:jarvis", style=P),
+                _btn("Jarvis" if lang == "uz" else "Джарвис", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
             [
@@ -238,11 +238,10 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
 
 
 def settings_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    """Главный экран настроек — только разделы."""
+    """Главный экран настроек — только разделы бота. Всё про Джарвиса (голос, будильник, звонки) —
+    отдельно, в кнопке «Джарвис» главного меню."""
     uz = lang == "uz"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🤖 " + ("Jarvis" if uz else "Джарвис"), "settings:jarvis", style="primary"),
-         _btn("⏰ " + ("Budilnik" if uz else "Будильник"), "settings:wake", style="primary")],
         [_btn("🔔 " + ("Bildirishnomalar" if uz else "Уведомления"), "settings:notify", style="primary"),
          _btn("🗒 " + ("Eslatmalar" if uz else "Напоминания"), "settings:reminders", style="primary")],
         [_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)],
@@ -284,15 +283,25 @@ def reminders_keyboard(lang: str, reminders: list[tuple[str, str]]) -> InlineKey
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def jarvis_hub_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Кнопка «Джарвис» в главном меню."""
+def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: bool = False,
+                        photo_intent: bool = False) -> InlineKeyboardMarkup:
+    """Кнопка «Джарвис» в главном меню: всё про Джарвиса в одном месте."""
     uz = lang == "uz"
-    return InlineKeyboardMarkup(inline_keyboard=[
+
+    def toggle(on: bool, label: str, data: str) -> InlineKeyboardButton:
+        return _btn(("✅ " if on else "⛔ ") + label, data, style="success" if on else None)
+
+    rows = [
         [_btn("📞 " + ("Qo'ng'iroq qil" if uz else "Позвонить"), "wakeset:calltest", style="success")],
         [_btn("⏰ " + ("Budilnik" if uz else "Будильник"), "settings:wake", style="primary"),
-         _btn("⚙️ " + ("Sozlash" if uz else "Настроить"), "settings:jarvis", style="primary")],
-        [_back(lang)],
-    ])
+         _btn("🎭 " + ("Ovoz va xarakter" if uz else "Голос и характер"), "settings:jarvis", style="primary")],
+        [toggle(alert_calls, "📞 " + ("Muhim bo'lsa qo'ng'iroq" if uz else "Звонок о важном"), "jarvis:toggle:alert_calls")],
+        [toggle(morning_voice, "🎙 " + ("Ertalab ovozli xulosa" if uz else "Утро голосом"), "jarvis:toggle:morning_voice")],
+    ]
+    if photo_intent:
+        rows.append([_btn("📷 " + ("Rasm kelishuvini bekor qilish" if uz else "Отменить договорённость о фото"), "jarvis:photo:off")])
+    rows.append([_back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
@@ -337,14 +346,14 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
             task_row = []
     if task_row:
         rows.append(task_row)
-    rows.append([_back(lang, "menu:settings")])
+    rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
-                             alarm_mode: str) -> InlineKeyboardMarkup:
-    """Раздел «Джарвис»: голос, язык, характер, будильник, звонок."""
-    from .persona import VOICES
+                             honorific: str = "mix") -> InlineKeyboardMarkup:
+    """«Голос и характер» Джарвиса: голос, язык, ты/вы, как величать, тон, длина ответов."""
+    from .persona import HONORIFICS, VOICES
 
     uz = lang == "uz"
 
@@ -364,14 +373,15 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
     rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru")])
     rows.append([pick("Sen (ты)" if uz else "На «ты»", "jarvis:address:sen", address == "sen"),
                  pick("Siz (вы)" if uz else "На «вы»", "jarvis:address:siz", address == "siz")])
+    rows.append([pick(HONORIFICS[k][1] if uz else HONORIFICS[k][0], f"jarvis:honorific:{k}", honorific == k) for k in ("shef", "ser", "boss")])
+    rows.append([pick(HONORIFICS[k][1] if uz else HONORIFICS[k][0], f"jarvis:honorific:{k}", honorific == k) for k in ("mix", "none")])
     rows.append([pick("🙂 " + ("Do'stona" if uz else "Дружелюбный"), "jarvis:tone:friendly", tone == "friendly"),
                  pick("😌 " + ("Xotirjam" if uz else "Спокойный"), "jarvis:tone:calm", tone == "calm"),
                  pick("🧐 " + ("Qat'iy" if uz else "Строгий"), "jarvis:tone:strict", tone == "strict")])
     rows.append([pick("Qisqa" if uz else "Коротко", "jarvis:verbosity:short", verbosity == "short"),
                  pick("O'rtacha" if uz else "Обычно", "jarvis:verbosity:normal", verbosity == "normal"),
                  pick("Batafsil" if uz else "Подробно", "jarvis:verbosity:detailed", verbosity == "detailed")])
-    rows.append([_btn("📞 " + ("Qo'ng'iroq qil" if uz else "Позвонить сейчас"), "wakeset:calltest", style="success")])
-    rows.append([_back(lang, "menu:settings")])
+    rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

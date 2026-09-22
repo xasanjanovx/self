@@ -155,7 +155,14 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
         "«проснулся» / «uyg'ondim» / «я встал» → mark_awake (звонки прекращаются); «ещё 10 минут» → mark_awake(snooze_minutes=10). "
         "После подъёма коротко скажи, сколько минут до такбира и что за задание на сегодня. Не читай нотаций.\n"
         "18. Помощник вне бота: курс валют / «сколько это в долларах» → currency_rates; любые расчёты → calculate (не считай в уме суммы больше 4 знаков); "
-        "свежие факты, цены, новости, адреса, «что такое …» → web_search; погода → weather. Перевод, объяснения, тексты, советы — отвечай сам.\n\n"
+        "свежие факты, цены, новости, адреса, «что такое …» → web_search; погода → weather. Перевод, объяснения, тексты, советы — отвечай сам.\n"
+        "19. ФОТО. Если к реплике приложено фото — ты его ВИДИШЬ: пойми, что на нём, и сделай нужное. Чек/квитанция → траты (add_finance_entries с датой и суммами с чека); "
+        "лист челленджа/трекер привычек/чек-лист → найди закрашенные/отмеченные пункты за сегодня и отметь их (goal_checkin; нет таких целей — создай add_goal kind=habit "
+        "для каждого пункта и отметь); скриншот/документ → ответь или сделай по смыслу. Еда → hand_off(food). Если есть [договорённость о фото] — делай строго по ней. "
+        "После — коротко: что увидел и что сделал.\n"
+        "20. ЧЕСТНОСТЬ. Не обещай того, чего не сделаешь инструментами. Обещаешь что-то сделать с будущими фото («пришли фото — отмечу») — СРАЗУ вызови expect_photo "
+        "с подробной инструкцией и сроком, иначе фото уйдёт в питание. Почти всё можно сделать своими инструментами, поиском или советом — ищи способ. "
+        "Если по-настоящему невозможно — скажи честно одной фразой и предложи ближайшую замену.\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
         + ABOUT_SELF + "\n"
@@ -187,6 +194,8 @@ def compact_message(msg: dict[str, Any]) -> dict[str, Any]:
             fr = dict(part["functionResponse"])
             fr["response"] = _compact(fr.get("response"))
             parts.append({"functionResponse": fr})
+        elif isinstance(part, dict) and ("inline_data" in part or "inlineData" in part):
+            parts.append({"text": "[фото]"})  # само фото в историю не кладём — оно огромное
         else:
             parts.append(part)
     return {"role": msg.get("role"), "parts": parts}
@@ -283,12 +292,19 @@ async def run_agent(
     step_fn: StepFn | None = None,
     run_tool: RunFn | None = None,
     max_steps: int = MAX_STEPS,
+    image: tuple[bytes, str] | None = None,
 ) -> AgentResult:
-    """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст."""
+    """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст.
+    `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…)."""
     step_fn = step_fn or ai.agent_step
     run_tool = run_tool or tools.run
     ctx = tools.ToolContext(profile=profile, text=text)
-    contents = list(history) + [{"role": "user", "parts": [{"text": text}]}]
+    parts: list[dict[str, Any]] = [{"text": text}]
+    if image:
+        import base64
+
+        parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
+    contents = list(history) + [{"role": "user", "parts": parts}]
     system = system_prompt(profile, snapshot, memory)
     decls = tools.declarations()
     final = ""
@@ -338,7 +354,8 @@ def _reply_kb(lang: str, *, undo_available: bool, options: list[str] | None = No
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str, *, own_message: bool = True, voice: bool = False) -> bool:
+async def handle_command(message: Message, state: FSMContext, profile: Profile, text: str, *, own_message: bool = True, voice: bool = False,
+                         photo: tuple[bytes, str, str] | None = None) -> bool:
     """Прогнать фразу через агента. Возвращает False только если агент недоступен (ошибка AI).
     own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем.
     voice=True — пришло голосом: если включены голосовые ответы, продублируем ответ голосом."""
@@ -360,7 +377,8 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     except Exception:
         logger.debug("persona rules failed", exc_info=True)
     try:
-        result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory)
+        result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory,
+                                 image=(photo[0], photo[1]) if photo else None)
     except Exception:
         logger.exception("agent failed")
         undo.end_turn(uid)
@@ -377,7 +395,7 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
 
     if ctx.handoff:
         module, payload = ctx.handoff
-        await _dispatch_handoff(message, state, profile, module, payload)
+        await _dispatch_handoff(message, state, profile, module, payload, photo=photo)
         return True
 
     if own_message:
@@ -449,7 +467,13 @@ async def _send_voice_reply(message: Message, profile: Profile, text: str) -> No
         logger.warning("voice reply failed", exc_info=True)
 
 
-async def _dispatch_handoff(message: Message, state: FSMContext, profile: Profile, module: str, text: str) -> None:
+async def _dispatch_handoff(message: Message, state: FSMContext, profile: Profile, module: str, text: str,
+                            *, photo: tuple[bytes, str, str] | None = None) -> None:
+    if module == "food" and photo:
+        from .nutrition import handle_photo
+
+        await handle_photo(message, state, profile, photo=photo, hint=text or None)
+        return
     if module == "finance":
         from .finance import handle_finance_text
 

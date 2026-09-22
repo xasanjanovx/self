@@ -17,14 +17,16 @@ from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
 from .. import screen as screen_mod
+from .. import services
 from .. import vacancy as vac
+from ..context import ai
 from ..profile import Profile, h
 from . import agent
 from . import finance as finance_h
 from . import nutrition as nutrition_h
 from . import vacancy as vacancy_h
 from . import wake as wake_h
-from .common import get_profile, message_text, safe_delete, show_progress, transcribe_audio
+from .common import get_photo_bytes, get_profile, message_text, safe_delete, show_progress, transcribe_audio
 from .menu import send_main_menu
 
 router = Router(name="inbox")
@@ -106,14 +108,38 @@ async def route_text(
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:
-    """Фото: подтверждение подъёма (пустой стакан) → вакансия по подписи → иначе еда."""
+    """Фото: подтверждение подъёма (пустой стакан) → вакансия по подписи → договорённость с Джарвисом
+    (expect_photo) → еда или «другое».
+
+    Раньше любое фото считалось едой: пообещал Джарвис «пришли фото челленджа — отмечу», а фото ушло
+    в калории. Теперь Джарвис видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
     caption = message_text(message)
     if await wake_h.handle_task_reply(message, profile, text=caption, has_photo=True):
         return
     if caption and vac.looks_like_vacancy(caption):
         await vacancy_h.process_vacancy(message, state, profile, caption)
         return
-    await nutrition_h.handle_photo(message, state, profile)
+    await show_progress(message, profile.tr("⏳ Смотрю фото…", "⏳ Rasmni ko'ryapman…"))
+    try:
+        photo = await get_photo_bytes(message)
+    except Exception:
+        logger.exception("photo download failed")
+        await nutrition_h.handle_photo(message, state, profile)
+        return
+    intent = await services.photo_intent(profile.telegram_id)
+    to_agent = bool(intent) or bool(caption and not nutri.looks_like_food(caption))
+    if not to_agent and not caption:
+        try:
+            to_agent = await ai.classify_photo(photo[0], photo[1]) == "other"
+        except Exception:
+            logger.warning("photo classify failed", exc_info=True)
+    if to_agent:
+        text = "(прислал фото)" + (f" {caption}" if caption else "")
+        if intent:
+            text += f"\n[договорённость о фото: {intent}]"
+        if await agent.handle_command(message, state, profile, text, photo=photo):
+            return
+    await nutrition_h.handle_photo(message, state, profile, photo=photo)
 
 
 @router.message()

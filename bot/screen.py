@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiogram import Bot
@@ -32,11 +33,49 @@ _load_screen = None
 _save_screen = None
 _loaded: set[int] = set()
 
+# Журнал временных сообщений в БД (010): переживает перезапуск бота, иначе «Звоню»,
+# «Не дозвонился» и т.п. оставались в чате навсегда, если бот перезапускался до таймера.
+# Объект с async add(chat_id, message_id, delete_at) / list_ephemerals(chat_id=, due_before=) / drop_ephemerals(chat_id, ids).
+_trash = None
+_trash_loaded: set[int] = set()
+EPHEMERAL_MAX = timedelta(hours=24)  # без ttl — удалим на следующем действии или через сутки
+_bg: set[asyncio.Task] = set()       # держим ссылки на фоновые задачи, иначе их может съесть GC
+
 
 def configure_persistence(load=None, save=None) -> None:
     global _load_screen, _save_screen
     _load_screen = load
     _save_screen = save
+
+
+def configure_trash(store) -> None:  # noqa: ANN001
+    global _trash
+    _trash = store
+
+
+def _spawn(coro) -> None:  # noqa: ANN001
+    task = asyncio.ensure_future(coro)
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
+
+
+async def _remember(chat_id: int, message_id: int, ttl: float | None) -> None:
+    if _trash is None:
+        return
+    try:
+        at = datetime.now(timezone.utc) + (timedelta(seconds=ttl) if ttl else EPHEMERAL_MAX)
+        await _trash.add_ephemeral(chat_id, message_id, at)
+    except Exception:
+        logger.debug("ephemeral persist failed", exc_info=True)
+
+
+async def _forget(chat_id: int, ids: list[int]) -> None:
+    if _trash is None or not ids:
+        return
+    try:
+        await _trash.drop_ephemerals(chat_id, ids)
+    except Exception:
+        logger.debug("ephemeral forget failed", exc_info=True)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -95,16 +134,44 @@ def track_screen(chat_id: int, message_id: int | None) -> None:
         pending.remove(message_id)
 
 
-def track_ephemeral(chat_id: int, message_id: int) -> None:
+def track_ephemeral(chat_id: int, message_id: int, ttl: float | None = None) -> None:
     """Пометить уже отправленное сообщение (голос, файл) как временное."""
     _ephemerals[chat_id].append(message_id)
+    _spawn(_remember(chat_id, message_id, ttl))
+    if ttl:
+        _spawn(_delete_later(None, chat_id, message_id, ttl))
 
 
 async def clear_ephemerals(bot: Bot, chat_id: int) -> None:
     ids = _ephemerals.pop(chat_id, [])
+    if _trash is not None and chat_id not in _trash_loaded:
+        # первый раз после перезапуска — подберём и то, что осталось с прошлого запуска
+        _trash_loaded.add(chat_id)
+        try:
+            ids += [int(r["message_id"]) for r in await _trash.list_ephemerals(chat_id=chat_id) if int(r["message_id"]) not in ids]
+        except Exception:
+            logger.debug("ephemeral list failed", exc_info=True)
     if not ids:
         return
     await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
+    _spawn(_forget(chat_id, ids))
+
+
+async def sweep(bot: Bot) -> int:
+    """Удалить временные сообщения, у которых вышел срок (фоновый воркер, раз в минуту)."""
+    if _trash is None:
+        return 0
+    rows = await _trash.list_ephemerals(due_before=datetime.now(timezone.utc))
+    by_chat: dict[int, list[int]] = defaultdict(list)
+    for r in rows:
+        by_chat[int(r["chat_id"])].append(int(r["message_id"]))
+    for chat_id, ids in by_chat.items():
+        await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
+        pending = _ephemerals.get(chat_id)
+        if pending:
+            _ephemerals[chat_id] = [m for m in pending if m not in ids]
+        await _forget(chat_id, ids)
+    return sum(len(v) for v in by_chat.values())
 
 
 async def show_screen(
@@ -158,15 +225,21 @@ async def send_ephemeral(
         await clear_ephemerals(bot, chat_id)
     msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
     _ephemerals[chat_id].append(msg.message_id)
+    _spawn(_remember(chat_id, msg.message_id, ttl))
     if ttl:
-        asyncio.create_task(_delete_later(bot, chat_id, msg.message_id, ttl))
+        _spawn(_delete_later(bot, chat_id, msg.message_id, ttl))
     return msg.message_id
 
 
-async def _delete_later(bot: Bot, chat_id: int, message_id: int, delay: float) -> None:
+async def _delete_later(bot: Bot | None, chat_id: int, message_id: int, delay: float) -> None:
     try:
         await asyncio.sleep(delay)
+        if bot is None:
+            from .context import bot_instance
+
+            bot = bot_instance()
         await _safe_delete(bot, chat_id, message_id)
+        await _forget(chat_id, [message_id])
         ids = _ephemerals.get(chat_id)
         if ids and message_id in ids:
             ids.remove(message_id)

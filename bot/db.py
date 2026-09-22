@@ -89,11 +89,12 @@ class Database:
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
             "user_memory", "agent_log", "weight_logs", "goal_checkins", "wake_settings", "wake_log", "assistant_settings",
+            "ephemeral_messages",
         )
 
         async def probe(name: str) -> str | None:
             try:
-                await self._table(name).select("telegram_id").limit(1).execute()
+                await self._table(name).select("*").limit(1).execute()
                 return None
             except Exception as exc:
                 logger.error("Table %s is not available: %s", self._t(name), str(exc)[:200])
@@ -637,6 +638,25 @@ class Database:
     async def save_assistant_settings(self, telegram_id: int, fields: dict[str, Any]) -> None:
         payload = {"telegram_id": telegram_id, **fields, "updated_at": datetime.now(timezone.utc).isoformat()}
         await self._table("assistant_settings").upsert(payload, on_conflict="telegram_id").execute()
+
+    # ---------------------------------------------------------- 010: временные сообщения чата
+    async def add_ephemeral(self, chat_id: int, message_id: int, delete_at: datetime) -> None:
+        await self._table("ephemeral_messages").upsert(
+            {"chat_id": chat_id, "message_id": message_id, "delete_at": delete_at.isoformat()}, on_conflict="chat_id,message_id"
+        ).execute()
+
+    async def list_ephemerals(self, *, chat_id: int | None = None, due_before: datetime | None = None) -> list[dict[str, Any]]:
+        q = self._table("ephemeral_messages").select("chat_id,message_id")
+        if chat_id is not None:
+            q = q.eq("chat_id", chat_id)
+        if due_before is not None:
+            q = q.lte("delete_at", due_before.isoformat())
+        res = await q.limit(200).execute()
+        return res.data or []
+
+    async def drop_ephemerals(self, chat_id: int, message_ids: list[int]) -> None:
+        if message_ids:
+            await self._table("ephemeral_messages").delete().eq("chat_id", chat_id).in_("message_id", list(message_ids)).execute()
 
     # ---------------------------------------------------------- 008: подъём (wake)
     async def get_wake_settings(self, telegram_id: int) -> dict[str, Any]:

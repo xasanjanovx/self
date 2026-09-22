@@ -119,6 +119,11 @@ async def memory_prompt(uid: int) -> str:
         parts.append("ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (факты, которые он сообщал раньше):\n" + "\n".join(f"• {f}" for f in facts))
     if recent:
         parts.append("НЕДАВНИЕ РЕПЛИКИ (прошлые дни, для контекста «как вчера», «ему же»):\n" + "\n".join(recent[-12:]))
+    try:
+        if intent := await services.photo_intent(uid):
+            parts.append(f"ДОГОВОРЁННОСТЬ О ФОТО (expect_photo, действует): {intent}")
+    except Exception:
+        pass
     return "\n\n".join(parts)
 
 
@@ -242,6 +247,33 @@ async def _search(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         logger.exception("web_search failed")
         return {"error": f"search failed: {str(exc)[:120]}"}
     return {"answer": (answer or "")[:3000], "note": "summarize for the user in their language"}
+
+
+# ------------------------------------------------------------------ expect_photo
+@tool(
+    "expect_photo",
+    "Договориться, что делать с фото, которые он пришлёт («пришлю фото челленджа — отмечай выполненное», «буду слать чеки — записывай траты»). "
+    "Пока договорённость действует, каждое его фото приходит ТЕБЕ вместе с этой инструкцией (а не в подсчёт калорий). "
+    "days — сколько дней действует (1 — только сегодня, 30 — месяц, 365 — постоянно); days=0 — отменить. "
+    "Вызывай ВСЕГДА, когда обещаешь что-то сделать с будущим фото — иначе фото уйдёт в питание.",
+    {"purpose": P("STRING", "что сделать с фото: подробно, с деталями (какие цели отмечать, как понять выполненное)"),
+     "days": P("INTEGER", "сколько дней действует; 0 — отменить")},
+    ("purpose",),
+)
+async def _expect_photo(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from datetime import datetime, timedelta, timezone
+
+    uid = ctx.profile.telegram_id
+    if not db.available("assistant_settings"):
+        return {"error": "assistant_settings unavailable"}
+    days = int(_num(a.get("days")) if a.get("days") is not None else 1)
+    purpose = (_str(a.get("purpose")) or "")[:600]
+    if days <= 0 or not purpose:
+        await services.save_persona(uid, {"photo_intent": None, "photo_intent_until": None})
+        return {"ok": True, "cancelled": True}
+    until = datetime.now(timezone.utc) + timedelta(days=min(days, 365))
+    await services.save_persona(uid, {"photo_intent": purpose, "photo_intent_until": until.isoformat()})
+    return {"ok": True, "until": until.date().isoformat(), "note": "теперь его фото придут тебе с этой инструкцией"}
 
 
 # ------------------------------------------------------------------ weather (Open-Meteo)

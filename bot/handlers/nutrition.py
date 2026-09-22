@@ -331,12 +331,14 @@ async def _ask_confirm(message: Message, state: FSMContext, profile: Profile, it
     await show_panel(message, state, _format_pending(items, profile.lang, transcript), calorie_confirm_keyboard(profile.lang))
 
 
-async def handle_photo(message: Message, state: FSMContext, profile: Profile) -> None:
+async def handle_photo(message: Message, state: FSMContext, profile: Profile,
+                       photo: tuple[bytes, str, str] | None = None, *, hint: str | None = None) -> None:
+    """`photo` = (bytes, mime, file_id), если фото уже скачано (inbox сначала понял, что это еда)."""
     await capture_origin(state)
     await show_progress(message, profile.tr("⏳ Анализирую фото…", "⏳ Rasm tahlil qilinmoqda…"))
-    hint = message_text(message) or None
+    hint = hint if hint is not None else (message_text(message) or None)
     try:
-        image_bytes, mime_type, file_id = await get_photo_bytes(message)
+        image_bytes, mime_type, file_id = photo or await get_photo_bytes(message)
         await safe_delete(message)
         estimate = await ai.estimate_calories_by_photo(image_bytes, mime_type, hint=hint)
     except Exception as exc:
