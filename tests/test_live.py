@@ -51,3 +51,36 @@ def test_tool_declarations_per_mode():
     # в голосе нет чатовых инструментов: парсеры с экранами, кнопки, звонок самому себе
     assert not {"hand_off", "open_screen", "ask_user", "call_me"} & assistant_names
     assert "confirm_awake" not in assistant_names
+
+
+def test_language_is_locked_to_settings():
+    uz = persona.lang_rule(persona.Persona(lang="uz"))
+    assert "ТОЛЬКО по-узбекски" in uz and "Никогда не переходи" in uz
+    assert "отвечай по-русски" not in uz  # раньше при русской речи переключался — теперь нет
+    ru = persona.lang_rule(persona.Persona(lang="ru"))
+    assert "ТОЛЬКО по-русски" in ru
+
+
+def test_assistant_is_general_and_knows_itself():
+    text = live_call.system_instruction(_profile(), persona.Persona(), mode="assistant")
+    assert "не только финансовый" in text.lower() or "НЕ ТОЛЬКО ФИНАНСОВЫЙ" in text
+    assert "О СЕБЕ" in text and "в месяц" in text
+    assert "шутит" in text  # живой характер
+    from bot.handlers.agent import system_prompt
+
+    chat = system_prompt(_profile(), "")
+    assert "О СЕБЕ" in chat and "не могу" in chat
+
+
+def test_setup_payload_rich_and_plain():
+    sess = live_call._Session(_profile(), persona.Persona(lang="uz"), mode="assistant", system="x")
+    rich = sess.setup_payload("m", rich=True)["setup"]
+    assert "enableAffectiveDialog" not in rich["generationConfig"]  # ломает генерацию (проверено на сервере)
+    assert rich["generationConfig"]["speechConfig"]["languageCode"] == "uz-UZ"
+    names = {d["name"] for d in rich["tools"][-1]["functionDeclarations"]}
+    assert "send_to_chat" in names and "web_search" in names
+    plain = sess.setup_payload("m", rich=False)["setup"]
+    assert "languageCode" not in plain["generationConfig"]["speechConfig"] and len(plain["tools"]) == 1
+    assert "web_search" in {d["name"] for d in plain["tools"][0]["functionDeclarations"]}
+    wake = live_call._Session(_profile(), persona.Persona(), mode="wake", system="x").setup_payload("m", rich=True)["setup"]
+    assert "web_search" not in {d["name"] for d in wake["tools"][0]["functionDeclarations"]}

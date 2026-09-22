@@ -52,6 +52,26 @@ async def main() -> None:
         print(f"первый звук через {first_audio - t1:.2f} c" if first_audio else "звука нет")
         print(f"аудио: {audio_bytes / 48000:.1f} c речи")
         print("сказал:", "".join(text).strip())
+        # дальше — вопросы текстом (проверка языка и «ума»): live_probe.py assistant "вопрос 1" "вопрос 2"
+        for question in sys.argv[2:]:
+            await ws.send_str(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": question}]}], "turnComplete": True}}))
+            text = []
+            while True:
+                msg = await asyncio.wait_for(ws.receive(), timeout=60)
+                data = live_call._decode(msg)
+                if data is None:
+                    print("закрыто:", msg.type, getattr(msg, "extra", ""))
+                    break
+                if "toolCall" in data:
+                    calls = data["toolCall"].get("functionCalls") or []
+                    print("  инструменты:", [c.get("name") for c in calls])
+                    await sess._run_tools(ws, calls)
+                sc = data.get("serverContent") or {}
+                if (t := (sc.get("outputTranscription") or {}).get("text")):
+                    text.append(t)
+                if sc.get("turnComplete") and text:  # после инструмента ответ приходит следующим ходом
+                    break
+            print(f"\n❓ {question}\n💬 {''.join(text).strip()}")
         await ws.close()
 
 

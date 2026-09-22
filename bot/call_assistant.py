@@ -164,12 +164,33 @@ async def _notify_failure(profile: Profile, error: str) -> None:
 _running: set[int] = set()  # один звонок на человека одновременно
 
 
+async def _remember_call(profile: Profile, transcript: list[str]) -> None:
+    """Один «мозг»: разговор по телефону попадает в историю чата и в недавние реплики,
+    чтобы в чате Джарвис знал, о чём говорили («как я сказал по телефону…»)."""
+    lines = [t for t in transcript if t.strip() and not t.rstrip().endswith(":")]
+    if not lines:
+        return
+    try:
+        from . import agent_tools_extra as extra
+        from .handlers.agent import load_history, save_history
+
+        text = "\n".join(lines[-30:])[:3000]
+        history = load_history(profile.telegram_id)
+        history.append({"role": "user", "parts": [{"text": f"(разговор по телефону с Джарвисом только что:\n{text})"}]})
+        history.append({"role": "model", "parts": [{"text": "Помню наш разговор по телефону."}]})
+        save_history(profile.telegram_id, history)
+        asks = [t[4:] for t in lines if t.startswith("он: ")]
+        if asks:
+            await extra.remember_exchange(profile.telegram_id, "📞 " + " / ".join(asks[-3:]), "", when=profile.now.strftime("%d.%m %H:%M"))
+    except Exception:
+        logger.debug("remember call failed", exc_info=True)
+
+
 async def _send_summary(profile: Profile, actions: list[str], mutated: bool) -> None:
     """После разговора — что изменено, одной строкой, с кнопкой «Отменить»."""
     if not actions:
         return
     from .context import bot_instance
-    from .handlers.agent import _reply_kb
 
     names = {
         "add_finance_entries": ("операции", "operatsiya"), "update_finance_entry": ("правка операции", "operatsiya tahriri"),
@@ -186,9 +207,15 @@ async def _send_summary(profile: Profile, actions: list[str], mutated: bool) -> 
             done.append(label)
     if not done:
         return
-    text = "📞 " + profile.tr("После звонка: ", "Qo'ng'iroqdan so'ng: ") + ", ".join(done)
+    notice = "📞 " + profile.tr("После звонка: ", "Qo'ng'iroqdan so'ng: ") + ", ".join(done)
+    # не отдельным сообщением, а на главном экране (он и так один) — с кнопкой «Отменить»
     try:
-        await bot_instance().send_message(profile.telegram_id, text, reply_markup=_reply_kb(profile.lang, undo_available=mutated))
+        from . import screen as screen_mod
+        from .handlers.menu import build_dashboard
+        from .keyboards import main_menu_keyboard
+
+        text = f"{await build_dashboard(profile)}\n\n{notice}"
+        await screen_mod.show_screen(bot_instance(), profile.telegram_id, text, main_menu_keyboard(profile.lang, undo=mutated))
     except Exception:
         logger.debug("call summary failed", exc_info=True)
 
@@ -216,6 +243,7 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
             if not result.answered:
                 await _notify_failure(profile, str(result.error or ""))
             else:
+                await _remember_call(profile, result.transcript)
                 await _send_summary(profile, result.actions, result.mutated)
         except Exception:
             logger.exception("assistant call failed")

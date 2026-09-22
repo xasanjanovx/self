@@ -11,15 +11,27 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
+from .. import screen as screen_mod
 from .. import services
 from .. import wake as wake_mod
 from .. import wake_runner
 from ..context import db
 from ..profile import Profile
-from .common import answer_now, get_profile
+from .common import answer_now, get_profile, safe_delete
 
 router = Router(name="wake")
 logger = logging.getLogger(__name__)
+
+TASK_TTL = 30 * 60   # задание нужно, пока его выполняют
+NOTE_TTL = 3 * 60    # «позвоню в 05:10», «не сходится» — короткие реплики
+
+
+async def _say(bot, uid: int, text: str, ttl: int = NOTE_TTL) -> None:  # noqa: ANN001
+    """Реплика подъёма — временная: сама исчезнет, чат не копит."""
+    try:
+        await screen_mod.send_ephemeral(bot, uid, text, keep_previous=True, ttl=ttl)
+    except Exception:
+        logger.debug("wake reply failed", exc_info=True)
 
 
 @router.callback_query(F.data == "wake:up")
@@ -29,10 +41,7 @@ async def cb_wake_up(callback: CallbackQuery) -> None:
     task = wake_runner.active_task(profile.telegram_id)
     await wake_runner.mark_awake(callback.bot, profile, source="button")
     if task:
-        try:
-            await callback.bot.send_message(profile.telegram_id, profile.tr("Задание: ", "Vazifa: ") + str(task.get("text") or ""))
-        except Exception:
-            logger.debug("task message failed", exc_info=True)
+        await _say(callback.bot, profile.telegram_id, profile.tr("Задание: ", "Vazifa: ") + str(task.get("text") or ""), TASK_TTL)
 
 
 @router.callback_query(F.data == "wake:snooze")
@@ -46,7 +55,7 @@ async def cb_wake_snooze(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "wake:skip")
 async def cb_wake_skip(callback: CallbackQuery) -> None:
     profile = await get_profile(callback.from_user)
-    await wake_runner.skip_today(profile)
+    await wake_runner.skip_today(profile, callback.bot)
     await answer_now(callback, profile.tr("Сегодня не бужу", "Bugun uyg'otmayman"))
 
 
@@ -58,20 +67,23 @@ async def handle_awake_text(message: Message, profile: Profile, text: str) -> bo
     if minutes and wake_runner.active_task(profile.telegram_id):
         until = await wake_runner.snooze(profile, minutes)
         local = until.astimezone(profile.tz)
-        await message.answer(profile.tr(f"😴 Хорошо, позвоню в {local:%H:%M}", f"😴 Mayli, {local:%H:%M} da qo'ng'iroq qilaman"))
+        await safe_delete(message)
+        await _say(message.bot, profile.telegram_id, profile.tr(f"😴 Хорошо, позвоню в {local:%H:%M}", f"😴 Mayli, {local:%H:%M} da qo'ng'iroq qilaman"))
         return True
     if not wake_mod.looks_awake(text):
         return False
+    await safe_delete(message)
     task = wake_runner.active_task(profile.telegram_id)
     result = await wake_runner.mark_awake(message.bot, profile, source="message" if task else "early")
     if task:
-        await message.answer(profile.tr("Задание: ", "Vazifa: ") + str(task.get("text") or ""))
+        await _say(message.bot, profile.telegram_id, profile.tr("Задание: ", "Vazifa: ") + str(task.get("text") or ""), TASK_TTL)
     elif result["plan"].active and result["plan"].wake_at:
         # проснулся сам, до звонка — звонка не будет, но задание всё равно даём
         s, plan = await wake_runner.plan_for(profile)
         verse_ref = None
         task = wake_mod.make_task(s, plan.day, lang=profile.lang, verse_ref=verse_ref)
-        await message.answer(profile.tr("Звонка не будет 👍 Задание: ", "Qo'ng'iroq bo'lmaydi 👍 Vazifa: ") + str(task.get("text")))
+        await _say(message.bot, profile.telegram_id,
+                   profile.tr("Звонка не будет 👍 Задание: ", "Qo'ng'iroq bo'lmaydi 👍 Vazifa: ") + str(task.get("text")), TASK_TTL)
     return True
 
 
@@ -88,7 +100,9 @@ async def handle_task_reply(message: Message, profile: Profile, *, text: str | N
         s, plan = await wake_runner.plan_for(profile)
         history = await services.wake_history(profile.telegram_id, days=60)
         streak = wake_mod.streak_days(history, plan.day)
-        await message.answer(wake_mod.done_message(plan=plan, now=profile.now, lang=profile.lang, streak=streak))
+        await safe_delete(message)
+        await _say(message.bot, profile.telegram_id, wake_mod.done_message(plan=plan, now=profile.now, lang=profile.lang, streak=streak),
+                   wake_runner.DONE_TTL)
         return True
     hints = {
         "need_photo": ("Пришли фото пустого стакана 💧", "Bo'sh stakanni suratga olib yuboring 💧"),
@@ -98,7 +112,8 @@ async def handle_task_reply(message: Message, profile: Profile, *, text: str | N
         "need_answer": ("Напиши ответ числом", "Javobni raqam bilan yozing"),
     }
     ru, uz = hints.get(why, hints["need_answer"])
-    await message.answer(profile.tr(ru, uz))
+    await safe_delete(message)
+    await _say(message.bot, profile.telegram_id, profile.tr(ru, uz))
     return True
 
 

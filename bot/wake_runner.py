@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 # состояние текущих подъёмов в памяти: uid → {"task": …, "plan": …, "attempts": int, "last": datetime}
 _active: dict[int, dict[str, Any]] = {}
+# uid -> id сообщения «Пора вставать» с кнопками: держим одно на утро, после подъёма убираем
+_wake_msg: dict[int, int] = {}
+DONE_TTL = 15 * 60  # итог подъёма висит 15 минут и исчезает
+
+
+async def _drop_wake_message(bot: Bot, uid: int) -> None:
+    mid = _wake_msg.pop(uid, None)
+    if mid:
+        try:
+            await bot.delete_message(uid, mid)
+        except Exception:
+            pass
 
 
 def active_task(uid: int) -> dict[str, Any] | None:
@@ -194,7 +206,9 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
 
     text = wake_mod.wake_message(name=profile.first_name or "", plan=plan, task=task, attempt=attempts, lang=profile.lang)
     try:
-        await bot.send_message(uid, text, reply_markup=wake_keyboard(profile.lang), disable_notification=False)
+        await _drop_wake_message(bot, uid)  # прошлая попытка — не копим «Пора вставать» в чате
+        sent = await bot.send_message(uid, text, reply_markup=wake_keyboard(profile.lang), disable_notification=False)
+        _wake_msg[uid] = sent.message_id
     except Exception:
         logger.exception("wake message failed for %s", uid)
 
@@ -230,9 +244,13 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
     rows = [r for r in history if str(r.get("day"))[:10] != plan.day.isoformat()]
     rows.append({"day": plan.day.isoformat(), "woke_at": fields["woke_at"], "before_takbir": before})
     streak = wake_mod.streak_days(rows, plan.day)
+    await _drop_wake_message(bot, uid)
     if notify:
         try:
-            await bot.send_message(uid, wake_mod.done_message(plan=plan, now=local_now, lang=profile.lang, streak=streak))
+            from . import screen as screen_mod
+
+            await screen_mod.send_ephemeral(bot, uid, wake_mod.done_message(plan=plan, now=local_now, lang=profile.lang, streak=streak),
+                                            keep_previous=True, ttl=DONE_TTL)
         except Exception:
             logger.debug("wake done message failed", exc_info=True)
     # утренняя сводка «после подъёма» — сразу, как только встал
@@ -269,9 +287,11 @@ def snoozed_until(uid: int) -> datetime | None:
     return (_active.get(uid) or {}).get("snooze_until")
 
 
-async def skip_today(profile: Profile) -> None:
+async def skip_today(profile: Profile, bot: Bot | None = None) -> None:
     await services.save_wake_log(profile.telegram_id, profile.today, {"woke_at": datetime.now(timezone.utc).isoformat(), "woke_source": "skip"})
     _active.pop(profile.telegram_id, None)
+    if bot is not None:
+        await _drop_wake_message(bot, profile.telegram_id)
 
 
 async def morning_extra(profile: Profile) -> str:

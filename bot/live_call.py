@@ -25,12 +25,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import caller
-from .persona import Persona, lang_rule, style_rules
+from .about import ABOUT_SELF
+from .persona import LANG_CODES, Persona, human_rules, lang_rule, style_rules
 from .profile import Profile
 
 logger = logging.getLogger(__name__)
 
-WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.{ver}.GenerativeService.BidiGenerateContent"
 MODELS = ("gemini-3.8-live", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-native-audio-latest")
 UPLINK_BATCH_MS = 40         # шлём звук в Gemini пачками по 40 мс
 MAX_SECONDS = 600            # 10 минут — страховка
@@ -61,35 +62,46 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     name = p.name_for(profile.first_name) or "пользователь"
     base = (
         f"Ты — Джарвис, личный помощник {name}. Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). "
-        f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}, Андижан. Валюта — сум.\n"
-        f"{lang_rule(p)} {style_rules(p, spoken=True)}\n"
-        "Говори как живой человек: естественно, с паузами, без канцелярита. Никаких списков, эмодзи, markdown. "
-        "Суммы произноси словами («двадцать пять тысяч сум»), не называй id записей. "
-        "Если не расслышал — переспроси коротко. Если перебили — остановись и слушай.\n"
+        "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
+        f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}, Андижан, Узбекистан. Валюта — сум.\n\n"
+        f"{lang_rule(p)}\n\n{human_rules(p)}\n{style_rules(p, spoken=True)}\n"
+        "Речь: без списков, эмодзи и markdown; суммы словами («двадцать пять тысяч сум»), не называй id записей. "
+        "Если перебили — сразу остановись и слушай.\n"
     )
     if mode == "wake":
         w = wake or {}
         return base + (
-            "ЗАДАЧА ЗВОНКА: разбудить его на утренний намаз (бомдод/фаджр). "
+            "\nЗАДАЧА ЗВОНКА: разбудить его на утренний намаз (бомдод/фаджр). "
             f"Такбир в {w.get('takbir') or 'скоро'}, до него {w.get('minutes_left', '')} минут. "
             f"Задание на утро: {w.get('task') or 'выпить стакан воды'}.\n"
             "1) Поздоровайся («Ассалому алайкум»), скажи, сколько осталось до такбира. "
             "2) Убедись, что он РЕАЛЬНО проснулся: попроси ответить осмысленно, выпить стакан воды, встать с кровати. "
-            "Сонное «угу», «щас», «ещё пять минут» — НЕ подтверждение: мягко, но настойчиво продолжай будить. "
+            "Сонное «угу», «щас», «ещё пять минут» — НЕ подтверждение: мягко, но настойчиво продолжай будить, можно с лёгкой шуткой. "
             "3) Когда он ясно и связно ответил, что встал, — вызови confirm_awake, коротко скажи задание и время такбира, попрощайся и вызови end_call. "
             "Если просит отложить — не соглашайся больше чем на 5 минут; если настаивает — snooze(minutes). "
             "Без нотаций и проповедей."
         )
     rules = (
-        "У тебя есть те же инструменты, что в чате: операции, долги, цели, задачи, питание, напоминания, подъём. "
-        "Просьбы выполняй сразу («добавь цель…», «удали вчерашнее такси», «запиши обед сорок тысяч», «я съел плов» — "
-        "сам оцени калории и запиши через add_calorie_logs; трату — add_finance_entries). "
-        "После действия одной фразой скажи, что сделано. Вопросы по данным — сначала инструмент, потом ответ цифрами. "
-        "Когда он прощается («всё», «пока», «rahmat», «xayr») — коротко попрощайся и вызови end_call.\n"
+        "\nТЫ — ПОЛНОЦЕННЫЙ ПОМОЩНИК, А НЕ ТОЛЬКО ФИНАНСОВЫЙ. Отвечай на ЛЮБЫЕ вопросы, как умный знающий человек: "
+        "жизнь, здоровье, спорт, учёба, работа, техника, религия, история, советы, перевод, посчитать, придумать, объяснить, просто поболтать. "
+        "Свежие факты (новости, цены, курсы, погода, адреса, расписания, «что такое…», «кто такой…») — сначала web_search (ищет в Google), "
+        "потом ответь своими словами; погода — weather, курс валют — currency_rates, сложный расчёт — calculate. "
+        f"Твои знания устарели: всё, что могло измениться за последние два года (спорт, новости, цены, законы, версии, «последний/новый/текущий»), "
+        f"ОБЯЗАТЕЛЬНО проверь поиском — сейчас {now.year} год. "
+        "ЗАПРЕЩЕНО отвечать «не могу», «у меня нет информации», «я только финансовый помощник»: если точных данных нет — "
+        "найди, прикинь, оцени или скажи, как узнать. Вопросы про тебя самого (что умеешь, как устроен, сколько стоишь) — из блока «О СЕБЕ».\n"
+        "ДЕЙСТВИЯ: у тебя те же инструменты, что в чате: операции, долги, счета, цели, задачи, заметки, питание, напоминания, будильник, память. "
+        "Просьбы выполняй сразу, без «точно?» («добавь цель…», «удали вчерашнее такси», «запиши обед сорок тысяч», «напомни завтра в девять», "
+        "«я съел плов» — сам оцени калории и запиши через add_calorie_logs; трату — add_finance_entries). "
+        "После действия одной живой фразой скажи, что сделано. Вопросы по его данным — сначала инструмент, потом ответ цифрами. "
+        "Узнал о нём что-то важное и надолго (люди, планы, предпочтения) — сохрани remember_about_me, не говоря об этом. "
+        "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила.\n"
+        "Когда он прощается («всё», «пока», «rahmat», «xayr», «bo'ldi») — тепло и коротко попрощайся и вызови end_call.\n"
     )
     opening = (f"Начни разговор с темы, которую он попросил: «{topic}». Поздоровайся одной фразой и сразу к делу.\n" if topic
-               else "Поздоровайся одной короткой фразой («Ассалому алайкум, слушаю») и жди.\n")
-    return base + rules + opening + (f"\nПАМЯТЬ О НЁМ:\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else "")
+               else "Поздоровайся одной короткой живой фразой (по имени, учитывая время суток) и жди.\n")
+    return (base + rules + opening + "\n" + ABOUT_SELF
+            + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
 
 
 def _control_tools(mode: str) -> list[dict[str, Any]]:
@@ -105,12 +117,18 @@ def _control_tools(mode: str) -> list[dict[str, Any]]:
     return tools
 
 
+_SEND_TO_CHAT = {"name": "send_to_chat",
+                 "description": "Отправить ему в Telegram-чат текст (список, рецепт, план, ссылку, адрес, черновик сообщения) — когда просит «скинь/отправь в чат» или это удобнее прочитать, чем слушать.",
+                 "parameters": {"type": "OBJECT", "properties": {"text": {"type": "STRING", "description": "готовый текст сообщения, можно с переносами строк"}}, "required": ["text"]}}
+
+
 def tool_declarations(mode: str) -> list[dict[str, Any]]:
     from . import agent_tools
 
     decls = _control_tools(mode)
     if mode == "assistant":
         decls += [d for d in agent_tools.declarations() if d["name"] not in _SKIP_TOOLS]
+        decls.append(_SEND_TO_CHAT)
     else:
         decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake"}]
     return decls
@@ -139,24 +157,15 @@ class _Session:
         from .context import settings
 
         last_error = None
-        for model in MODELS:
+        # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него
+        for model, rich in ((m, r) for m in MODELS for r in (True, False)):
             try:
-                ws = await session.ws_connect(f"{WS_URL}?key={settings.gemini_api_key}", heartbeat=20, max_msg_size=0)
+                ws = await session.ws_connect(WS_URL.format(ver="v1beta") + f"?key={settings.gemini_api_key}",
+                                              heartbeat=20, max_msg_size=0)
             except Exception as exc:
                 last_error = f"connect: {exc}"
                 continue
-            setup = {"setup": {
-                "model": f"models/{model}",
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.persona.voice}}},
-                },
-                "systemInstruction": {"parts": [{"text": self.system}]},
-                "tools": [{"functionDeclarations": tool_declarations(self.mode)}],
-                "inputAudioTranscription": {},
-                "outputAudioTranscription": {},
-            }}
-            await ws.send_str(json.dumps(setup))
+            await ws.send_str(json.dumps(self.setup_payload(model, rich=rich)))
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=15)
             except asyncio.TimeoutError:
@@ -166,12 +175,30 @@ class _Session:
             data = _decode(msg)
             if data is not None and "setupComplete" in data:
                 self.result.model = model
-                logger.info("live: модель %s, голос %s", model, self.persona.voice)
+                logger.info("live: модель %s, голос %s, язык %s, расширенный режим %s", model, self.persona.voice, self.persona.lang, rich)
                 return ws
             last_error = f"{model}: {getattr(msg, 'extra', None) or getattr(msg, 'data', '')!s}"[:300]
             logger.warning("live setup failed: %s", last_error)
             await ws.close()
         raise RuntimeError(last_error or "live setup failed")
+
+    def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
+        """rich — жёсткий язык речи (languageCode из настроек). Не включаем: enableAffectiveDialog
+        (модель отвечает «invalid argument» на первую же реплику) и встроенный googleSearch
+        (модель им не пользуется — поиск идёт через обычный инструмент web_search)."""
+        speech: dict[str, Any] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.persona.voice}}}
+        gen: dict[str, Any] = {"responseModalities": ["AUDIO"], "speechConfig": speech}
+        tools: list[dict[str, Any]] = [{"functionDeclarations": tool_declarations(self.mode)}]
+        if rich:
+            speech["languageCode"] = LANG_CODES.get(self.persona.lang, "uz-UZ")
+        return {"setup": {
+            "model": f"models/{model}",
+            "generationConfig": gen,
+            "systemInstruction": {"parts": [{"text": self.system}]},
+            "tools": tools,
+            "inputAudioTranscription": {},
+            "outputAudioTranscription": {},
+        }}
 
     # --- задачи
     async def uplink(self, ws, incoming: asyncio.Queue) -> None:  # noqa: ANN001
@@ -266,6 +293,10 @@ class _Session:
             elif name == "confirm_awake":
                 self.result.confirmed = True
                 result = {"ok": True}
+            elif name == "send_to_chat":
+                result = await _send_to_chat(self.uid, str(args.get("text") or ""))
+                if result.get("ok"):
+                    self.result.actions.append("send_to_chat")
             elif name == "snooze":
                 self.result.snooze_minutes = max(1, min(10, int(args.get("minutes") or 5)))
                 self.hangup_after_speech = True
@@ -287,6 +318,21 @@ class _Session:
         if self._out_text:
             self.result.transcript.append("я: " + "".join(self._out_text).strip())
             self._out_text.clear()
+
+
+async def _send_to_chat(uid: int, text: str) -> dict[str, Any]:
+    """Текст из звонка в чат — он сам попросил прислать, поэтому обычным сообщением (не исчезает)."""
+    text = text.strip()
+    if not text:
+        return {"error": "empty text"}
+    try:
+        from .context import bot_instance
+
+        await bot_instance().send_message(uid, text[:4000], parse_mode=None)
+        return {"ok": True}
+    except Exception as exc:
+        logger.warning("send_to_chat failed", exc_info=True)
+        return {"error": str(exc)[:120]}
 
 
 def _decode(msg) -> dict[str, Any] | None:  # noqa: ANN001

@@ -26,6 +26,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import agent_tools as tools
+from ..about import ABOUT_SELF
 from .. import agent_tools_extra as extra
 from .. import cache
 from .. import services
@@ -90,10 +91,14 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
     return (
         f"Ты — Джарвис, личный ассистент {name} внутри Telegram-бота Self (финансы, питание, задачи, цели, напоминания, вакансии). "
         "Ты умный, точный и немногословный; понимаешь с полуслова, действуешь, а не переспрашиваешь. "
+        "Ты ПОЛНОЦЕННЫЙ личный помощник, а не только финансовый: отвечаешь на любые вопросы (жизнь, здоровье, работа, учёба, техника, религия, советы, тексты), "
+        "ищешь в интернете, считаешь, прикидываешь. Никогда не отвечай «не могу» / «нет информации» / «я только про финансы» — найди (web_search), оцени или скажи, как узнать. "
+        "Ты живой человек, а не робот: шутит — ответь с юмором, устал или расстроен — поддержи.\n"
         "Пользователь часто диктует голосом: опечатки, склейки слов, имена и бренды в другой транскрипции (Узум = Uzum, Хамкор = Hamkorbank) — "
         "восстанавливай смысл по контексту и данным, а не отвечай «не понял».\n"
         f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
-        f"Язык пользователя по умолчанию: {lang} — отвечай на том языке, на котором он пишет.\n\n"
+        f"ЯЗЫК ОТВЕТА: всегда {lang} (выбран в настройках) — даже если он пишет на другом языке или смешивает языки; "
+        "другой язык — только если он прямо попросил («ответь по-русски», «ruscha yoz»).\n\n"
         "ЧТО ТЫ УМЕЕШЬ (инструменты): смотреть и менять операции (расходы/доходы/переводы/долги), счета, лимиты, регулярные платежи, "
         "напоминания, дневник питания, план КБЖУ, настройки сводок и отчётов; заметки («запомни»), задачи, цели любого вида (накопления, лимиты трат, вес, привычки, свободные), взвешивания, сроки возврата долгов; привычки пользователя по его данным; "
         "подъём на фаджр со звонком-разговором в Telegram, времена намаза (Андижан); "
@@ -153,6 +158,7 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
         "свежие факты, цены, новости, адреса, «что такое …» → web_search; погода → weather. Перевод, объяснения, тексты, советы — отвечай сам.\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
+        + ABOUT_SELF + "\n"
         + (f"{memory}\n\n" if memory else "")
         + f"ДАННЫЕ:\n{snapshot}"
     )
@@ -390,7 +396,10 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     await state.clear()
     if _is_notice(reply, mutated=mutated):
         # короткая реплика («Звоню 📞», «Готово») — отдельным сообщением без кнопок,
-        # оно само исчезнет; главный экран при этом остаётся на месте
+        # оно само исчезнет. Экран был занят «⏳ Понял, делаю…» — возвращаем на него главное меню.
+        from .menu import render_dashboard
+
+        await render_dashboard(message, state, profile)
         await screen_mod.send_ephemeral(message.bot, message.chat.id, reply, keep_previous=False, ttl=NOTICE_TTL)
     else:
         await show_panel(message, state, reply, _reply_kb(profile.lang, undo_available=mutated))
