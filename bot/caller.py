@@ -220,17 +220,30 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
     ended = asyncio.Event()
     _incoming[uid] = queue
     _ended[uid] = ended
-    logger.info("call %s: набираю (поток, гудки до %s с)", uid, ring_seconds)
-    try:
-        await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
-    except Exception as exc:
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        logger.info("call %s: набираю (поток, попытка %s, гудки до %s с)", uid, attempt, ring_seconds)
+        try:
+            await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            name = type(exc).__name__.lower()
+            logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
+            # трубку взяли, но медиа не соединилось (известная болезнь ntgcalls, #70) — сразу перенабираем один раз
+            if "telegramserver" in name and attempt == 1:
+                ended.clear()
+                await asyncio.sleep(2)
+                continue
+            break
+    if last_exc is not None:
         _incoming.pop(uid, None)
         _ended.pop(uid, None)
-        name = type(exc).__name__.lower()
-        logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
+        name = type(last_exc).__name__.lower()
         if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
             return {"answered": False, "error": None}
-        return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"answered": False, "error": f"{type(last_exc).__name__}: {last_exc}"}
     logger.info("call %s: трубку взяли", uid)
     try:
         await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
