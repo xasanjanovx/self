@@ -42,6 +42,16 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_language": "Язык",
         "menu_settings": "Настройки",
         "menu_refresh": "Обновить",
+        "menu_tasks": "Задачи",
+        "menu_goals": "Цели",
+        "tasks_add": "Добавить",
+        "tasks_done_view": "Выполненные",
+        "tasks_open_view": "Открытые",
+        "tasks_notes": "Заметки",
+        "goal_add": "Новая цель",
+        "goal_deposit": "Отложить",
+        "goal_close": "Закрыть цель",
+        "delete": "Удалить",
         "finance_budgets": "Лимиты",
         "finance_debts": "Долги",
         "finance_note": "Комментарий",
@@ -109,6 +119,16 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "menu_language": "Til",
         "menu_settings": "Sozlamalar",
         "menu_refresh": "Yangilash",
+        "menu_tasks": "Vazifalar",
+        "menu_goals": "Maqsadlar",
+        "tasks_add": "Qo'shish",
+        "tasks_done_view": "Bajarilgan",
+        "tasks_open_view": "Ochiq",
+        "tasks_notes": "Eslatmalar",
+        "goal_add": "Yangi maqsad",
+        "goal_deposit": "Qo'shish",
+        "goal_close": "Maqsadni yopish",
+        "delete": "O'chirish",
         "finance_budgets": "Limitlar",
         "finance_debts": "Qarzlar",
         "finance_note": "Izoh",
@@ -200,6 +220,10 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
             [
                 _btn(t(lang, "menu_nutrition"), "menu:calorie", style=P, icon=_pe.ID_NUTRITION),
                 _btn(t(lang, "menu_finance"), "menu:finance", style=P, icon=_pe.ID_FINANCE),
+            ],
+            [
+                _btn(t(lang, "menu_tasks"), "menu:tasks", style=P, icon=_pe.ID_TASKS),
+                _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
                 _btn(t(lang, "menu_vacancy"), "menu:vacancy", style=P, icon=_pe.ID_VACANCY),
@@ -617,3 +641,51 @@ def dashboard_keyboard(active: str, lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 __all__ = [name for name in dir() if name.endswith("_keyboard") or name == "t"]
+
+
+# ------------------------------------------------------------------ tasks / goals
+def _short(text: str, limit: int = 28) -> str:
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def tasks_keyboard(tasks: list[dict], lang: str = "ru", *, done_view: bool = False) -> InlineKeyboardMarkup:
+    """Экран задач: по кнопке на задачу (✅ выполнить / 🗑 удалить в списке выполненных)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for t_ in tasks[:12]:
+        tid = t_.get("id")
+        if done_view:
+            rows.append([_btn(f"🗑 {_short(t_.get('text'))}", f"task:del:{tid}", icon=_pe.ID_DELETE)])
+        else:
+            rows.append([_btn(f"✅ {_short(t_.get('text'))}", f"task:done:{tid}", icon=_pe.ID_SAVE)])
+    rows.append([
+        _btn(t(lang, "tasks_add"), "task:add", style="primary", icon=_pe.ID_ADD),
+        _btn(t(lang, "tasks_open_view" if done_view else "tasks_done_view"), "task:view:open" if done_view else "task:view:done", icon=_pe.ID_REFRESH),
+    ])
+    rows.append([_btn(t(lang, "tasks_notes"), "task:notes", icon=_pe.ID_NUTRITION), _back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def notes_keyboard(notes: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+    rows = [[_btn(f"🗑 {_short(n.get('text'))}", f"note:del:{n.get('id')}", icon=_pe.ID_DELETE)] for n in notes[:12]]
+    rows.append([_back(lang, "menu:tasks")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def goals_keyboard(goals: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+    rows = [[_btn(f"🎯 {_short(g.get('title'))}", f"goal:view:{g.get('id')}", icon=_pe.ID_GOAL)] for g in goals[:10]]
+    rows.append([_btn(t(lang, "goal_add"), "goal:add", style="primary", icon=_pe.ID_ADD), _back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def goal_detail_keyboard(goal_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn(t(lang, "goal_deposit"), f"goal:deposit:{goal_id}", style="primary", icon=_pe.ID_ADD)],
+            [
+                _btn(t(lang, "goal_close"), f"goal:close:{goal_id}", style="success", icon=_pe.ID_SAVE),
+                _btn(t(lang, "delete"), f"goal:del:{goal_id}", style="danger", icon=_pe.ID_DELETE),
+            ],
+            [_back(lang, "menu:goals")],
+        ]
+    )

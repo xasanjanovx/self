@@ -1040,13 +1040,13 @@ async def _hand_off(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "open_screen",
-    "Показать пользователю экран бота («покажи/открой …»): menu (главный), finance, nutrition, budgets (лимиты), recurring (регулярные), stats (статистика за месяц). Экран сам содержит данные — отдельно перечислять их не нужно.",
-    {"screen": P("STRING", "menu | finance | nutrition | budgets | recurring | stats", enum=["menu", "finance", "nutrition", "budgets", "recurring", "stats"])},
+    "Показать пользователю экран бота («покажи/открой …»): menu (главный), finance, nutrition, budgets (лимиты), recurring (регулярные), stats (статистика за месяц), tasks (задачи и заметки), goals (цели накоплений). Экран сам содержит данные — отдельно перечислять их не нужно. После изменения задач/целей открой соответствующий экран.",
+    {"screen": P("STRING", "menu | finance | nutrition | budgets | recurring | stats | tasks | goals", enum=["menu", "finance", "nutrition", "budgets", "recurring", "stats", "tasks", "goals"])},
     ("screen",),
 )
 async def _open_screen(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     screen = (_str(a.get("screen")) or "menu").lower()
-    ctx.open_screen = screen if screen in {"menu", "finance", "nutrition", "budgets", "recurring", "stats"} else "menu"
+    ctx.open_screen = screen if screen in {"menu", "finance", "nutrition", "budgets", "recurring", "stats", "tasks", "goals"} else "menu"
     return {"ok": True, "screen": ctx.open_screen}
 
 

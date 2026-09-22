@@ -202,7 +202,7 @@ def test_notes_and_tasks_tools(monkeypatch):
     out = _run(tools.run("add_note", {"text": "у брата день рождения 3 ноября"}, ctx))
     assert out["added"]["text"].startswith("у брата")
     out = _run(tools.run("add_task", {"text": "поздравить брата", "due_date": "2026-11-03"}, ctx))
-    assert out["added"]["due_date"] == "2026-11-03" and out["added"]["days_left"] == 43
+    assert out["added"]["due_date"] == "2026-11-03" and out["added"]["days_left"] == (date(2026, 11, 3) - _profile().today).days
     out = _run(tools.run("add_task", {"text": "позвонить маме", "due_time": "18"}, ctx))
     assert out["added"]["due_time"] == "18:00" and out["added"]["due_date"] == _profile().today.isoformat()
     listed = _run(tools.run("list_notes", {"query": "брат"}, ctx))

@@ -20,3 +20,7 @@ class BotStates(StatesGroup):
     waiting_note_value = State()
     # вакансии
     waiting_vacancy_input = State()
+    # задачи / цели
+    waiting_task_input = State()
+    waiting_goal_input = State()
+    waiting_goal_amount = State()

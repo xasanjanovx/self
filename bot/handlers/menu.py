@@ -16,6 +16,7 @@ from .. import finance as fin
 from .. import nutrition as nutri
 from .. import screen as screen_mod
 from .. import services
+from .. import tasks as tasks_mod
 from .. import ui
 from ..context import db
 from ..keyboards import back_to_menu_keyboard, language_keyboard, main_menu_keyboard
@@ -123,28 +124,17 @@ def _assistant_card(goals: list[dict], tasks: list[dict], today: date, lang: str
                 tail = ""
         lines.append(f"🎯 {h(g.get('title'))}: {fin.bar(ratio, 8)} {ui.pct(ratio)}")
         lines.append(f"   {fin.fmt_money(saved)} / {fin.fmt_money(target)}{tail}")
-    due_tasks = []
-    for t_ in tasks:
-        due = str(t_.get("due_date") or "")[:10]
-        if not due:
-            continue
-        try:
-            d = date.fromisoformat(due)
-        except ValueError:
-            continue
-        if d <= today:
-            due_tasks.append((d, t_))
-    if due_tasks:
+    picked, hidden = tasks_mod.dashboard_pick(tasks, today)
+    if picked:
         if lines:
             lines.append("")
-        for d, t_ in sorted(due_tasks, key=lambda x: x[0])[:3]:
-            flag = "⚠️" if d < today else "📝"
-            when = f" {t_['due_time']}" if t_.get("due_time") else ""
-            lines.append(f"{flag} {h(t_.get('text'))}{when}")
-        if len(due_tasks) > 3:
-            lines.append(ui.muted(f"… +{len(due_tasks) - 3}"))
-    if not lines and tasks:
-        lines.append(ui.muted(f"{len(tasks)} ta ochiq vazifa" if uz else f"открытых дел: {len(tasks)}"))
+        for t_ in picked:
+            d = tasks_mod.task_date(t_)
+            flag = "⚠️" if d and d < today else "📝" if d == today else "•"
+            when = tasks_mod.when_label(t_, today, lang)
+            lines.append(f"{flag} {h(t_.get('text'))}" + (f" · {ui.muted(when)}" if when else ""))
+        if hidden:
+            lines.append(ui.muted(f"… +{hidden} → {'Vazifalar' if uz else 'Задачи'}"))
     if not lines:
         return None
     return ui.card(f"🎯 <b>{'Maqsad va ishlar' if uz else 'Цели и дела'}</b>", lines)
@@ -205,6 +195,8 @@ HELP_RU = (
     "• «дал в долг 200000 наличными», «снял с карты 300000»\n"
     "• Можно несколько операций через запятую\n"
     "• Вопросы: «сколько я потратил на еду в этом месяце?»\n\n"
+    "📝 <b>Задачи</b> — «позвонить маме завтра в 18:00», «купить лампочку»; ✅ по кнопке; «запомни…» — заметки\n"
+    "🎯 <b>Цели</b> — «накопить 10 млн на ноутбук к январю», «отложил 500к на ноутбук»\n"
     "📣 <b>Вакансии</b> — пришли текст/пересланный пост, бот оформит пост для канала и даст промпт для картинки\n"
     "📊 <b>Аналитика</b> — графики и авто-отчёт\n\n"
     "Команды: /menu · /help"
@@ -221,6 +213,8 @@ HELP_UZ = (
     "• «qarzga berdim 200000 naqd», «kartadan 300000 yechdim»\n"
     "• Bir nechta operatsiyani vergul bilan\n"
     "• Savollar: «bu oy ovqatga qancha sarfladim?»\n\n"
+    "📝 <b>Vazifalar</b> — «ertaga 18:00 onamga qo'ng'iroq», «lampochka olish»; ✅ tugma bilan\n"
+    "🎯 <b>Maqsadlar</b> — «yanvargacha noutbukka 10 mln», «noutbukka 500k qo'shdim»\n"
     "📣 <b>Vakansiya</b> — matn yoki forward yuboring, bot kanal uchun post va rasm uchun prompt tayyorlaydi\n"
     "📊 <b>Tahlil</b> — grafiklar va avto-hisobot\n\n"
     "Buyruqlar: /menu · /help"

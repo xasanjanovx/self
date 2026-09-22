@@ -366,6 +366,14 @@ async def _open_screen(message: Message, state: FSMContext, profile: Profile, sc
         from .finance_extra import render_recurring
 
         await render_recurring(message, state, profile, notice=notice)
+    elif screen == "tasks":
+        from .assistant import render_tasks
+
+        await render_tasks(message, state, profile, notice=notice)
+    elif screen == "goals":
+        from .assistant import render_goals
+
+        await render_goals(message, state, profile, notice=notice)
     elif screen == "stats":
         from .. import finance as fin
         from .. import services
