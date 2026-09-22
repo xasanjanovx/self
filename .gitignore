@@ -4,3 +4,7 @@ __pycache__/
 .env
 .tmp/
 tmp_mcp_check.txt
+
+# сессия аккаунта-помощника для звонков — секрет, в репозиторий не кладём
+.tg_login_state.json
+.tg_caller_session

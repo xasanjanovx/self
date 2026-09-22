@@ -1,2 +1,2 @@
 py-tgcalls==2.3.3
-telethon==1.38.1
+telethon==1.45.0
