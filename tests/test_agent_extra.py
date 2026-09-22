@@ -116,3 +116,14 @@ def test_local_finance_only_for_unambiguous_phrases():
 def test_extra_tools_registered():
     names = set(tools.TOOLS)
     assert {"ask_user", "remember_about_me", "currency_rates", "calculate", "web_search", "weather"} <= names
+
+
+def test_thinking_config_by_generation():
+    from bot.ai import thinking_config
+
+    assert thinking_config("gemini-2.5-flash", 0) == {"thinkingBudget": 0}
+    assert thinking_config("gemini-2.5-flash", 512) == {"thinkingBudget": 512}
+    assert thinking_config("gemini-3.5-flash-lite", 0) == {"thinkingLevel": "minimal"}
+    assert thinking_config("gemini-3.5-flash-lite", 512) == {"thinkingLevel": "low"}
+    assert thinking_config("gemini-3.6-flash", 1024) == {"thinkingLevel": "medium"}
+    assert thinking_config("gemini-2.0-flash", 512) is None and thinking_config("gemini-3.6-flash", None) is None

@@ -139,6 +139,19 @@ def _clean_list(value: Any, *, max_items: int = 30, max_len: int = 240) -> list[
     return result
 
 
+def thinking_config(model: str, budget: int | None) -> dict[str, Any] | None:
+    """Настройка «размышлений» под поколение модели: 2.5 — thinkingBudget (токены),
+    3.x — thinkingLevel (minimal/low/medium/high; по умолчанию у 3.x — high, т.е. медленно)."""
+    if budget is None:
+        return None
+    if "gemini-3" in model:
+        level = "minimal" if budget <= 0 else "low" if budget <= 512 else "medium" if budget <= 2048 else "high"
+        return {"thinkingLevel": level}
+    if "2.5" in model:
+        return {"thinkingBudget": int(budget)}
+    return None
+
+
 class AIService:
     def __init__(self, settings: Settings) -> None:
         self.api_key = settings.gemini_api_key
@@ -182,7 +195,10 @@ class AIService:
             return
         if not available:
             return
-        preferred = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]
+        preferred = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]
+        newer = sorted(n for n in available if n.startswith("gemini-3") and "flash" in n and "tts" not in n and "image" not in n)
+        if newer:
+            logger.info("Newer Gemini flash models available for this key: %s", ", ".join(newer))
 
         def pick(current: str) -> str:
             if current in available:
@@ -253,8 +269,8 @@ class AIService:
         gen_config: dict[str, Any] = {"temperature": temperature, "maxOutputTokens": max_tokens}
         if json_mode:
             gen_config["responseMimeType"] = "application/json"
-        if thinking_budget is not None and "2.5" in model:
-            gen_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
+        if (tc := thinking_config(model, thinking_budget)) is not None:
+            gen_config["thinkingConfig"] = tc
         payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": gen_config}
         candidate = self._first_candidate(await self._post(model, payload))
         content_parts = (candidate.get("content") or {}).get("parts") or []
@@ -282,8 +298,8 @@ class AIService:
         модели возвращаются как есть (включая thoughtSignature), чтобы их можно было положить в историю."""
         model = model or self.agent_model
         gen_config: dict[str, Any] = {"temperature": temperature, "maxOutputTokens": max_tokens}
-        if thinking_budget is not None and "2.5" in model:
-            gen_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
+        if (tc := thinking_config(model, thinking_budget)) is not None:
+            gen_config["thinkingConfig"] = tc
         payload: dict[str, Any] = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": contents,
