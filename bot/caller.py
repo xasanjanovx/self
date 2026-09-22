@@ -71,6 +71,35 @@ async def start() -> bool:
             return False
 
 
+async def resolve_peer(user_id: int, username: str | None = None) -> Any:
+    """Найти собеседника для звонка.
+
+    Telethon умеет звонить только тому, чей «адрес» (access_hash) ему известен.
+    У свежего аккаунта кэш пуст, поэтому: пробуем id → подгружаем диалоги →
+    ищем по @username. Если и это не вышло — звонить некому, и мы честно
+    говорим об этом, а не молчим.
+    """
+    uid = int(user_id)
+    try:
+        return await _client.get_input_entity(uid)
+    except Exception:
+        logger.info("caller: %s не в кэше, подгружаю диалоги", uid)
+    try:
+        await _client.get_dialogs(limit=100)
+        return await _client.get_input_entity(uid)
+    except Exception:
+        pass
+    name = (username or "").lstrip("@").strip()
+    if name:
+        try:
+            entity = await _client.get_entity(name)
+            logger.info("caller: собеседник найден по @%s", name)
+            return await _client.get_input_entity(entity)
+        except Exception:
+            logger.warning("caller: не удалось найти @%s", name, exc_info=True)
+    raise LookupError("peer_unknown")
+
+
 async def stop() -> None:
     global _client, _calls
     try:
@@ -86,7 +115,7 @@ async def stop() -> None:
     _client = _calls = None
 
 
-async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_seconds: int = 40) -> dict[str, Any]:
+async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_seconds: int = 40, username: str | None = None) -> dict[str, Any]:
     """Позвонить и проиграть файл. Возвращает {'answered': bool, 'error': str|None}.
 
     Телеграм звонит, пока не возьмут трубку или не истечёт `ring_seconds`; если
@@ -98,6 +127,10 @@ async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_se
         from pytgcalls.types import CallConfig  # type: ignore
     except Exception as exc:
         return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        await resolve_peer(int(user_id), username)
+    except LookupError:
+        return {"answered": False, "error": "peer_unknown"}
     try:
         await _calls.play(int(user_id), audio_path, config=CallConfig(timeout=ring_seconds))
     except Exception as exc:
@@ -153,7 +186,7 @@ def _hook_updates() -> None:
 
 
 async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds: int = 45,
-               max_seconds: int = 180) -> dict[str, Any]:
+               max_seconds: int = 180, username: str | None = None) -> dict[str, Any]:
     """Позвонить и РАЗГОВАРИВАТЬ: проигрываем фразу, слушаем ответ, отвечаем.
 
     `on_utterance(pcm | None)` — колбэк уровня бота: получает записанную фразу
@@ -171,6 +204,10 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
 
     uid = int(user_id)
     _hook_updates()
+    try:
+        await resolve_peer(uid, username)
+    except LookupError:
+        return {"answered": False, "error": "peer_unknown"}
     queue: asyncio.Queue[bytes] = asyncio.Queue()
     _incoming[uid] = queue
     path = await cd.pcm_to_file(greeting_pcm)
@@ -247,4 +284,4 @@ async def send_message(user_id: int, text: str) -> bool:
         return False
 
 
-__all__ = ["available", "configured", "status", "start", "stop", "call", "talk", "send_message"]
+__all__ = ["available", "configured", "status", "start", "stop", "call", "talk", "resolve_peer", "send_message"]

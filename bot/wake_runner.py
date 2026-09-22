@@ -139,7 +139,7 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
         return {"pcm": await _say(answer), "stop": stop}
 
     result = await caller.talk(profile.telegram_id, greeting_pcm=greeting_pcm, on_utterance=on_utterance,
-                               ring_seconds=max(20, s.retry_seconds), max_seconds=cd.MAX_CALL_SECONDS)
+                               ring_seconds=max(20, s.retry_seconds), max_seconds=cd.MAX_CALL_SECONDS, username=profile.username)
     result["state"] = state
     return result
 
@@ -173,7 +173,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             path = await _speech_file(script)
             if path:
                 try:
-                    result = await caller.call(uid, path, ring_seconds=max(20, s.retry_seconds), play_seconds=45)
+                    result = await caller.call(uid, path, ring_seconds=max(20, s.retry_seconds), play_seconds=45, username=profile.username)
                     answered, call_error = bool(result.get("answered")), result.get("error")
                 finally:
                     cd.cleanup(path)

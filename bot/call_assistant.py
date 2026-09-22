@@ -136,7 +136,7 @@ async def call_now(profile: Profile, *, topic: str = "", lang: str | None = None
         return {"pcm": await ai.synthesize(say), "stop": stop}
 
     result = await caller.talk(profile.telegram_id, greeting_pcm=greeting_pcm, on_utterance=on_utterance,
-                               ring_seconds=45, max_seconds=MAX_SECONDS)
+                               ring_seconds=45, max_seconds=MAX_SECONDS, username=profile.username)
     return {"ok": bool(result.get("answered")), "error": result.get("error"), "turns": turns,
             "transcript": transcript}
 
@@ -146,6 +146,8 @@ async def _notify_failure(profile: Profile, error: str) -> None:
     reasons = {
         "tts unavailable": ("Не смог синтезировать голос — отвечаю текстом.", "Ovozni tayyorlay olmadim — matn bilan javob beraman."),
         "caller is not configured": ("Звонки пока не настроены.", "Qo'ng'iroqlar hali sozlanmagan."),
+        "peer_unknown": ("Аккаунт-помощник тебя ещё «не знает». Напиши ему любое сообщение в личку — и звонки заработают.",
+                         "Yordamchi akkaunt sizni hali tanimaydi. Unga shaxsiy xabar yozing — keyin qo'ng'iroq ishlaydi."),
     }
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
