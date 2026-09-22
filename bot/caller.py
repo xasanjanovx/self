@@ -58,6 +58,7 @@ async def start() -> bool:
         try:
             _client = TelegramClient(StringSession(os.environ["TG_CALLER_SESSION"]), int(os.environ["TG_CALLER_API_ID"]), os.environ["TG_CALLER_API_HASH"])
             await _client.start()
+            logging.getLogger("pytgcalls").setLevel(logging.INFO)
             _calls = PyTgCalls(_client)
             await _calls.start()
             me = await _client.get_me()
@@ -133,12 +134,18 @@ def _hook_updates() -> None:
     @_calls.on_update()
     async def _on_update(_client, update):  # noqa: ANN001
         try:
-            if isinstance(update, StreamFrames) and update.direction == Direction.INCOMING:
+            if isinstance(update, StreamFrames):
+                if update.direction != Direction.INCOMING:
+                    return
                 queue = _incoming.get(int(update.chat_id))
                 if queue is None:
                     return
                 for frame in update.frames:
                     queue.put_nowait(bytes(frame.frame))
+                return
+            # всё остальное (ответили, положили трубку, смена состояния) — в лог: без этого
+            # не видно, на каком шаге рвётся звонок
+            logger.info("call update: %s %s", type(update).__name__, getattr(update, "status", "") or getattr(update, "state", ""))
         except Exception:
             logger.debug("frame hook failed", exc_info=True)
 
@@ -168,16 +175,20 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
     _incoming[uid] = queue
     path = await cd.pcm_to_file(greeting_pcm)
     try:
+        logger.info("call %s: набираю (гудки до %s с)", uid, ring_seconds)
         try:
             await _calls.play(uid, path, config=CallConfig(timeout=ring_seconds))
         except Exception as exc:
             name = type(exc).__name__.lower()
+            logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
             if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
                 return {"answered": False, "error": None}
             return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
         # трубку взяли
+        logger.info("call %s: соединение установлено, говорю приветствие", uid)
         try:
             await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
+            logger.info("call %s: слушаю собеседника", uid)
         except Exception:
             logger.warning("record() failed — разговор без слуха", exc_info=True)
         buffer = cd.VoiceBuffer()
