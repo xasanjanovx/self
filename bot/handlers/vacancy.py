@@ -94,8 +94,15 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
 
     await state.set_state(BotStates.waiting_vacancy_input)
     await state.update_data(vacancy_post=post, vacancy_contact_url=contact_url, vacancy_photo_id=photo_id, vacancy_prompt=data.image_prompt)
-    kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel), image_prompt=data.image_prompt)
+    kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel))
     await show_panel(message, state, post, kb)
+    if data.image_prompt:
+        # полный промпт — отдельным блоком: в Telegram нажатие на блок копирует его целиком
+        from .. import screen as screen_mod
+
+        head = profile.tr("🎨 <b>Промпт для картинки</b> — нажми на блок, чтобы скопировать",
+                          "🎨 <b>Rasm uchun prompt</b> — nusxalash uchun blokni bosing")
+        await screen_mod.send_ephemeral(message.bot, message.chat.id, f"{head}\n<pre>{h(data.image_prompt)}</pre>", keep_previous=True)
 
 
 @router.message(BotStates.waiting_vacancy_input)

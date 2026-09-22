@@ -77,7 +77,8 @@ def test_keyboards():
     kb = main_menu_keyboard("ru")
     data = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert "menu:tasks" in data and "menu:goals" in data
-    assert data.index("menu:tasks") < data.index("menu:vacancy")
+    assert data.index("menu:tasks") < data.index("menu:jarvis")
+    assert "menu:vacancy" not in data  # вакансии — просто присылаешь текст, отдельной кнопки нет
     kb = tasks_keyboard([{"id": 7, "text": "очень длинный текст задачи, который надо обрезать"}], "ru")
     first = kb.inline_keyboard[0][0]
     assert first.callback_data == "task:done:7" and first.text.endswith("…") and len(first.text) <= 32

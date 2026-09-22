@@ -235,6 +235,16 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
             await bot.send_message(uid, wake_mod.done_message(plan=plan, now=local_now, lang=profile.lang, streak=streak))
         except Exception:
             logger.debug("wake done message failed", exc_info=True)
+    # утренняя сводка «после подъёма» — сразу, как только встал
+    if source != "skip":
+        try:
+            us = await services.user_settings(uid)
+            if str(us.get("brief_morning_time") or "") == "wake":
+                from .workers import send_morning
+
+                await send_morning(bot, profile, us)
+        except Exception:
+            logger.debug("morning brief after wake failed", exc_info=True)
     return {"before_takbir": before, "streak": streak, "plan": plan}
 
 

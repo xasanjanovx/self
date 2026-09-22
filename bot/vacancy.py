@@ -168,7 +168,8 @@ def finalize(data: VacancyData, raw_text: str) -> VacancyData:
         data.intro = None
     if not data.headline:
         data.headline = "Xodim kerak"
-    data.image_prompt = build_image_prompt(data, scene=data.image_prompt)
+    scene = data.image_prompt  # от AI приходит только описание фона
+    data.image_prompt = build_full_prompt(data, scene=scene)
     return data
 
 
@@ -225,6 +226,52 @@ def build_image_prompt(data: VacancyData, *, scene: str | None = None, max_len: 
     if len(text) > max_len:  # крайний случай — режем хвост
         text = text[: max_len - 1] + "…"
     return text
+
+
+def build_full_prompt(data: VacancyData, *, scene: str | None = None) -> str:
+    """Полный промпт для картинки: ВСЯ вакансия (контекст) + внизу задача на баннер.
+
+    Отдаётся отдельным сообщением-блоком (копируется целиком нажатием), поэтому без
+    лимита кнопки в 256 символов. На сам баннер модель выносит только главное.
+    """
+    region = region_name(data.region_tag)
+    place = data.address if data.address and region.lower() in data.address.lower() else ", ".join(filter(None, [data.address, region]))
+    lines = ["VAKANSIYA — barcha ma'lumotlar:", f"Lavozim: {data.headline}"]
+    if data.company:
+        lines.append(f"Kompaniya: {data.company}")
+    if data.intro:
+        lines.append(f"Tavsif: {data.intro}")
+    if place:
+        lines.append(f"Manzil: {place}")
+    if data.salary:
+        lines.append(f"Maosh: {data.salary}")
+    if data.schedule:
+        lines.append(f"Ish vaqti: {data.schedule}")
+    for title, items in (("Talablar", data.requirements), ("Vazifalar", data.duties), ("Qulayliklar", data.benefits)):
+        if items:
+            lines.append(f"{title}: " + "; ".join(items))
+    for section in data.extra_sections:
+        if section.items:
+            lines.append(f"{section.title}: " + "; ".join(section.items))
+    contacts = ", ".join(filter(None, [data.phone, data.telegram]))
+    if contacts:
+        lines.append(f"Aloqa: {contacts}")
+
+    must = ["крупно — должность", "зарплата" if data.salary else None, "место" if place else None,
+            "график" if data.schedule else None, "1–2 самых сильных преимущества" if data.benefits else None,
+            "телефон" if data.phone else None, "@ishdasiz"]
+    task = [
+        "",
+        "ЗАДАЧА: сделай ГОРИЗОНТАЛЬНЫЙ баннер 16:9 для этой вакансии в Telegram-канал @ishdasiz.",
+        "На баннер вынеси ТОЛЬКО самое важное, текстом на узбекской латинице — ровно как в данных, без ошибок: "
+        + ", ".join(m for m in must if m) + ".",
+        "Остальные данные — только для понимания контекста, на баннер их не выписывай.",
+        "Стиль: сочный, современный, премиальный — яркие контрастные цвета, крупная читаемая типографика, "
+        "чёткая иерархия (должность → зарплата → остальное), аккуратная сетка, много воздуха, лёгкая глубина и свет.",
+        f"Фон: {scene.strip()}." if scene and scene.strip() else "Фон: реалистичная сцена по теме профессии, люди в работе.",
+        "Без водяных знаков, логотипов брендов и лишнего текста.",
+    ]
+    return "\n".join(lines + task)
 
 
 def default_image_prompt(headline: str) -> str:

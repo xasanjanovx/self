@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
@@ -81,11 +81,48 @@ async def report_worker(bot: Bot) -> None:
         await asyncio.sleep(interval)
 
 
+async def send_morning(bot: Bot, profile, us: dict | None = None, *, late_ok: bool = True) -> bool:  # noqa: ANN001
+    """Утренняя сводка + вопросы по регулярным платежам — один раз в день.
+
+    Зовётся по расписанию и сразу после подтверждённого подъёма (если утро «после подъёма»).
+    """
+    from . import briefs
+    from . import finance as fin
+    from . import screen as screen_mod
+    from .keyboards import recurring_prompt_keyboard
+
+    telegram_id = profile.telegram_id
+    us = us if us is not None else await services.user_settings(telegram_id)
+    local_now = profile.now
+    today_key = local_now.date().isoformat()
+    if us.get("last_morning_key") == today_key:
+        return False
+    await services.save_user_settings(telegram_id, {"last_morning_key": today_key})
+    if us.get("brief_morning", True) and late_ok:
+        try:
+            text = await briefs.morning_brief(profile)
+            await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+        except Exception:
+            logger.exception("morning brief failed for %s", telegram_id)
+    if db.available("recurring_payments"):
+        try:
+            items = await services.recurring(telegram_id)
+            for it in fin.recurring_due_today(items, local_now.date()):
+                q = profile.tr(
+                    f"🔁 Оплатил <b>{it.get('title')}</b> — {fin.fmt_money(float(it.get('amount') or 0))} {profile.currency}?",
+                    f"🔁 <b>{it.get('title')}</b> — {fin.fmt_money(float(it.get('amount') or 0))} {profile.currency} to'ladingizmi?",
+                )
+                await bot.send_message(telegram_id, q, reply_markup=recurring_prompt_keyboard(it["id"], profile.lang))
+                await db.update_recurring(telegram_id, it["id"], {"last_asked_key": local_now.strftime("%Y-%m")})
+            services.invalidate_recurring(telegram_id)
+        except Exception:
+            logger.exception("recurring prompts failed for %s", telegram_id)
+    return True
+
+
 async def _brief_tick(bot: Bot) -> None:
     from . import briefs
-    from .keyboards import recurring_prompt_keyboard
     from . import screen as screen_mod
-    from . import finance as fin
 
     if not db.available("user_settings"):
         return
@@ -101,30 +138,25 @@ async def _brief_tick(bot: Bot) -> None:
         minutes_now = local_now.hour * 60 + local_now.minute
         us = await services.user_settings(telegram_id)
 
-        # --- утро: сводка + вопросы по регулярным платежам
-        m_h, m_m = briefs.parse_hhmm(us.get("brief_morning_time"), (8, 0))
+        # --- утро: в заданное время или «после подъёма» (её шлёт wake_runner.mark_awake;
+        # если в этот день будильника нет — в 08:00; если не проснулся — через 2 ч после такбира)
+        raw_morning = str(us.get("brief_morning_time") or "08:00")
+        if raw_morning == "wake":
+            m_h, m_m = 8, 0
+            try:
+                from . import wake_runner
+
+                _, plan = await wake_runner.plan_for(profile)
+                if plan.active and plan.takbir_at:
+                    late = plan.takbir_at + timedelta(hours=2)
+                    m_h, m_m = late.hour, late.minute
+            except Exception:
+                logger.debug("wake plan for morning brief failed", exc_info=True)
+        else:
+            m_h, m_m = briefs.parse_hhmm(raw_morning, (8, 0))
         if minutes_now >= m_h * 60 + m_m and us.get("last_morning_key") != today_key:
-            await services.save_user_settings(telegram_id, {"last_morning_key": today_key})
             # после рестарта днём не шлём «утро» задним числом (окно 3 часа)
-            if us.get("brief_morning", True) and minutes_now - (m_h * 60 + m_m) <= 180:
-                try:
-                    text = await briefs.morning_brief(profile)
-                    await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
-                except Exception:
-                    logger.exception("morning brief failed for %s", telegram_id)
-            if db.available("recurring_payments"):
-                try:
-                    items = await services.recurring(telegram_id)
-                    for it in fin.recurring_due_today(items, local_now.date()):
-                        q = profile.tr(
-                            f"🔁 Оплатил <b>{it.get('title')}</b> — {fin.fmt_money(float(it.get('amount') or 0))} {profile.currency}?",
-                            f"🔁 <b>{it.get('title')}</b> — {fin.fmt_money(float(it.get('amount') or 0))} {profile.currency} to'ladingizmi?",
-                        )
-                        await bot.send_message(telegram_id, q, reply_markup=recurring_prompt_keyboard(it["id"], profile.lang))
-                        await db.update_recurring(telegram_id, it["id"], {"last_asked_key": local_now.strftime("%Y-%m")})
-                    services.invalidate_recurring(telegram_id)
-                except Exception:
-                    logger.exception("recurring prompts failed for %s", telegram_id)
+            await send_morning(bot, profile, us, late_ok=minutes_now - (m_h * 60 + m_m) <= 180)
 
         # --- вечер
         e_h, e_m = briefs.parse_hhmm(us.get("brief_evening_time"), (21, 0))

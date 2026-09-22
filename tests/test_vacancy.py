@@ -52,9 +52,15 @@ def test_finalize_fills_phone_telegram_prompt():
     data = finalize(_data(), raw)
     assert data.phone == "+998901234567 | +998935556677"
     assert data.telegram == "@hr_ish"
-    assert data.image_prompt and "16:9" in data.image_prompt and len(data.image_prompt) <= 256
-    assert "«Call-center operatori kerak»" in data.image_prompt
-    assert "Toshkent" in data.image_prompt and "@ishdasiz" in data.image_prompt
+    prompt = data.image_prompt
+    # полный промпт: вся вакансия сверху, задача на горизонтальный баннер снизу
+    assert prompt and prompt.startswith("VAKANSIYA")
+    assert "Lavozim: Call-center operatori kerak" in prompt and "Toshkent" in prompt
+    assert "Talablar: 18-35 yosh; Rus tili" in prompt and "Sinov muddati: 1 oy" in prompt
+    assert "+998901234567" in prompt and "@hr_ish" in prompt
+    task = prompt[prompt.index("ЗАДАЧА"):]
+    assert "ГОРИЗОНТАЛЬНЫЙ баннер 16:9" in task and "ТОЛЬКО самое важное" in task
+    assert "зарплата" in task and "@ishdasiz" in task and "сочный, современный" in task
 
 
 def test_format_post_contains_sections_and_no_generic_bucket():

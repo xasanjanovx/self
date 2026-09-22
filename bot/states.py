@@ -26,3 +26,4 @@ class BotStates(StatesGroup):
     waiting_goal_amount = State()
     # джарвис
     waiting_alarm_time = State()
+    waiting_brief_time = State()

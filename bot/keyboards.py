@@ -226,7 +226,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
-                _btn(t(lang, "menu_vacancy"), "menu:vacancy", style=P, icon=_pe.ID_VACANCY),
+                _btn("🤖 " + ("Jarvis" if lang == "uz" else "Джарвис"), "menu:jarvis", style=P),
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
             [
@@ -237,32 +237,62 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
     )
 
 
-def settings_keyboard(
-    lang: str, *, morning: bool, evening: bool, report_enabled: bool, report_frequency: str,
-    reminders: list[tuple[str, str]] | None = None, proactive: bool = True, voice: bool = True,
-) -> InlineKeyboardMarkup:
-    status = t(lang, "status_on") if report_enabled else t(lang, "status_off")
-    if report_enabled:
-        status += " · " + (t(lang, "report_weekly") if report_frequency == "weekly" else t(lang, "report_monthly"))
-    rows = [
-        [_btn(t(lang, "brief_morning_on" if morning else "brief_morning_off"), "settings:brief:morning", style="success" if morning else None)],
-        [_btn(t(lang, "brief_evening_on" if evening else "brief_evening_off"), "settings:brief:evening", style="success" if evening else None)],
-        [_btn(t(lang, "proactive_on" if proactive else "proactive_off"), "settings:toggle:proactive", style="success" if proactive else None)],
-        [_btn(t(lang, "voice_on" if voice else "voice_off"), "settings:toggle:voice_reply", style="success" if voice else None)],
-        [_btn(status, "noop")],
-        [
-            _btn(t(lang, "report_weekly"), "report:set:weekly", style="primary", icon=_pe.ID_REFRESH),
-            _btn(t(lang, "report_monthly"), "report:set:monthly", style="primary", icon=_pe.ID_CALENDAR),
-            _btn(t(lang, "report_off"), "report:set:off", style="danger", icon=_pe.ID_CANCEL),
-        ],
-    ]
-    for rem_id, title in (reminders or [])[:8]:
-        rows.append([_btn(f"🗑 {title}", f"settings:rem_del:{rem_id}", icon=_pe.ID_DELETE)])
-    rows.append([_btn("🤖 " + ("Jarvis" if lang == "uz" else "Джарвис"), "settings:jarvis", style="primary"),
-                 _btn("⏰ " + ("Uyg'otish" if lang == "uz" else "Подъём"), "settings:wake", style="primary")])
-    rows.append([_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)])
-    rows.append([_back(lang)])
+def settings_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Главный экран настроек — только разделы."""
+    uz = lang == "uz"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🤖 " + ("Jarvis" if uz else "Джарвис"), "settings:jarvis", style="primary"),
+         _btn("⏰ " + ("Budilnik" if uz else "Будильник"), "settings:wake", style="primary")],
+        [_btn("🔔 " + ("Bildirishnomalar" if uz else "Уведомления"), "settings:notify", style="primary"),
+         _btn("🗒 " + ("Eslatmalar" if uz else "Напоминания"), "settings:reminders", style="primary")],
+        [_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)],
+        [_back(lang)],
+    ])
+
+
+def notify_keyboard(lang: str, *, morning: bool, morning_wake: bool, evening: bool, proactive: bool, voice: bool,
+                    report_enabled: bool, report_frequency: str) -> InlineKeyboardMarkup:
+    """Уведомления: утро/вечер (вкл + время), подсказки, голосовые ответы, авто-отчёт."""
+    uz = lang == "uz"
+
+    def toggle(on: bool, label: str, data: str) -> InlineKeyboardButton:
+        return _btn(("✅ " if on else "⛔ ") + label, data, style="success" if on else None)
+
+    def pick(label: str, data: str, on: bool) -> InlineKeyboardButton:
+        return _btn(label + (" ✓" if on else ""), data, style="primary" if on else None)
+
+    weekly = report_enabled and report_frequency == "weekly"
+    monthly = report_enabled and report_frequency == "monthly"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [toggle(morning, "🌅 " + ("Ertalabki xulosa" if uz else "Утренняя сводка"), "settings:brief:morning")],
+        [pick("⏰ " + ("Turgandan keyin" if uz else "После подъёма"), "notify:morning:wake", morning_wake),
+         _btn("⌨️ " + ("Vaqt" if uz else "Время"), "notify:time:morning", style=None if morning_wake else "primary")],
+        [toggle(evening, "🌙 " + ("Kechki xulosa" if uz else "Вечерняя сводка"), "settings:brief:evening"),
+         _btn("⌨️ " + ("Vaqt" if uz else "Время"), "notify:time:evening")],
+        [toggle(proactive, "💡 " + ("Jarvis maslahatlari" if uz else "Подсказки Джарвиса"), "settings:toggle:proactive")],
+        [toggle(voice, "🎙 " + ("Ovozli javoblar" if uz else "Голосовые ответы"), "settings:toggle:voice_reply")],
+        [pick("📊 " + ("Haftalik" if uz else "Отчёт: неделя"), "report:set:weekly", weekly),
+         pick("Oylik" if uz else "месяц", "report:set:monthly", monthly),
+         pick("Yo'q" if uz else "выкл", "report:set:off", not report_enabled)],
+        [_back(lang, "menu:settings")],
+    ])
+
+
+def reminders_keyboard(lang: str, reminders: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [[_btn(f"🗑 {title}", f"settings:rem_del:{rem_id}", icon=_pe.ID_DELETE)] for rem_id, title in reminders[:12]]
+    rows.append([_back(lang, "menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def jarvis_hub_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Кнопка «Джарвис» в главном меню."""
+    uz = lang == "uz"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("📞 " + ("Qo'ng'iroq qil" if uz else "Позвонить"), "wakeset:calltest", style="success")],
+        [_btn("⏰ " + ("Budilnik" if uz else "Будильник"), "settings:wake", style="primary"),
+         _btn("⚙️ " + ("Sozlash" if uz else "Настроить"), "settings:jarvis", style="primary")],
+        [_back(lang)],
+    ])
 
 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
@@ -280,7 +310,7 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
               "wakeset:toggle:talk", style="success" if talk else None)],
         [
             _btn(("🕌 Bomdodga" if uz else "🕌 К фаджру") + (" ✓" if mode == "fajr" else ""), "wakeset:mode:fajr", style="primary" if mode == "fajr" else None),
-            _btn(("🕘 Aniq vaqt" if uz else "🕘 Точное время") + (" ✓" if mode == "fixed" else ""), "wakeset:mode:fixed", style="primary" if mode == "fixed" else None),
+            _btn(("🕘 Aniq vaqt" if uz else "🕘 Точное время") + (" ✓" if mode == "fixed" else ""), "jarvis:alarm:time", style="primary" if mode == "fixed" else None),
         ],
         [
             _btn("−5 " + ("daq" if uz else "мин"), "wakeset:offset:-5"),
@@ -307,7 +337,6 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
             task_row = []
     if task_row:
         rows.append(task_row)
-    rows.append([_btn("📞 " + ("Hozir qo'ng'iroq qil" if uz else "Позвонить сейчас"), "wakeset:calltest", style="primary")])
     rows.append([_back(lang, "menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -341,11 +370,7 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
     rows.append([pick("Qisqa" if uz else "Коротко", "jarvis:verbosity:short", verbosity == "short"),
                  pick("O'rtacha" if uz else "Обычно", "jarvis:verbosity:normal", verbosity == "normal"),
                  pick("Batafsil" if uz else "Подробно", "jarvis:verbosity:detailed", verbosity == "detailed")])
-    rows.append([pick("🕌 " + ("Bomdodga" if uz else "К фаджру"), "jarvis:alarm:fajr", alarm_mode == "fajr"),
-                 _btn("⌨️ " + ("Vaqtni kiritish" if uz else "Задать время"), "jarvis:alarm:time",
-                      style="primary" if alarm_mode == "fixed" else None)])
-    rows.append([_btn("⏰ " + ("Uyg'otish sozlamalari" if uz else "Подъём подробно"), "settings:wake"),
-                 _btn("📞 " + ("Qo'ng'iroq" if uz else "Позвонить"), "wakeset:calltest", style="success")])
+    rows.append([_btn("📞 " + ("Qo'ng'iroq qil" if uz else "Позвонить сейчас"), "wakeset:calltest", style="success")])
     rows.append([_back(lang, "menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
