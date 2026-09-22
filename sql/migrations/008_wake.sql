@@ -15,7 +15,9 @@ create table if not exists wake_settings (
   call_enabled boolean not null default true,
   max_attempts int not null default 20,     -- сколько раз перезванивать
   retry_seconds int not null default 45,    -- пауза между попытками
-  confirm_tasks text[] not null default '{water,squats,question,hadith}',  -- какие задания разрешены
+  confirm_tasks text[] not null default '{water,squats,question}',  -- какие задания разрешены
+  voice_lang text not null default 'uz',    -- язык разговора в звонке: uz | ru
+  talk boolean not null default true,       -- живой диалог в трубке (иначе просто говорит и кладёт трубку)
   hardness text not null default 'normal',  -- normal | hard
   skip_until date,                          -- «не буди до …»
   updated_at timestamptz not null default now()
@@ -39,3 +41,9 @@ create table if not exists wake_log (
   unique (telegram_id, day)
 );
 create index if not exists wake_log_telegram_idx on wake_log (telegram_id, day desc);
+
+-- для баз, где таблица уже создана прошлой версией миграции
+alter table wake_settings add column if not exists voice_lang text not null default 'uz';
+alter table wake_settings add column if not exists talk boolean not null default true;
+
+alter table wake_log add column if not exists dialog text;  -- расшифровка разговора в звонке

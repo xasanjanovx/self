@@ -1,7 +1,8 @@
-"""Исполнение подъёма: собрать текст, позвонить, дождаться подтверждения, перезвонить.
+"""Исполнение подъёма: позвонить, поговорить, дождаться подтверждения, перезвонить.
 
-Чистая логика — в bot/wake.py, звонок — в bot/caller.py, расписание — bot/workers.py.
-Здесь склейка: что именно сказать в трубку, что прислать в чат, как отметить подъём.
+Чистая логика — в bot/wake.py, разговор — bot/call_dialog.py, сам звонок — bot/caller.py,
+расписание — bot/workers.py. Здесь склейка: что сказать, что прислать в чат, как
+отметить подъём и когда перестать звонить.
 """
 from __future__ import annotations
 
@@ -14,12 +15,13 @@ from typing import Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup
 
+from . import call_dialog as cd
 from . import caller
-from . import daily
 from . import prayer
 from . import services
 from . import voice
 from . import wake as wake_mod
+from .context import ai
 from .profile import Profile
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,7 @@ def wake_keyboard(lang: str) -> InlineKeyboardMarkup:
     uz = lang == "uz"
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("✅ " + ("Turdim" if uz else "Проснулся"), "wake:up", style="primary")],
-        [_btn("😴 +10 " + ("daqiqa" if uz else "мин"), "wake:snooze"), _btn("🚫 " + ("Bugun buzmang" if uz else "Не будить сегодня"), "wake:skip")],
+        [_btn("😴 +10 " + ("daqiqa" if uz else "мин"), "wake:snooze"), _btn("🚫 " + ("Bugun uyg'otmang" if uz else "Не будить сегодня"), "wake:skip")],
     ])
 
 
@@ -64,8 +66,34 @@ async def plan_for(profile: Profile, day: date | None = None) -> tuple[wake_mod.
     return s, wake_mod.plan_for_day(s, day, tz=profile.tz, timings=rows)
 
 
+# ------------------------------------------------------------------ голос
+async def _say(text: str) -> bytes | None:
+    """Фраза Джарвиса → PCM (24 кГц, моно) для проигрывания в звонке."""
+    if not text.strip():
+        return None
+    try:
+        return await ai.synthesize(voice.speakable(text))
+    except Exception:
+        logger.warning("tts failed", exc_info=True)
+        return None
+
+
+async def _hear(pcm: bytes) -> str:
+    """Фраза собеседника из звонка → текст."""
+    path = await cd.pcm_to_ogg_file(pcm)
+    if not path:
+        return ""
+    try:
+        return (await ai.transcribe_voice(path)).strip()
+    except Exception:
+        logger.warning("transcribe failed", exc_info=True)
+        return ""
+    finally:
+        cd.cleanup(path)
+
+
 async def _speech_file(text: str) -> str | None:
-    """Текст → OGG для звонка. Возвращает путь к временному файлу."""
+    """Текст → OGG-файл (режим без разговора: просто сказать и положить трубку)."""
     audio = await voice.make_voice(text)
     if not audio:
         return None
@@ -75,50 +103,84 @@ async def _speech_file(text: str) -> str | None:
     return path
 
 
-async def _task_for(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    verse = await daily.verse_of_day(plan.day)
-    task = wake_mod.make_task(s, plan.day, lang=profile.lang, verse_ref=(verse or {}).get("ref"))
-    return task, verse
+async def _task_for(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan) -> dict[str, Any]:
+    return wake_mod.make_task(s, plan.day, lang=profile.lang)
+
+
+# ------------------------------------------------------------------ разговор в трубке
+async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan, task: dict[str, Any],
+                       minutes_left: int | None) -> dict[str, Any]:
+    """Звонок-разговор: поздоровался → слушает ответ → отвечает по смыслу → подтверждает подъём."""
+    state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
+                           minutes_left=minutes_left, task_text=str(task.get("text") or ""))
+    greeting_pcm = await _say(cd.greeting(state))
+    if not greeting_pcm:
+        return {"answered": False, "error": "tts unavailable", "state": state}
+    history: list[dict[str, Any]] = []
+
+    async def on_utterance(pcm: bytes | None) -> dict[str, Any]:
+        text = await _hear(pcm) if pcm else ""
+        step = cd.decide(state, text)
+        if step["action"] == "reply":
+            history.append({"role": "user", "parts": [{"text": text}]})
+            try:
+                out = await ai.agent_step(list(history), system=cd.system_prompt(state), tools=[], temperature=0.6, max_tokens=160)
+                answer = (out.text or "").strip() or cd.nudge(state)
+            except Exception:
+                logger.warning("dialog reply failed", exc_info=True)
+                answer = cd.nudge(state)
+            history.append({"role": "model", "parts": [{"text": answer}]})
+        else:
+            answer = str(step.get("say") or "")
+        state.transcript.append(f"я: {answer}")
+        stop = bool(state.confirmed) or state.turns >= cd.MAX_TURNS
+        if stop:
+            answer = f"{answer} {cd.farewell(state)}".strip()
+        return {"pcm": await _say(answer), "stop": stop}
+
+    result = await caller.talk(profile.telegram_id, greeting_pcm=greeting_pcm, on_utterance=on_utterance,
+                               ring_seconds=max(20, s.retry_seconds), max_seconds=cd.MAX_CALL_SECONDS)
+    result["state"] = state
+    return result
 
 
 async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan, log: dict[str, Any] | None) -> dict[str, Any]:
-    """Одна попытка разбудить: звонок (если доступен) + сообщение с заданием."""
+    """Одна попытка разбудить: звонок (разговор или просто голос) + сообщение с заданием."""
     uid = profile.telegram_id
     now = datetime.now(timezone.utc)
     attempts = int((log or {}).get("attempts") or 0) + 1
     state = _active.get(uid) or {}
-    task, verse = (state.get("task"), state.get("verse")) if state.get("task") else await _task_for(profile, s, plan)
+    task = state.get("task") or await _task_for(profile, s, plan)
     minutes_left = int((plan.takbir_at - now.astimezone(profile.tz)).total_seconds() // 60) if plan.takbir_at else None
-    _active[uid] = {"task": task, "verse": verse, "plan": plan, "attempts": attempts, "last": now,
-                    "expires": now + timedelta(hours=3)}
+    _active[uid] = {"task": task, "plan": plan, "attempts": attempts, "last": now, "expires": now + timedelta(hours=3)}
 
     answered = False
-    call_error = None
+    confirmed = False
+    call_error: str | None = None
+    dialog_text = ""
     if s.call_enabled and caller.available():
-        script = wake_mod.call_script(
-            name=profile.first_name or ("do'st" if profile.lang == "uz" else "друг"),
-            takbir=plan.takbir, minutes_left=minutes_left, task_text=str(task.get("text") or ""),
-            verse_text=daily.speakable_verse(verse) if attempts == 1 else "",
-            lang="uz" if profile.lang == "uz" else "ru",
-        )
-        path = await _speech_file(script)
-        if path:
-            try:
-                result = await caller.call(uid, path, ring_seconds=max(20, s.retry_seconds), play_seconds=45)
-                answered, call_error = bool(result.get("answered")), result.get("error")
-            finally:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+        if s.talk:
+            result = await _dialog_call(profile, s, plan, task, minutes_left)
+            answered, call_error = bool(result.get("answered")), result.get("error")
+            dstate = result.get("state")
+            confirmed = bool(getattr(dstate, "confirmed", False))
+            dialog_text = " | ".join(getattr(dstate, "transcript", []) or [])
         else:
-            call_error = "tts unavailable"
+            script = wake_mod.call_script(
+                name=profile.first_name or ("do'st" if s.voice_lang == "uz" else "друг"),
+                takbir=plan.takbir, minutes_left=minutes_left, task_text=str(task.get("text") or ""), lang=s.voice_lang,
+            )
+            path = await _speech_file(script)
+            if path:
+                try:
+                    result = await caller.call(uid, path, ring_seconds=max(20, s.retry_seconds), play_seconds=45)
+                    answered, call_error = bool(result.get("answered")), result.get("error")
+                finally:
+                    cd.cleanup(path)
+            else:
+                call_error = "tts unavailable"
 
     text = wake_mod.wake_message(name=profile.first_name or "", plan=plan, task=task, attempt=attempts, lang=profile.lang)
-    if attempts == 1 and verse:
-        block = daily.verse_block(verse, "uz" if profile.lang == "uz" else "ru")
-        if block:
-            text += "\n\n" + block
     try:
         await bot.send_message(uid, text, reply_markup=wake_keyboard(profile.lang), disable_notification=False)
     except Exception:
@@ -128,27 +190,34 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
                               "takbir_at": plan.takbir, "task_kind": task.get("kind"), "task_text": task.get("text")}
     if attempts == 1:
         fields["first_call_at"] = now.isoformat()
+    if dialog_text:
+        fields["dialog"] = dialog_text[:2000]
     await services.save_wake_log(uid, plan.day, fields)
     if call_error:
         logger.info("wake call error for %s: %s", uid, call_error)
-    return {"attempts": attempts, "answered": answered, "task": task, "call_error": call_error}
+    if confirmed:
+        await mark_awake(bot, profile, source="call")  # подтвердил голосом — больше не звоним
+    return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "task": task, "call_error": call_error}
 
 
+# ------------------------------------------------------------------ подтверждение подъёма
 async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = True) -> dict[str, Any]:
-    """Отметить подъём: звонки прекращаются, приходит план утра."""
+    """Отметить подъём: звонки прекращаются, приходит короткий итог."""
     uid = profile.telegram_id
     now = datetime.now(timezone.utc)
-    s, plan = await plan_for(profile)
+    _, plan = await plan_for(profile)
     local_now = now.astimezone(profile.tz)
     before = bool(plan.takbir_at and local_now <= plan.takbir_at)
     state = _active.pop(uid, None)
-    fields = {"woke_at": now.isoformat(), "woke_source": source, "before_takbir": before,
-              "takbir_at": plan.takbir, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None}
+    fields: dict[str, Any] = {"woke_at": now.isoformat(), "woke_source": source, "before_takbir": before,
+                              "takbir_at": plan.takbir, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None}
     if state and state.get("task"):
         fields.update({"task_kind": state["task"].get("kind"), "task_text": state["task"].get("text")})
     await services.save_wake_log(uid, plan.day, fields)
     history = await services.wake_history(uid, days=60)
-    streak = wake_mod.streak_days([{**r, **({"woke_at": fields["woke_at"], "before_takbir": before} if str(r.get("day"))[:10] == plan.day.isoformat() else {})} for r in history] or [{"day": plan.day.isoformat(), **fields}], plan.day)
+    rows = [r for r in history if str(r.get("day"))[:10] != plan.day.isoformat()]
+    rows.append({"day": plan.day.isoformat(), "woke_at": fields["woke_at"], "before_takbir": before})
+    streak = wake_mod.streak_days(rows, plan.day)
     if notify:
         try:
             await bot.send_message(uid, wake_mod.done_message(plan=plan, now=local_now, lang=profile.lang, streak=streak))
@@ -157,15 +226,14 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
     return {"before_takbir": before, "streak": streak, "plan": plan}
 
 
-async def task_done(bot: Bot, profile: Profile, *, ok: bool, comment: str = "") -> None:
-    uid = profile.telegram_id
+async def task_done(bot: Bot, profile: Profile, *, ok: bool) -> None:
     if ok:
-        await services.save_wake_log(uid, profile.today, {"task_done_at": datetime.now(timezone.utc).isoformat()})
-        _active.pop(uid, None)
+        await services.save_wake_log(profile.telegram_id, profile.today, {"task_done_at": datetime.now(timezone.utc).isoformat()})
+        _active.pop(profile.telegram_id, None)
 
 
 async def snooze(profile: Profile, minutes: int) -> datetime:
-    """Отложить звонки на N минут (по факту — сдвигаем время последней попытки)."""
+    """Отложить звонки на N минут."""
     uid = profile.telegram_id
     state = _active.get(uid) or {}
     until = datetime.now(timezone.utc) + timedelta(minutes=max(1, min(30, minutes)))

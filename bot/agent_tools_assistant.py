@@ -476,7 +476,7 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {
         "settings": {"enabled": s.enabled, "mode": s.mode, "fixed_time": s.fixed_time, "offset_min": s.offset_min,
                      "takbir_offset_min": s.takbir_offset_min, "days_of_week": list(s.days_of_week), "call_enabled": s.call_enabled,
-                     "tasks": list(s.confirm_tasks), "hardness": s.hardness, "skip_until": s.skip_until.isoformat() if s.skip_until else None},
+                     "voice_lang": s.voice_lang, "talk": s.talk, "tasks": list(s.confirm_tasks), "hardness": s.hardness, "skip_until": s.skip_until.isoformat() if s.skip_until else None},
         "today": {"active": plan.active, "reason": plan.reason, "wake_at": plan.wake_at.strftime("%H:%M") if plan.wake_at else None,
                   "fajr_azan": plan.fajr, "takbir": plan.takbir},
         "tomorrow": {"active": plan_tomorrow.active, "wake_at": plan_tomorrow.wake_at.strftime("%H:%M") if plan_tomorrow.wake_at else None,
@@ -497,6 +497,8 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
        "takbir_offset_min": P("NUMBER", "минут между азаном фаджра и такбиром"),
        "days": ARR({"type": "NUMBER"}, "дни недели 1=пн … 7=вс"), "call_enabled": P("BOOLEAN", "звонить или только писать"),
        "tasks": WAKE_TASKS, "hardness": P("STRING", "normal | hard", enum=["normal", "hard"]),
+       "voice_lang": P("STRING", "на каком языке Джарвис говорит в трубке: uz | ru", enum=["uz", "ru"]),
+       "talk": P("BOOLEAN", "живой разговор в трубке (true) или просто сказать и положить трубку (false)"),
        "skip_until": DATE, "skip_days": P("NUMBER", "не будить столько дней подряд, начиная с сегодня")})
 async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not await db.ensure_available("wake_settings"):
@@ -536,6 +538,10 @@ async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             fields["confirm_tasks"] = tasks
     if (hard := _str(a.get("hardness"))) in {"normal", "hard"}:
         fields["hardness"] = hard
+    if (vl := _str(a.get("voice_lang"))) in {"uz", "ru"}:
+        fields["voice_lang"] = vl
+    if (talk := _bool(a.get("talk"))) is not None:
+        fields["talk"] = talk
     if (skip_days := _int(a.get("skip_days"))) is not None and skip_days > 0:
         fields["skip_until"] = (ctx.profile.today + timedelta(days=skip_days - 1)).isoformat()
     elif _str(a.get("skip_until")):
@@ -585,17 +591,6 @@ async def _prayer_times(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     nxt = prayer.next_prayer(rows, ctx.profile.now, ctx.profile.lang) if day == ctx.profile.today else None
     return {"date": day.isoformat(), "times": rows, "fajr_takbir": takbir.strftime("%H:%M") if takbir else None,
             "next": {"name": nxt[0], "at": nxt[1], "in_minutes": nxt[2]} if nxt else None}
-
-
-@tool("daily_verse", "Аят дня на узбекском (перевод Муҳаммад Содиқ Муҳаммад Юсуф) и хадис дня (арабский + русский перевод с номером). "
-      "Хадис на узбекский переводи сам и обязательно помечай, что это твой перевод, с указанием источника.", {"date": DATE})
-async def _daily_verse(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    from . import daily
-
-    day = parse_day(a.get("date"), ctx.profile.today) or ctx.profile.today
-    verse = await daily.verse_of_day(day)
-    hadith = await daily.hadith_of_day(day)
-    return {"verse": verse, "hadith": hadith}
 
 
 # ------------------------------------------------------------------ snapshot fragment

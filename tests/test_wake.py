@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from bot import daily, prayer, wake
+from bot import prayer, wake
 
 TZ = ZoneInfo("Asia/Tashkent")
 DAY = date(2026, 9, 23)  # среда
@@ -79,8 +79,8 @@ def test_make_task_is_stable_per_day_and_respects_settings():
     assert squats["expects"] == "voice" and "10" in squats["text"]
     question = wake.make_task(_s(confirm_tasks=("question",)), DAY)
     assert question["expects"] == "text" and question["answer"].isdigit()
-    hadith = wake.make_task(_s(confirm_tasks=("hadith",)), DAY, verse_ref="2:186")
-    assert "2:186" in hadith["text"]
+    pushups = wake.make_task(_s(confirm_tasks=("pushups",)), DAY)
+    assert pushups["expects"] == "voice" and "отжиман" in pushups["text"]
 
 
 def test_check_answer_accepts_real_proof_only():
@@ -119,7 +119,7 @@ def test_streak_and_stats():
     assert "4 из 4" in line and "до такбира — 3" in line
 
 
-# ------------------------------------------------------------------ namoz/аят
+# ------------------------------------------------------------------ namoz
 def test_prayer_helpers():
     assert prayer.takbir_time("04:27", 20).strftime("%H:%M") == "04:47"
     assert prayer.offset_from_takbir("04:27", "05:20") == 53
@@ -131,7 +131,46 @@ def test_prayer_helpers():
     assert nxt[0] == "Аср" and nxt[2] == 149
 
 
-def test_cyrillic_to_latin_transliteration():
-    assert daily.cyr_to_lat("Аллоҳ") == "Alloh"
-    assert daily.cyr_to_lat("тўғри йўл") == "to'g'ri yo'l"
-    assert daily.cyr_to_lat("қалб") == "qalb"
+# ------------------------------------------------------------------ разговор в трубке
+def test_voice_buffer_cuts_phrase_on_silence():
+    from bot import call_dialog as cd
+
+    loud = bytes.fromhex("0040") * 2400   # ~100 мс громкого звука при 24 кГц
+    quiet = bytes(4800)                   # ~100 мс тишины
+    buf = cd.VoiceBuffer()
+    assert buf.feed(quiet) is None          # тишина до речи ничего не копит
+    for _ in range(5):                      # 500 мс речи
+        assert buf.feed(loud) is None
+    for _ in range(8):                      # 800 мс тишины — ещё мало
+        out = buf.feed(quiet)
+    assert out is None
+    out = buf.feed(quiet)                   # 900 мс — фраза закончилась
+    assert out is not None and cd.ms_of(out) >= 1000
+    assert buf.speech_ms == 0               # буфер очистился
+
+
+def test_dialog_decides_awake_or_nudge():
+    from bot import call_dialog as cd
+
+    state = cd.DialogState(lang="ru", name="Хасан", takbir="04:47", minutes_left=25, task_text="выпей стакан воды")
+    assert "04:47" in cd.greeting(state) and "Хасан" in cd.greeting(state)
+    silent = cd.decide(state, "")
+    assert silent["action"] == "nudge" and silent["say"]
+    still = cd.decide(state, "сплю ещё пять минут")
+    assert still["action"] == "reply" and state.confirmed is False
+    ok = cd.decide(state, "да я встал уже")
+    assert ok["action"] == "confirm" and state.confirmed is True
+    assert "воды" in ok["say"]
+    assert "04:47" in cd.farewell(state)
+    assert cd.sounds_awake("uyg'ondim") and not cd.sounds_awake("uxlayapman")
+    assert cd.sounds_awake("да, сейчас иду умываться")   # связная фраза = проснулся
+    assert not cd.sounds_awake("мм")
+
+
+def test_dialog_prompt_language():
+    from bot import call_dialog as cd
+
+    uz = cd.system_prompt(cd.DialogState(lang="uz", name="Hasan", takbir="04:47"))
+    assert "o'zbek" in uz and "04:47" in uz
+    ru = cd.system_prompt(cd.DialogState(lang="ru", name="Хасан"))
+    assert "по-русски" in ru

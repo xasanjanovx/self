@@ -3,8 +3,8 @@
 Здесь только чистая логика и тексты (без БД, Telegram и звонков) — её легко тестировать:
   plan_for_day()   — будим ли сегодня и во сколько (фаджр − offset или фиксированное время);
   should_call()    — пора ли звонить прямо сейчас и какая это попытка;
-  make_task()      — задание дня: вода (фото пустого стакана), приседания (голосом),
-                     вопрос (счёт в уме), хадис вслух; набор задан в настройках;
+  make_task()      — задание дня: вода (фото пустого стакана), приседания/отжимания
+                     (голосом), вопрос (счёт в уме); набор задан в настройках;
   check_answer()   — принят ли ответ на задание;
   looks_awake()    — «проснулся / uyg'ondim / встал» в свободном тексте;
   snooze_minutes() — «ещё 10 минут» из фразы.
@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-TASKS = ("water", "squats", "question", "hadith")
-DEFAULT_TASKS = ("water", "squats", "question", "hadith")
+TASKS = ("water", "squats", "pushups", "question")
+DEFAULT_TASKS = ("water", "squats", "pushups", "question")
 CONFIRM_MINUTES = 3  # столько ждём подтверждения после звонка, потом звоним снова
 MIN_VOICE_SECONDS = 5
 
@@ -45,6 +45,8 @@ class WakeSettings:
     retry_seconds: int = 45
     confirm_tasks: tuple[str, ...] = DEFAULT_TASKS
     hardness: str = "normal"
+    voice_lang: str = "uz"   # на каком языке Джарвис говорит в трубке
+    talk: bool = True        # живой диалог (слушает ответы) или просто говорит и кладёт трубку
     skip_until: date | None = None
     latitude: float = 40.7821
     longitude: float = 72.3442
@@ -66,6 +68,7 @@ class WakeSettings:
             days_of_week=days or (1, 2, 3, 4, 5, 6, 7), call_enabled=bool(row.get("call_enabled", True)),
             max_attempts=int(row.get("max_attempts") or 20), retry_seconds=int(row.get("retry_seconds") or 45),
             confirm_tasks=tasks, hardness=str(row.get("hardness") or "normal"), skip_until=_d(row.get("skip_until")),
+            voice_lang=("ru" if str(row.get("voice_lang") or "uz") == "ru" else "uz"), talk=bool(row.get("talk", True)),
             latitude=float(row.get("latitude") or 40.7821), longitude=float(row.get("longitude") or 72.3442),
             calc_method=int(row.get("calc_method") or 3),
         )
@@ -172,7 +175,7 @@ def _question(rnd: random.Random, hard: bool) -> tuple[str, str]:
     return f"{a} × {b}", str(a * b)
 
 
-def make_task(s: WakeSettings, day: date, *, lang: str = "ru", verse_ref: str | None = None) -> dict[str, Any]:
+def make_task(s: WakeSettings, day: date, *, lang: str = "ru") -> dict[str, Any]:
     """Задание дня: один и тот же день → одно и то же задание (не зависит от перезапусков)."""
     allowed = [t for t in s.confirm_tasks if t in TASKS] or list(DEFAULT_TASKS)
     rnd = random.Random(day.toordinal())
@@ -184,15 +187,15 @@ def make_task(s: WakeSettings, day: date, *, lang: str = "ru", verse_ref: str | 
         text = (f"{reps} stakan suv iching va bo'sh stakanni suratga olib yuboring 💧" if uz
                 else f"Выпей {reps} стакан{'а' if hard else ''} воды и пришли фото пустого стакана 💧")
         return {"kind": kind, "text": text, "answer": None, "expects": "photo"}
-    if kind == "squats":
-        count = 20 if hard else 10
-        text = (f"{count} marta cho'kkalab turing va ovozli xabarda sanab yuboring 🏋️" if uz
-                else f"{count} приседаний — считай вслух и пришли голосовое 🏋️")
+    if kind in {"squats", "pushups"}:
+        count = (20 if kind == "squats" else 15) if hard else (10 if kind == "squats" else 7)
+        if kind == "squats":
+            text = (f"{count} marta cho'kkalab turing va ovozli xabarda sanab yuboring 🏋️" if uz
+                    else f"{count} приседаний — считай вслух и пришли голосовое 🏋️")
+        else:
+            text = (f"{count} marta otjimaniye qiling va ovozli xabarda sanab yuboring 💪" if uz
+                    else f"{count} отжиманий — считай вслух и пришли голосовое 💪")
         return {"kind": kind, "text": text, "answer": str(count), "expects": "voice"}
-    if kind == "hadith":
-        text = ("Kun oyatini ovoz chiqarib o'qing va ovozli xabar qilib yuboring 📖" if uz
-                else "Прочитай аят дня вслух и пришли голосовым 📖") + (f" ({verse_ref})" if verse_ref else "")
-        return {"kind": kind, "text": text, "answer": None, "expects": "voice"}
     question, answer = _question(rnd, hard)
     text = (f"Javob bering: {question} = ?" if uz else f"Ответь: {question} = ?")
     return {"kind": kind, "text": text, "answer": answer, "expects": "text"}
@@ -225,7 +228,7 @@ def check_answer(task: dict[str, Any], *, text: str | None = None, has_photo: bo
 
 
 # ------------------------------------------------------------------ тексты
-def call_script(*, name: str, takbir: str | None, minutes_left: int | None, task_text: str, verse_text: str = "",
+def call_script(*, name: str, takbir: str | None, minutes_left: int | None, task_text: str,
                 next_thing: str = "", lang: str = "uz") -> str:
     """Что «Джарвис» говорит в трубку — коротко, на узбекском по умолчанию."""
     if lang == "uz":
@@ -237,8 +240,6 @@ def call_script(*, name: str, takbir: str | None, minutes_left: int | None, task
         parts.append("Turing, iltimos.")
         if task_text:
             parts.append(f"Vazifa: {task_text}")
-        if verse_text:
-            parts.append(verse_text)
         if next_thing:
             parts.append(next_thing)
         parts.append("Turganingizni tasdiqlang.")
@@ -249,8 +250,6 @@ def call_script(*, name: str, takbir: str | None, minutes_left: int | None, task
     parts.append("Вставай.")
     if task_text:
         parts.append(f"Задание: {task_text}")
-    if verse_text:
-        parts.append(verse_text)
     if next_thing:
         parts.append(next_thing)
     parts.append("Подтверди, что встал.")
