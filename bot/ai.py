@@ -307,6 +307,20 @@ class AIService:
             logger.warning("Gemini agent hit MAX_TOKENS for model %s", model)
         return AgentStep(parts=parts, text="\n".join(texts).strip(), calls=calls, finish=finish)
 
+    async def search(self, query: str, *, lang: str = "ru") -> str:
+        """Поиск в интернете через Google Search grounding: модель сама ищет и отвечает по найденному."""
+        language = "узбекском (латиница)" if lang == "uz" else "русском"
+        payload = {
+            "systemInstruction": {"parts": [{"text": f"Найди в интернете и ответь по существу на {language} языке, 2–8 строк, без markdown. "
+                                                      "Свежие факты, цифры, даты. Если найти не удалось — так и скажи."}]},
+            "contents": [{"role": "user", "parts": [{"text": query}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
+        }
+        candidate = self._first_candidate(await self._post(self.text_model, payload))
+        texts = [str(p.get("text")) for p in (candidate.get("content") or {}).get("parts") or [] if isinstance(p, dict) and p.get("text") and not p.get("thought")]
+        return "\n".join(texts).strip()
+
     async def synthesize(self, text: str, *, voice: str = "Kore") -> bytes | None:
         """Текст → речь (PCM s16le, 24 kHz, mono). None, если TTS-модель недоступна."""
         if not self.tts_model or not text.strip():

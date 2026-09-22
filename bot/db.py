@@ -88,6 +88,7 @@ class Database:
             "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
+            "user_memory", "agent_log",
         )
 
         async def probe(name: str) -> str | None:
@@ -543,6 +544,26 @@ class Database:
     async def delete_tasks(self, telegram_id: int, ids: list[Any]) -> None:
         if ids:
             await self._table("tasks").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    # ---------------------------------------------------------- 006: agent memory / log
+    async def get_user_memory(self, telegram_id: int) -> dict[str, Any]:
+        res = await self._table("user_memory").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else {"telegram_id": telegram_id, "facts": "", "recent": ""}
+
+    async def save_user_memory(self, telegram_id: int, fields: dict[str, Any]) -> None:
+        payload = {"telegram_id": telegram_id, **fields, "updated_at": datetime.now(timezone.utc).isoformat()}
+        await self._table("user_memory").upsert(payload, on_conflict="telegram_id").execute()
+
+    async def add_agent_log(self, telegram_id: int, *, text: str, kind: str, tools: str | None = None, reply: str | None = None, ok: bool = True) -> None:
+        await self._table("agent_log").insert({
+            "telegram_id": telegram_id, "text": text[:1000], "kind": kind, "tools": (tools or None), "reply": (reply or "")[:1000] or None, "ok": ok,
+        }).execute()
+
+    async def list_agent_log(self, telegram_id: int, *, days: int = 7, limit: int = 200) -> list[dict[str, Any]]:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        res = await self._table("agent_log").select("*").eq("telegram_id", telegram_id).gte("created_at", since).order("created_at", desc=True).limit(limit).execute()
+        return res.data or []
 
     async def list_goals(self, telegram_id: int, *, include_done: bool = False) -> list[dict[str, Any]]:
         q = self._table("savings_goals").select("*").eq("telegram_id", telegram_id)

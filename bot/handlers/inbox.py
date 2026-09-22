@@ -12,6 +12,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from .. import cache
 from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
@@ -39,10 +40,12 @@ def _is_question(text: str) -> bool:
 
 
 async def _not_understood(message: Message, profile: Profile, transcript: str | None = None) -> None:
+    """Сюда попадаем только если Джарвис недоступен (ошибка AI) или сообщение без текста."""
     if transcript:
-        notice = profile.tr(f"Не понял: «{h(transcript[:80])}»", f"Tushunmadim: «{h(transcript[:80])}»")
+        notice = profile.tr(f"Джарвис сейчас недоступен, не смог обработать: «{h(transcript[:80])}». Повтори через минуту.",
+                            f"Jarvis hozir ishlamayapti: «{h(transcript[:80])}». Bir daqiqadan so'ng qaytaring.")
     else:
-        notice = profile.tr("Не понял сообщение. Напиши, например: «такси 25000» или «съел плов»", "Xabar tushunarsiz. Masalan: «taksi 25000» yoki «osh yedim»")
+        notice = profile.tr("Джарвис сейчас недоступен — повтори через минуту.", "Jarvis hozir ishlamayapti — bir daqiqadan so'ng qaytaring.")
     # возвращаем главный экран (мог остаться «⏳ …») и показываем короткую подсказку
     await send_main_menu(message, profile)
     await screen_mod.send_ephemeral(message.bot, message.chat.id, f"{pe.CROSS} {notice}", keep_previous=True)
@@ -70,20 +73,27 @@ async def route_text(
         await send_main_menu(message, profile, force_new=True)
         return True
     voice = transcript is not None
+    if cache.get(profile.telegram_id, ("agent_ask",)):
+        # Джарвис ждёт ответ на свой вопрос — любой текст («вторую», «25000», «да, долг») идёт ему
+        if await agent.handle_command(message, state, profile, text, voice=voice):
+            return True
     if agent.looks_like_command(text) and not vac.looks_like_vacancy(text):
         if await agent.handle_command(message, state, profile, text, voice=voice):
             return True
     if vac.looks_like_vacancy(text):
         await vacancy_h.process_vacancy(message, state, profile, text)
         return True
-    if not skip_finance and fin.looks_like_finance(text) and not _is_question(text):
+    # Быстрые пути — только когда локальные правила разбирают фразу сами (мгновенно и без ошибок роутинга).
+    # «Срок долга Uzum до 5 октября» раньше уходил в финансовый парсер из-за слова «долг» и цифры «5» —
+    # теперь такое решает агент: он видит долги, память и может уточнить кнопками.
+    if not skip_finance and fin.local_finance(text) and not _is_question(text):
         await finance_h.handle_finance_text(message, state, profile, text, source=source, reroute=False)
         return True
-    if not skip_food and nutri.looks_like_food(text) and not _is_question(text):
+    if not skip_food and nutri.looks_like_food(text) and not _is_question(text) and not fin.looks_like_finance(text):
         await nutrition_h.handle_text(message, state, profile, text, transcript=transcript, reroute=False)
         return True
-    # Всё остальное — «Джарвис»: команды без ключевых слов, вопросы по данным, уточнения
-    # к предыдущей реплике («вторую», «да, её»), свободный чат.
+    # Всё остальное — «Джарвис»: команды без ключевых слов, траты с контекстом, вопросы по данным,
+    # уточнения к предыдущей реплике («вторую», «да, её»), свободный чат.
     return await agent.handle_command(message, state, profile, text, voice=voice)
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -12,6 +13,8 @@ from . import nutrition as nutri
 from .context import db
 from .db import local_day_bounds_utc
 from .profile import Profile
+
+logger = logging.getLogger(__name__)
 
 ENTRIES_TTL = 300.0
 SETTINGS_TTL = 600.0
@@ -254,6 +257,30 @@ async def debt_deadlines(uid: int) -> list[dict[str, Any]]:
     if not db.available("debt_deadlines"):
         return []
     return await cache.remember(uid, ("debt_deadlines",), 600, lambda: db.list_debt_deadlines(uid))
+
+
+# ------------------------------------------------------------------ 006: agent memory / log
+async def user_memory(uid: int) -> dict[str, Any]:
+    if not db.available("user_memory"):
+        return {"facts": "", "recent": ""}
+    return await cache.remember(uid, ("memory",), 1800, lambda: db.get_user_memory(uid))
+
+
+async def save_user_memory(uid: int, fields: dict[str, Any]) -> None:
+    if not db.available("user_memory"):
+        return
+    await db.save_user_memory(uid, fields)
+    cache.invalidate(uid, "memory")
+
+
+async def log_agent(uid: int, *, text: str, kind: str = "agent", tools: str | None = None, reply: str | None = None, ok: bool = True) -> None:
+    """Журнал ходов агента — не должен ломать основной поток."""
+    if not db.available("agent_log") or not text:
+        return
+    try:
+        await db.add_agent_log(uid, text=text, kind=kind, tools=tools, reply=reply, ok=ok)
+    except Exception:
+        logger.debug("agent log failed", exc_info=True)
 
 
 def invalidate(uid: int, *prefixes: str) -> None:

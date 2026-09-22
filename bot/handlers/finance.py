@@ -234,7 +234,7 @@ def _format_pending(items: list[dict[str, Any]], profile: Profile, balances_befo
 
 
 async def handle_finance_text(
-    message: Message, state: FSMContext, profile: Profile, raw_text: str, *, source: str, reroute: bool = True
+    message: Message, state: FSMContext, profile: Profile, raw_text: str, *, source: str, reroute: bool = True, fallback_agent: bool = True
 ) -> None:
     """Общая точка входа для текста/голоса: локальный парсер → AI → подтверждение.
     Если текст явно не про деньги (еда, вакансия, вопрос) — отдаём общему роутеру."""
@@ -277,9 +277,18 @@ async def handle_finance_text(
             return
         confident = bool(items) and all(float(i.get("confidence") or 0) >= AUTO_SAVE_CONFIDENCE for i in items)
     if not items:
+        # парсер не понял — пусть разбирается Джарвис (спросит кнопками, если надо); не зацикливаемся, если пришли от него
+        from .. import services as services_mod
+
+        await services_mod.log_agent(profile.telegram_id, text=raw_text, kind="unparsed_finance", ok=False)
+        if reroute or fallback_agent:
+            from .agent import handle_command
+
+            if await handle_command(message, state, profile, raw_text, own_message=False):
+                return
         await render_panel(
             message, state, profile,
-            notice=profile.tr("Не понял операцию. Пример: <code>такси 25000</code>", "Operatsiya tushunilmadi. Misol: <code>taksi 25000</code>"),
+            notice=profile.tr("Не разобрал операцию. Пример: <code>такси 25000</code>", "Operatsiya tushunilmadi. Misol: <code>taksi 25000</code>"),
         )
         return
 

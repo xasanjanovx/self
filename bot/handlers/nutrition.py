@@ -348,7 +348,7 @@ async def handle_photo(message: Message, state: FSMContext, profile: Profile) ->
 
 
 async def handle_text(
-    message: Message, state: FSMContext, profile: Profile, raw_text: str, *, transcript: str | None = None, reroute: bool = True
+    message: Message, state: FSMContext, profile: Profile, raw_text: str, *, transcript: str | None = None, reroute: bool = True, fallback_agent: bool = True
 ) -> None:
     raw_text = (raw_text or "").strip()
     if not raw_text:
@@ -375,6 +375,14 @@ async def handle_text(
         await render_panel(message, state, profile, notice=f"{pe.CROSS} {profile.tr('Ошибка анализа', 'Tahlil xatosi')}: {h(str(exc)[:120])}")
         return
     if not estimates:
+        from .. import services as services_mod
+
+        await services_mod.log_agent(profile.telegram_id, text=raw_text, kind="unparsed_food", ok=False)
+        if reroute or fallback_agent:
+            from .agent import handle_command
+
+            if await handle_command(message, state, profile, raw_text, own_message=False):
+                return
         await render_panel(message, state, profile, notice=profile.tr("Не смог распознать еду в сообщении.", "Xabarda taom aniqlanmadi."))
         return
     await _ask_confirm(message, state, profile, [nutri.pending_item(e) for e in estimates], transcript=transcript)

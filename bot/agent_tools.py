@@ -39,6 +39,7 @@ class ToolContext:
     text: str
     handoff: tuple[str, str] | None = None  # (finance|food|vacancy, текст) — передать специализированному парсеру
     open_screen: str | None = None  # экран, который надо показать после ответа
+    ask: dict[str, Any] | None = None  # уточняющий вопрос с вариантами-кнопками (ask_user)
     mutated: bool = False
     calls: list[str] = field(default_factory=list)  # имена вызванных инструментов (для логов)
 
@@ -1101,5 +1102,6 @@ async def snapshot(profile: Profile) -> str:
 
 
 from . import agent_tools_assistant  # noqa: E402  — регистрирует инструменты заметок/задач/целей/сроков
+from . import agent_tools_extra  # noqa: E402,F401  — ask_user, память, курсы валют, калькулятор, поиск, погода
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

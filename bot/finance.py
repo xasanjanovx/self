@@ -489,6 +489,15 @@ def tidy_note(note: str, category: str) -> str | None:
     return text[:60]
 
 
+def local_finance(text: str) -> bool:
+    """Фраза, которую быстрые правила разбирают сами, без AI: «такси 25000», «25000», «мне должен Алишер 200к».
+    Всё остальное с деньгами (долги, переводы, длинные фразы) решает агент — он видит контекст и может уточнить."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    return bare_amount(raw) is not None or parse_existing_debt(raw) is not None or parse_local(raw) is not None
+
+
 def looks_like_finance(text: str) -> bool:
     low = str(text or "").lower()
     if not re.search(r"\d", low):

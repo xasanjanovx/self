@@ -26,7 +26,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import agent_tools as tools
+from .. import agent_tools_extra as extra
 from .. import cache
+from .. import services
 from .. import categories as cats
 from .. import emoji as pe
 from .. import screen as screen_mod
@@ -40,9 +42,10 @@ router = Router(name="agent")
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = 8
-HISTORY_TTL = 1800.0
-HISTORY_MAX_MESSAGES = 24
-HISTORY_MAX_CHARS = 16000
+HISTORY_TTL = 12 * 3600.0  # диалог помнится весь день; «вчера» — в дайджесте user_memory.recent
+HISTORY_MAX_MESSAGES = 40
+HISTORY_MAX_CHARS = 24000
+ASK_TTL = 1800.0
 REPLY_MAX_CHARS = 3500
 
 # Слова-триггеры: такие фразы идут к агенту раньше финансового/пищевого парсера
@@ -78,13 +81,15 @@ def looks_like_command(text: str) -> bool:
 _WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-def system_prompt(profile: Profile, snapshot: str) -> str:
+def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
     now = profile.now
     name = profile.first_name or "пользователя"
     lang = "узбекский (латиница)" if profile.lang == "uz" else "русский"
     return (
-        f"Ты — Джарвис, личный ассистент {name} внутри Telegram-бота Self (финансы, питание, напоминания, вакансии). "
-        "Ты умный, точный и немногословный; действуешь, а не переспрашиваешь.\n"
+        f"Ты — Джарвис, личный ассистент {name} внутри Telegram-бота Self (финансы, питание, задачи, цели, напоминания, вакансии). "
+        "Ты умный, точный и немногословный; понимаешь с полуслова, действуешь, а не переспрашиваешь. "
+        "Пользователь часто диктует голосом: опечатки, склейки слов, имена и бренды в другой транскрипции (Узум = Uzum, Хамкор = Hamkorbank) — "
+        "восстанавливай смысл по контексту и данным, а не отвечай «не понял».\n"
         f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
         f"Язык пользователя по умолчанию: {lang} — отвечай на том языке, на котором он пишет.\n\n"
         "ЧТО ТЫ УМЕЕШЬ (инструменты): смотреть и менять операции (расходы/доходы/переводы/долги), счета, лимиты, регулярные платежи, "
@@ -93,10 +98,14 @@ def system_prompt(profile: Profile, snapshot: str) -> str:
         "ПРАВИЛА:\n"
         "1. Команды выполняй СРАЗУ и без вопросов «точно?» — у пользователя есть кнопка «Отменить». Массовые действия (удалить всё за месяц, очистить дневник) тоже выполняй сразу.\n"
         "2. Никогда не выдумывай id. Бери id из «Данные» ниже или из результата list_*. Если подходящих записей в «Данных» нет — сначала вызови list_* с фильтром.\n"
-        "3. Если под описание подходит НЕСКОЛЬКО записей и из фразы неясно, какая именно — не угадывай: покажи нумерованный список (дата · сумма · категория · комментарий) и спроси, какую. "
-        "Если ясно («последнее такси», «вчерашний обед», «все такси за неделю») — выполняй.\n"
-        "4. Пользователь СООБЩАЕТ о трате/доходе/долге сегодня («такси 25000», «дал Алишеру 200к») → hand_off(finance). Сообщает, что съел («съел плов») → hand_off(food). "
-        "Прислал текст вакансии → hand_off(vacancy). После hand_off ничего не пиши. Исключения — add_* напрямую: явная дата в прошлом («вчера», «3 сентября»), несколько операций с разными датами, или уже известные ккал.\n"
+        "3. Если под описание подходит НЕСКОЛЬКО записей и из фразы неясно, какая именно — не угадывай: ask_user с вариантами-кнопками (до 4: дата · сумма · комментарий); "
+        "если кандидатов больше — покажи нумерованный список и спроси. Если ясно («последнее такси», «вчерашний обед», «все такси за неделю») — выполняй.\n"
+        "3а. НИКОГДА не отвечай «не понял». Если фраза неоднозначна — сначала попробуй понять по данным и памяти; если всё ещё 2–4 трактовки — ask_user с этими трактовками "
+        "(«Записать 2.5 млн как долг Uzum?», «Поставить срок 5 октября по долгу Uzum?»). Если трактовка одна и правдоподобна — выполняй, а в ответе скажи, как понял.\n"
+        "4. Пользователь СООБЩАЕТ о простой трате/доходе сегодня («такси 25000», «обед 40к картой») → hand_off(finance): у него экран подтверждения с категориями. "
+        "Долги, переводы, снятие/пополнение, возвраты («дал Алишеру 200к», «Uzum списал 2.5 млн кредит», «снял 300к») → add_finance_entries напрямую (transfer по правилам инструмента) — ты видишь имена и долги, парсер нет. "
+        "Сообщает, что съел («съел плов») → hand_off(food). Прислал текст вакансии → hand_off(vacancy). После hand_off ничего не пиши. "
+        "Также add_* напрямую: явная дата в прошлом («вчера», «3 сентября»), несколько операций с разными датами, уже известные ккал.\n"
         "5. Вопросы по данным («сколько потратил на еду в этом месяце», «что я ел вчера», «кто мне должен») — возьми цифры инструментом и ответь конкретно.\n"
         "6. Совет по питанию («что поесть») — посмотри get_nutrition_summary и предложи 2–4 варианта с граммами и ккал под остаток дня, простые продукты, доступные в Узбекистане; ночью — лёгкое и белковое.\n"
         "7. Всё остальное (общие вопросы, перевод, объяснения, болтовня) — отвечай как умный дружелюбный ассистент, зная контекст данных пользователя.\n"
@@ -116,10 +125,17 @@ def system_prompt(profile: Profile, snapshot: str) -> str:
         "Вопрос о фактах из прошлого («когда у брата день рождения?», «какой у меня размер?») — смотри «Заметки» ниже или list_notes.\n"
         "15. «Хочу накопить 10 млн на ноутбук к январю» → add_goal; «отложил 500к на ноутбук» → update_goal(add_amount); «как дела с целью?» → list_goals и ответ: накоплено, осталось, нужно в месяц, успеваем ли.\n"
         "16. Долг со сроком: «дал Асилбеку 1 млн, вернёт до 5 октября» → add_finance_entries (transfer card→lent, note=имя) + set_debt_deadline; «Асилбек вернёт до пятницы» → только set_debt_deadline. "
-        "«Напиши сообщение Асилбеку про долг» — напиши вежливый короткий текст на языке пользователя с суммой и сроком.\n\n"
+        "Кредитор из «Я должен» (банк, Uzum, Hamkor, человек): «срок долга Узум 5 октября», «Uzum вернуть до 5.10», «запиши срок по Узумбанку — 5 число» → set_debt_deadline(person как в «Я должен», side=debt, due_date). "
+        "Если такого имени нет ни в «Мне должны», ни в «Я должен» — ask_user: «записать новый долг» / «только срок». "
+        "«Напиши сообщение Асилбеку про долг» — напиши вежливый короткий текст на языке пользователя с суммой и сроком.\n"
+        "17. Память: устойчивые факты о пользователе (люди и кто они, привычки, даты, суммы, предпочтения) сохраняй через remember_about_me сам, без просьбы, "
+        "и учитывай блок ПАМЯТЬ ниже при ответах. «Запомни, что …» → add_note (факт) и, если это про самого пользователя, remember_about_me.\n"
+        "18. Помощник вне бота: курс валют / «сколько это в долларах» → currency_rates; любые расчёты → calculate (не считай в уме суммы больше 4 знаков); "
+        "свежие факты, цены, новости, адреса, «что такое …» → web_search; погода → weather. Перевод, объяснения, тексты, советы — отвечай сам.\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен.\n\n"
-        f"ДАННЫЕ:\n{snapshot}"
+        + (f"{memory}\n\n" if memory else "")
+        + f"ДАННЫЕ:\n{snapshot}"
     )
 
 
@@ -223,6 +239,7 @@ async def run_agent(
     history: list[dict[str, Any]],
     *,
     snapshot: str,
+    memory: str = "",
     step_fn: StepFn | None = None,
     run_tool: RunFn | None = None,
     max_steps: int = MAX_STEPS,
@@ -232,7 +249,7 @@ async def run_agent(
     run_tool = run_tool or tools.run
     ctx = tools.ToolContext(profile=profile, text=text)
     contents = list(history) + [{"role": "user", "parts": [{"text": text}]}]
-    system = system_prompt(profile, snapshot)
+    system = system_prompt(profile, snapshot, memory)
     decls = tools.declarations()
     final = ""
     steps = 0
@@ -253,22 +270,31 @@ async def run_agent(
             final = ""
             contents.append({"role": "model", "parts": [{"text": f"(передано в {ctx.handoff[0]})"}]})
             break
+        if ctx.ask:
+            # вопрос с кнопками: ответ пользователя придёт следующей репликой в этот же диалог
+            final = ctx.ask["question"]
+            opts = " / ".join(ctx.ask.get("options") or [])
+            contents.append({"role": "model", "parts": [{"text": final + (f" [{opts}]" if opts else "")}]})
+            break
         if step.text and not ctx.handoff:
             final = step.text  # модель могла ответить текстом и одновременно позвать инструмент
     else:
         final = final or ("Juda ko'p qadam, to'xtadim. Aniqroq yozing." if profile.lang == "uz" else "Слишком много шагов, остановился. Уточни запрос.")
     if not final and not ctx.handoff:
-        final = ("Bajarildi." if profile.lang == "uz" else "Готово.") if ctx.mutated else ("Tushunmadim, boshqacha yozing." if profile.lang == "uz" else "Не понял, напиши иначе.")
+        final = ("Bajarildi." if profile.lang == "uz" else "Готово.") if ctx.mutated else (
+            "Aniq tushunmadim — nimani nazarda tutdingiz?" if profile.lang == "uz" else "Не уверен, что ты имеешь в виду — уточни одним словом?")
         contents.append({"role": "model", "parts": [{"text": final}]})
     return AgentResult(text=final, ctx=ctx, contents=contents, steps=steps)
 
 
 # ------------------------------------------------------------------ telegram glue
-def _reply_kb(lang: str, *, undo_available: bool) -> InlineKeyboardMarkup:
+def _reply_kb(lang: str, *, undo_available: bool, options: list[str] | None = None) -> InlineKeyboardMarkup:
     rows = []
+    for i, opt in enumerate(options or []):
+        rows.append([_btn(opt, f"agent:opt:{i}", style="primary")])
     if undo_available:
         rows.append([_btn("↩️ " + t(lang, "cancel"), "agent:undo", icon=pe.id_for("🔄"))])
-    rows.append([_btn(t(lang, "to_menu"), "menu:open", style="primary", icon=pe.ID_HOME)])
+    rows.append([_btn(t(lang, "to_menu"), "menu:open", style="primary" if not options else None, icon=pe.ID_HOME)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -277,6 +303,7 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем.
     voice=True — пришло голосом: если включены голосовые ответы, продублируем ответ голосом."""
     uid = profile.telegram_id
+    cache.put(uid, ("agent_ask",), None, 1)  # новый ход — прошлый вопрос с кнопками больше не ждёт ответа
     await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
     undo.begin_turn(uid)
     try:
@@ -284,16 +311,22 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     except Exception:
         logger.exception("agent snapshot failed")
         snapshot = "(данные временно недоступны)"
+    memory = await extra.memory_prompt(uid)
     try:
-        result = await run_agent(profile, text, load_history(uid), snapshot=snapshot)
+        result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory)
     except Exception:
         logger.exception("agent failed")
         undo.end_turn(uid)
+        await services.log_agent(uid, text=text, kind="error", ok=False)
         return False
     mutated = undo.end_turn(uid)
     save_history(uid, result.contents)
     ctx = result.ctx
-    logger.info("agent: steps=%d tools=%s mutated=%s handoff=%s", result.steps, ctx.calls, mutated, ctx.handoff)
+    logger.info("agent: steps=%d tools=%s mutated=%s handoff=%s ask=%s", result.steps, ctx.calls, mutated, ctx.handoff, bool(ctx.ask))
+    await services.log_agent(uid, text=text, kind="asked" if ctx.ask else "handoff" if ctx.handoff else "agent",
+                             tools=",".join(ctx.calls), reply=result.text, ok=bool(ctx.calls or ctx.handoff or mutated or result.text))
+    if not ctx.handoff and not ctx.ask:
+        await extra.remember_exchange(uid, text, result.text, when=profile.now.strftime("%d.%m %H:%M"))
 
     if ctx.handoff:
         module, payload = ctx.handoff
@@ -303,6 +336,13 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     if own_message:
         await safe_delete(message)
     reply = render_reply(result.text)
+    if ctx.ask:
+        options = list(ctx.ask.get("options") or [])
+        cache.put(uid, ("agent_ask",), options, ASK_TTL)
+        await state.clear()
+        hint = profile.tr("Нажми вариант или напиши ответ", "Variantni bosing yoki javob yozing")
+        await show_panel(message, state, f"❓ {reply}\n\n<i>{hint}</i>", _reply_kb(profile.lang, undo_available=mutated, options=options))
+        return True
     if ctx.open_screen:
         await _open_screen(message, state, profile, ctx.open_screen, notice=reply, undo_available=mutated)
         return True
@@ -311,6 +351,26 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     if voice:
         await _send_voice_reply(message, profile, result.text)
     return True
+
+
+@router.callback_query(F.data.startswith("agent:opt:"))
+async def cb_option(callback: CallbackQuery, state: FSMContext) -> None:
+    """Нажатие варианта из ask_user: текст кнопки уходит агенту как ответ пользователя."""
+    profile = await get_profile(callback.from_user)
+    options = cache.get(profile.telegram_id, ("agent_ask",))
+    try:
+        idx = int(callback.data.split(":")[-1])
+    except ValueError:
+        idx = -1
+    if not isinstance(options, list) or not 0 <= idx < len(options):
+        await answer_now(callback, profile.tr("Вопрос устарел — напиши ответ текстом", "Savol eskirgan — javobni yozing"), alert=True)
+        return
+    await answer_now(callback, options[idx][:60])
+    cache.put(profile.telegram_id, ("agent_ask",), None, 1)
+    if callback.message is None:
+        return
+    if not await handle_command(callback.message, state, profile, options[idx], own_message=False):
+        await safe_edit(callback, profile.tr("Не получилось, напиши ответ текстом.", "Bo'lmadi, javobni yozing."), _reply_kb(profile.lang, undo_available=False))
 
 
 async def _send_voice_reply(message: Message, profile: Profile, text: str) -> None:
@@ -338,11 +398,11 @@ async def _dispatch_handoff(message: Message, state: FSMContext, profile: Profil
     if module == "finance":
         from .finance import handle_finance_text
 
-        await handle_finance_text(message, state, profile, text, source="text", reroute=False)
+        await handle_finance_text(message, state, profile, text, source="text", reroute=False, fallback_agent=False)
     elif module == "food":
         from .nutrition import handle_text
 
-        await handle_text(message, state, profile, text, reroute=False)
+        await handle_text(message, state, profile, text, reroute=False, fallback_agent=False)
     else:
         from .vacancy import process_vacancy
 
