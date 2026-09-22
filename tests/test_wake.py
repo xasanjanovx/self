@@ -174,3 +174,24 @@ def test_dialog_prompt_language():
     assert "o'zbek" in uz and "04:47" in uz
     ru = cd.system_prompt(cd.DialogState(lang="ru", name="Хасан"))
     assert "по-русски" in ru
+
+
+# ------------------------------------------------------------------ звонок по требованию
+def test_assistant_call_helpers():
+    from bot import call_assistant as ca
+
+    assert ca.is_goodbye("всё, спасибо") and ca.is_goodbye("rahmat") and ca.is_goodbye("пока")
+    assert not ca.is_goodbye("сколько я потратил")
+    assert "Слушаю" in ca.greeting(_profile_stub("ru"), "ru")
+    assert "Tinglayapman" in ca.greeting(_profile_stub("uz"), "uz")
+    # ответ агента режется до произносимой длины, без html и эмодзи
+    long_answer = "<b>Сегодня</b> потратил 250 000 сум 🎯. " + "Ещё подробности. " * 40
+    said = ca.voice_reply(long_answer)
+    assert "<b>" not in said and "🎯" not in said and len(said) <= 400
+    assert said.endswith(".")
+
+
+def _profile_stub(lang: str):
+    from bot.profile import Profile
+
+    return Profile(telegram_id=1, lang=lang, tz_name="Asia/Tashkent", currency="UZS", first_name="Хасан", username="x")
