@@ -112,8 +112,7 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
             meal_lines.append(f"• {h(str(row.get('meal_desc') or '')[:40])} — <b>{int(float(kcal)) if kcal is not None else '—'}</b>")
         meals_card = ui.card(f"<b>{'Qabullar' if uz else 'Приёмы'}</b> · {int(totals['meals'])}", meal_lines)
 
-    hint = ui.muted("📷 rasm · «osh yedim» · ovozli xabar" if uz else "📷 фото блюда · «съел плов и салат» · голос")
-    return ui.join(header, day_card, meals_card, hint), labels, quick
+    return ui.join(header, day_card, meals_card), labels, quick
 
 
 async def render_panel(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:

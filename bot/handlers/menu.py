@@ -103,8 +103,7 @@ async def build_dashboard(profile: Profile) -> str:
     # --- цели и дела (только если есть)
     assistant_card = _assistant_card(goals, tasks, today, lang)
 
-    hint = ui.muted("✍️ «taksi 25000» · «osh yedim» · rasm · ovoz" if uz else "✍️ «такси 25000» · «съел плов» · фото · голос")
-    return ui.join(header, finance_card, nutrition_card, assistant_card, hint)
+    return ui.join(header, finance_card, nutrition_card, assistant_card)
 
 
 def _assistant_card(goals: list[dict], tasks: list[dict], today: date, lang: str) -> str | None:

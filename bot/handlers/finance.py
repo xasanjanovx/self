@@ -107,12 +107,7 @@ async def build_panel(profile: Profile) -> tuple[str, list[str], list[dict[str, 
     if snap.today_entries:
         today_card = ui.card(f"<b>{'Bugungi operatsiyalar' if uz else 'Операции сегодня'}</b>", ["• " + _entry_line(row, lang) for row in snap.today_entries[:6]])
 
-    hint = ui.muted(
-        "✍️ <code>taksi 25000</code> · <code>oylik 5 mln</code>\n<code>qarzga berdim 200000</code> · <code>25000</code>"
-        if uz else
-        "✍️ <code>такси 25000</code> · <code>зарплата 5 млн</code>\n<code>дал в долг 200000</code> · просто <code>25000</code>"
-    )
-    return ui.join(header, balance_card, debts_card, period_card, today_card, hint), labels, snap.quick
+    return ui.join(header, balance_card, debts_card, period_card, today_card), labels, snap.quick
 
 
 _DEBT_ROWS = 5  # строк на сторону — чтобы карточка помещалась на экран телефона
@@ -998,21 +993,12 @@ def _settings_text(profile: Profile, view: dict[str, float], ledger: dict[str, l
         f"{_field_label('card', lang)}: <b>{fin.fmt_money(view['card_base'])} {cur}</b>",
         f"{_field_label('cash', lang)}: <b>{fin.fmt_money(view['cash_base'])} {cur}</b>",
         f"{_field_label('credit', lang)}: <b>{fin.fmt_money(view['monthly_credit_payment'])} {cur}</b>",
-        ui.muted("Tuzatish uchun hisobni bosing va joriy summani yozing." if uz else "Чтобы поправить — нажми счёт и введи актуальную сумму."),
     ]
     blocks = [header, ui.card(f"<b>{'Balans' if uz else 'Балансы'}</b>", acc_lines)]
     blocks.append(ui.card(f"<b>{'Qarzlar jami' if uz else 'Долги итого'}</b>", [
         f"🤝 {'Menga qarz' if uz else 'Мне должны'}: <b>{fin.fmt_money(view['lent_base'])} {cur}</b>",
         f"📌 {'Mening qarzim' if uz else 'Я должен'}: <b>{fin.fmt_money(view['debt_base'])} {cur}</b>",
-        ui.muted("Kimga/kimdan — «Moliya» ekranida." if uz else "По людям — на экране «Финансы»."),
     ]))
-    blocks.append(ui.muted(
-        "Eski qarzni qo'shish (pul harakatisiz): «menga Abdulaziz qarz 200000» · «men bankka qarzdorman 3 mln». "
-        "Yangi: «Abdulazizga 200000 qarz berdim» · «akamdan 500000 qarz oldim» · «Abdulaziz 100000 qaytardi»."
-        if uz else
-        "Старый долг (деньги не двигаются): «мне должен Абдулазиз 200000» · «я должен банку 3 млн». "
-        "Новый: «дал Абдулазизу 200000» · «взял у брата 500000» · «Абдулазиз вернул 100000»."
-    ))
     return ui.join(*blocks)
 
 

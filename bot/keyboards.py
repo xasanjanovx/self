@@ -258,7 +258,8 @@ def settings_keyboard(
     ]
     for rem_id, title in (reminders or [])[:8]:
         rows.append([_btn(f"🗑 {title}", f"settings:rem_del:{rem_id}", icon=_pe.ID_DELETE)])
-    rows.append([_btn("⏰📞 " + ("Uyg'otish va qo'ng'iroq" if lang == "uz" else "Подъём и звонки"), "settings:wake", style="primary")])
+    rows.append([_btn("🤖 " + ("Jarvis" if lang == "uz" else "Джарвис"), "settings:jarvis", style="primary"),
+                 _btn("⏰ " + ("Uyg'otish" if lang == "uz" else "Подъём"), "settings:wake", style="primary")])
     rows.append([_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)])
     rows.append([_back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -277,12 +278,6 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
               "wakeset:toggle:call_enabled", style="success" if call_enabled else None)],
         [_btn(("💬 Suhbat rejimi" if uz else "💬 Режим разговора") if talk else ("🔈 Faqat gapiradi" if uz else "🔈 Просто говорит"),
               "wakeset:toggle:talk", style="success" if talk else None)],
-        [
-            _btn(("🇺🇿 O'zbekcha ✓" if voice_lang == "uz" else "🇺🇿 O'zbekcha") if uz else ("🇺🇿 Узбекский ✓" if voice_lang == "uz" else "🇺🇿 Узбекский"),
-                 "wakeset:lang:uz", style="primary" if voice_lang == "uz" else None),
-            _btn(("🇷🇺 Ruscha ✓" if voice_lang == "ru" else "🇷🇺 Ruscha") if uz else ("🇷🇺 Русский ✓" if voice_lang == "ru" else "🇷🇺 Русский"),
-                 "wakeset:lang:ru", style="primary" if voice_lang == "ru" else None),
-        ],
         [
             _btn(("🕌 Bomdodga" if uz else "🕌 К фаджру") + (" ✓" if mode == "fajr" else ""), "wakeset:mode:fajr", style="primary" if mode == "fajr" else None),
             _btn(("🕘 Aniq vaqt" if uz else "🕘 Точное время") + (" ✓" if mode == "fixed" else ""), "wakeset:mode:fixed", style="primary" if mode == "fixed" else None),
@@ -313,6 +308,44 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
     if task_row:
         rows.append(task_row)
     rows.append([_btn("📞 " + ("Hozir qo'ng'iroq qil" if uz else "Позвонить сейчас"), "wakeset:calltest", style="primary")])
+    rows.append([_back(lang, "menu:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
+                             alarm_mode: str) -> InlineKeyboardMarkup:
+    """Раздел «Джарвис»: голос, язык, характер, будильник, звонок."""
+    from .persona import VOICES
+
+    uz = lang == "uz"
+
+    def pick(label: str, data: str, on: bool) -> InlineKeyboardButton:
+        return _btn(label + (" ✓" if on else ""), data, style="primary" if on else None)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    voice_row: list[InlineKeyboardButton] = []
+    for key, (ru_name, uz_name) in VOICES.items():
+        voice_row.append(pick(uz_name if uz else ru_name, f"jarvis:voice:{key}", key == voice))
+        if len(voice_row) == 3:
+            rows.append(voice_row)
+            voice_row = []
+    if voice_row:
+        rows.append(voice_row)
+    rows.append([_btn("🔊 " + ("Ovozni eshitish" if uz else "Послушать голос"), "jarvis:sample")])
+    rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru")])
+    rows.append([pick("Sen (ты)" if uz else "На «ты»", "jarvis:address:sen", address == "sen"),
+                 pick("Siz (вы)" if uz else "На «вы»", "jarvis:address:siz", address == "siz")])
+    rows.append([pick("🙂 " + ("Do'stona" if uz else "Дружелюбный"), "jarvis:tone:friendly", tone == "friendly"),
+                 pick("😌 " + ("Xotirjam" if uz else "Спокойный"), "jarvis:tone:calm", tone == "calm"),
+                 pick("🧐 " + ("Qat'iy" if uz else "Строгий"), "jarvis:tone:strict", tone == "strict")])
+    rows.append([pick("Qisqa" if uz else "Коротко", "jarvis:verbosity:short", verbosity == "short"),
+                 pick("O'rtacha" if uz else "Обычно", "jarvis:verbosity:normal", verbosity == "normal"),
+                 pick("Batafsil" if uz else "Подробно", "jarvis:verbosity:detailed", verbosity == "detailed")])
+    rows.append([pick("🕌 " + ("Bomdodga" if uz else "К фаджру"), "jarvis:alarm:fajr", alarm_mode == "fajr"),
+                 _btn("⌨️ " + ("Vaqtni kiritish" if uz else "Задать время"), "jarvis:alarm:time",
+                      style="primary" if alarm_mode == "fixed" else None)])
+    rows.append([_btn("⏰ " + ("Uyg'otish sozlamalari" if uz else "Подъём подробно"), "settings:wake"),
+                 _btn("📞 " + ("Qo'ng'iroq" if uz else "Позвонить"), "wakeset:calltest", style="success")])
     rows.append([_back(lang, "menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

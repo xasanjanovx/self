@@ -161,23 +161,69 @@ async def _notify_failure(profile: Profile, error: str) -> None:
         logger.debug("call failure notice failed", exc_info=True)
 
 
-def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = None) -> asyncio.Task:
-    """Звонок фоном: инструмент агента должен ответить сразу, а не ждать конца разговора."""
-    async def runner() -> None:
-        try:
-            result = await call_now(profile, topic=topic, lang=lang)
-            logger.info("assistant call to %s: %s", profile.telegram_id, {k: v for k, v in result.items() if k != "transcript"})
-            from . import services
+_running: set[int] = set()  # один звонок на человека одновременно
 
-            await services.log_agent(profile.telegram_id, text=f"call: {topic or 'разговор'}", kind="call",
-                                     reply=" | ".join(result.get("transcript") or [])[:900], ok=bool(result.get("ok")))
-            if not result.get("ok"):
-                await _notify_failure(profile, str(result.get("error") or ""))
+
+async def _send_summary(profile: Profile, actions: list[str], mutated: bool) -> None:
+    """После разговора — что изменено, одной строкой, с кнопкой «Отменить»."""
+    if not actions:
+        return
+    from .context import bot_instance
+    from .handlers.agent import _reply_kb
+
+    names = {
+        "add_finance_entries": ("операции", "operatsiya"), "update_finance_entry": ("правка операции", "operatsiya tahriri"),
+        "delete_finance_entries": ("удаление операций", "operatsiyalarni o'chirish"), "add_calorie_logs": ("питание", "ovqat"), "delete_calorie_logs": ("удаление еды", "ovqatni o'chirish"),
+        "add_goal": ("новая цель", "yangi maqsad"), "update_goal": ("цель", "maqsad"), "delete_goals": ("удаление цели", "maqsadni o'chirish"),
+        "add_task": ("задача", "vazifa"), "complete_tasks": ("задачи выполнены", "vazifalar bajarildi"), "add_reminder": ("напоминание", "eslatma"),
+        "log_weight": ("вес", "vazn"), "goal_checkin": ("отметка привычки", "odat belgisi"), "set_wake": ("будильник", "budilnik"),
+    }
+    done = []
+    for a in actions:
+        ru, uz = names.get(a, (None, None))
+        label = profile.tr(ru, uz) if ru else None
+        if label and label not in done:
+            done.append(label)
+    if not done:
+        return
+    text = "📞 " + profile.tr("После звонка: ", "Qo'ng'iroqdan so'ng: ") + ", ".join(done)
+    try:
+        await bot_instance().send_message(profile.telegram_id, text, reply_markup=_reply_kb(profile.lang, undo_available=mutated))
+    except Exception:
+        logger.debug("call summary failed", exc_info=True)
+
+
+def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = None) -> asyncio.Task | None:
+    """Звонок фоном: инструмент агента должен ответить сразу, а не ждать конца разговора.
+
+    Разговор ведёт Gemini Live (bot/live_call.py); `lang` — только если явно попросили
+    другой язык, иначе берётся из настроек Джарвиса.
+    """
+    uid = profile.telegram_id
+    if uid in _running:
+        return None
+
+    async def runner() -> None:
+        from . import live_call, services
+
+        _running.add(uid)
+        try:
+            if lang in {"uz", "ru"}:
+                await services.save_persona(uid, {"lang": lang})
+            result = await live_call.run(profile, mode="assistant", topic=topic)
+            await services.log_agent(uid, text=f"call: {topic or 'разговор'}", kind="call",
+                                     tools=",".join(result.actions), reply=" | ".join(result.transcript)[:900], ok=result.answered)
+            if not result.answered:
+                await _notify_failure(profile, str(result.error or ""))
+            else:
+                await _send_summary(profile, result.actions, result.mutated)
         except Exception:
             logger.exception("assistant call failed")
             await _notify_failure(profile, "internal error")
+        finally:
+            _running.discard(uid)
 
-    return asyncio.create_task(runner(), name=f"call-{profile.telegram_id}")
+    return asyncio.create_task(runner(), name=f"call-{uid}")
 
 
 __all__ = ["call_now", "call_in_background", "is_goodbye", "voice_reply", "greeting", "farewell", "MAX_TURNS"]

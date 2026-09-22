@@ -110,9 +110,21 @@ async def _task_for(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.D
 # ------------------------------------------------------------------ разговор в трубке
 async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan, task: dict[str, Any],
                        minutes_left: int | None) -> dict[str, Any]:
-    """Звонок-разговор: поздоровался → слушает ответ → отвечает по смыслу → подтверждает подъём."""
+    """Звонок-разговор на Gemini Live: живой голос, будит, пока не услышит, что встал."""
+    from . import live_call
+
+    live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds),
+                               wake={"takbir": plan.takbir, "minutes_left": minutes_left, "task": str(task.get("text") or "")})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
                            minutes_left=minutes_left, task_text=str(task.get("text") or ""))
+    state.confirmed = live.confirmed
+    state.transcript = list(live.transcript)
+    if live.snooze_minutes:
+        await snooze(profile, live.snooze_minutes)
+    if live.model:  # до Gemini Live достучались — итог звонка берём оттуда, даже если трубку не взяли
+        return {"answered": live.answered, "error": live.error, "state": state}
+    # Gemini Live недоступен — запасной путь: старый пошаговый разговор
+    logger.warning("wake: live недоступен (%s), пошаговый режим", live.error)
     greeting_pcm = await _say(cd.greeting(state))
     if not greeting_pcm:
         return {"answered": False, "error": "tts unavailable", "state": state}

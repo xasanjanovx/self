@@ -88,7 +88,7 @@ class Database:
             "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
-            "user_memory", "agent_log", "weight_logs", "goal_checkins", "wake_settings", "wake_log",
+            "user_memory", "agent_log", "weight_logs", "goal_checkins", "wake_settings", "wake_log", "assistant_settings",
         )
 
         async def probe(name: str) -> str | None:
@@ -627,6 +627,16 @@ class Database:
     async def delete_goals(self, telegram_id: int, ids: list[Any]) -> None:
         if ids:
             await self._table("savings_goals").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    # ---------------------------------------------------------- 009: характер Джарвиса
+    async def get_assistant_settings(self, telegram_id: int) -> dict[str, Any]:
+        res = await self._table("assistant_settings").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def save_assistant_settings(self, telegram_id: int, fields: dict[str, Any]) -> None:
+        payload = {"telegram_id": telegram_id, **fields, "updated_at": datetime.now(timezone.utc).isoformat()}
+        await self._table("assistant_settings").upsert(payload, on_conflict="telegram_id").execute()
 
     # ---------------------------------------------------------- 008: подъём (wake)
     async def get_wake_settings(self, telegram_id: int) -> dict[str, Any]:

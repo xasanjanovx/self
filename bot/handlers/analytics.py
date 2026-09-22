@@ -9,17 +9,13 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from .. import cache
 from .. import categories as cats
 from .. import charts as charts_mod
-from .. import emoji as pe
 from .. import finance as fin
-from .. import insights
 from .. import screen as screen_mod
 from .. import services
-from ..context import ai
 from ..keyboards import dashboard_keyboard
-from ..profile import Profile, h
+from ..profile import Profile
 from ..reports import build_summary
 from .common import answer_now, get_profile, safe_delete, safe_edit
 
@@ -52,15 +48,6 @@ async def render_dashboard(target: Message | CallbackQuery, profile: Profile, pe
         await safe_edit(target, summary.text, kb)
     else:
         await screen_mod.show_screen(bot, chat_id, summary.text, kb)
-
-    # Инсайт — после показа экрана, чтобы не ждать AI. Кэш на день.
-    key = ("insight", period_code, profile.today.isoformat())
-    insight = cache.get(profile.telegram_id, key)
-    if insight is None:
-        insight = await insights.generate_insight(ai, summary.stats, summary.nutrition, currency=profile.currency, lang=profile.lang) or ""
-        cache.put(profile.telegram_id, key, insight, 6 * 3600)
-    if insight:
-        await screen_mod.show_screen(bot, chat_id, f"{summary.text}\n\n{pe.IDEA} <i>{h(insight)}</i>", kb)
 
 
 @router.message(Command("dashboard"))

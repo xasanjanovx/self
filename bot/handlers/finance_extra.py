@@ -42,8 +42,7 @@ def _budgets_text(profile: Profile, statuses: list[fin.BudgetStatus], limits: di
     uz = lang == "uz"
     header = ui.title("🎯", "Limitlar" if uz else "Лимиты по категориям", fin.period_title(fin.period_for("month", profile.today), lang))
     if not limits:
-        body = ui.muted("Limitlar yo'q. Kategoriyani tanlang va oylik summani kiriting." if uz
-                        else "Лимитов пока нет. Выбери категорию и введи сумму на месяц.")
+        body = ui.muted("Limitlar yo'q." if uz else "Лимитов пока нет.")
         return ui.join(header, body)
     lines = []
     for b in statuses:
@@ -53,8 +52,7 @@ def _budgets_text(profile: Profile, statuses: list[fin.BudgetStatus], limits: di
     total_limit = sum(limits.values())
     total_spent = sum(b.spent for b in statuses)
     lines.append(f"{'Jami' if uz else 'Итого'}: <b>{fin.fmt_money(total_spent)}</b> / {fin.fmt_money(total_limit)} {cur}")
-    hint = ui.muted("Kategoriyani bosing — limitni o'zgartirish, 0 — o'chirish." if uz else "Нажми категорию, чтобы изменить лимит; 0 — убрать.")
-    return ui.join(header, ui.card(f"<b>{'Holat' if uz else 'Состояние'}</b>", lines), hint)
+    return ui.join(header, ui.card(f"<b>{'Holat' if uz else 'Состояние'}</b>", lines))
 
 
 async def render_budgets(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
@@ -135,8 +133,7 @@ def _recurring_text(profile: Profile, items: list[dict[str, Any]]) -> str:
     today = profile.today
     header = ui.title("🔁", "Doimiy to'lovlar" if uz else "Регулярные платежи", fin.period_title(fin.period_for("month", today), lang))
     if not items:
-        body = ui.muted("Hali yo'q. Qo'shish: «internet 150000 5» (nom, summa, kun)." if uz
-                        else "Пока нет. Добавь: «интернет 150000 5» (название, сумма, число месяца).")
+        body = ui.muted("Hali yo'q." if uz else "Пока нет.")
         return ui.join(header, body)
     key = today.strftime("%Y-%m")
     lines = []
@@ -160,9 +157,7 @@ def _recurring_text(profile: Profile, items: list[dict[str, Any]]) -> str:
         f"{'Oyiga jami' if uz else 'Всего в месяц'}: <b>{fin.fmt_money(total)} {cur}</b>",
         f"{'Bu oy qoldi' if uz else 'Ещё предстоит в этом месяце'}: <b>{fin.fmt_money(remaining)} {cur}</b>",
     ]
-    hint = ui.muted("To'lov kunida bot so'raydi — bir bosishda yoziladi. Qo'shish: «ijara 2 mln 1»." if uz
-                    else "В день платежа бот спросит «Оплатил?» — запись в одно нажатие. Добавить: «аренда 2 млн 1 числа».")
-    return ui.join(header, ui.card(f"<b>{'Ro`yxat' if uz else 'Список'}</b>", lines), ui.card(f"<b>{'Xulosa' if uz else 'Итого'}</b>", summary), hint)
+    return ui.join(header, ui.card(f"<b>{'Ro`yxat' if uz else 'Список'}</b>", lines), ui.card(f"<b>{'Xulosa' if uz else 'Итого'}</b>", summary))
 
 
 async def render_recurring(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:

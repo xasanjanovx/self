@@ -50,7 +50,7 @@ def tasks_text(profile: Profile, tasks: list[dict[str, Any]], *, done_view: bool
         if not tasks:
             return ui.join(header, ui.muted("Hali yo'q." if uz else "Пока пусто."))
         lines = [f"• {h(t.get('text'))} · {ui.muted(str(t.get('done_at') or '')[:10])}" for t in tasks[:20]]
-        return ui.join(header, ui.card(f"<b>{'Oxirgi' if uz else 'Последние'}</b>", lines), ui.muted("🗑 — o'chirish" if uz else "🗑 — удалить насовсем"))
+        return ui.join(header, ui.card(f"<b>{'Oxirgi' if uz else 'Последние'}</b>", lines))
 
     g = tasks_mod.group(tasks, today)
     header = ui.title("📝", "Vazifalar" if uz else "Задачи", f"{g.total} {'ta ochiq' if uz else 'открытых'}" if g.total else None)
@@ -65,8 +65,6 @@ def tasks_text(profile: Profile, tasks: list[dict[str, Any]], *, done_view: bool
         blocks.append(ui.card(f"📌 <b>{'Sanasiz' if uz else 'Без даты'}</b>", [_task_line(t, today, lang) for t in g.undated[:10]]))
     if not g.total:
         blocks.append(ui.muted("Ochiq vazifalar yo'q." if uz else "Открытых задач нет."))
-    blocks.append(ui.muted("✍️ «ertaga 18:00 onamga qo'ng'iroq» · «lampochka olish» · ovoz. ✅ — bajarildi." if uz
-                           else "✍️ «позвонить маме завтра в 18:00» · «купить лампочку» · голос. ✅ — выполнено."))
     return ui.join(*blocks)
 
 
@@ -162,11 +160,10 @@ async def cb_notes(callback: CallbackQuery, state: FSMContext) -> None:
         body = ui.card(f"<b>{'Oxirgi' if uz else 'Последние'}</b>", [f"• {h(n.get('text'))} · {ui.muted(str(n.get('created_at') or '')[:10])}" for n in notes[:20]])
     else:
         body = ui.muted("Hali yo'q." if uz else "Пока пусто.")
-    hint = ui.muted("✍️ «eslab qol: akamning tug'ilgan kuni 3-noyabr»" if uz else "✍️ «запомни, что у брата день рождения 3 ноября»")
     await state.set_state(BotStates.waiting_task_input)
     await state.update_data(tasks_done_view=False)
     await remember_panel(callback, state)
-    await safe_edit(callback, ui.join(header, body, hint), notes_keyboard(notes, profile.lang))
+    await safe_edit(callback, ui.join(header, body), notes_keyboard(notes, profile.lang))
 
 
 @router.callback_query(F.data.startswith("note:del:"))
@@ -293,8 +290,6 @@ async def render_goals(target: Message | CallbackQuery, state: FSMContext, profi
         if not goals:
             blocks.append(ui.muted("Maqsadlar yo'q." if uz else "Целей пока нет."))
         blocks.append(await _habits_block(profile))
-        blocks.append(ui.muted("✍️ «10 mln noutbukka yanvargacha» · «oyiga 5 mln dan ko'p sarflamaslik» · «75 kg gacha yig'ish» · «zal haftasiga 3 marta»" if uz
-                               else "✍️ «накопить 10 млн на ноутбук к январю» · «тратить не больше 5 млн в месяц» · «набрать до 75 кг» · «зал 3 раза в неделю» · «вес 72.5»"))
         text = ui.join(*blocks)
     if notice:
         text += f"\n\n{notice}"

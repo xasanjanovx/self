@@ -289,6 +289,22 @@ async def uncheck(uid: int, *, goal_id: Any, day: date) -> None:
     cache.invalidate(uid, "checkins")
 
 
+# ------------------------------------------------------------------ 009: характер Джарвиса
+async def persona(uid: int):
+    """Настройки характера Джарвиса (голос, язык звонков, обращение, тон, длина ответов)."""
+    from .persona import Persona
+
+    if not db.available("assistant_settings"):
+        return Persona()
+    row = await cache.remember(uid, ("persona",), 600, lambda: db.get_assistant_settings(uid))
+    return Persona.from_row(row)
+
+
+async def save_persona(uid: int, fields: dict[str, Any]) -> None:
+    await db.save_assistant_settings(uid, fields)
+    cache.invalidate(uid, "persona")
+
+
 # ------------------------------------------------------------------ 008: подъём (wake)
 async def wake_settings(uid: int) -> dict[str, Any]:
     if not db.available("wake_settings"):

@@ -178,11 +178,92 @@ def _hook_updates() -> None:
                 return
             # всё остальное (ответили, положили трубку, смена состояния) — в лог: без этого
             # не видно, на каком шаге рвётся звонок
-            logger.info("call update: %s %s", type(update).__name__, getattr(update, "status", "") or getattr(update, "state", ""))
+            status = getattr(update, "status", "") or getattr(update, "state", "")
+            logger.info("call update: %s %s", type(update).__name__, status)
+            # собеседник положил трубку / занято → разговор окончен (и НЕ перезваниваем сами)
+            if any(k in str(status) for k in ("DISCARDED", "BUSY", "KICKED", "CLOSED")):
+                chat_id = int(getattr(update, "chat_id", 0) or 0)
+                event = _ended.get(chat_id)
+                if event is not None:
+                    event.set()
         except Exception:
             logger.debug("frame hook failed", exc_info=True)
 
     _hooked = True
+
+
+# ------------------------------------------------------------------ потоковый звонок (Gemini Live)
+_ended: dict[int, asyncio.Event] = {}
+FRAME_MS = 10
+LIVE_RATE = 24000                      # Gemini Live отдаёт 24 кГц моно; в звонок шлём так же
+FRAME_BYTES = LIVE_RATE // 1000 * FRAME_MS * 2   # 10 мс s16le моно = 480 байт
+
+
+async def open_stream_call(user_id: int, *, username: str | None = None, ring_seconds: int = 45) -> dict[str, Any]:
+    """Позвонить так, чтобы звук можно было слать потоком (send_frame) и слушать входящий.
+
+    Возвращает {'answered': bool, 'error': str|None, 'incoming': Queue, 'ended': Event}.
+    """
+    if not await start():
+        return {"answered": False, "error": _import_error or "not configured"}
+    try:
+        from pytgcalls.types import AudioQuality, CallConfig, ExternalMedia, MediaStream, RecordStream  # type: ignore
+    except Exception as exc:
+        return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+    uid = int(user_id)
+    _hook_updates()
+    try:
+        await resolve_peer(uid, username)
+    except LookupError:
+        return {"answered": False, "error": "peer_unknown"}
+    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
+    ended = asyncio.Event()
+    _incoming[uid] = queue
+    _ended[uid] = ended
+    logger.info("call %s: набираю (поток, гудки до %s с)", uid, ring_seconds)
+    try:
+        await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
+    except Exception as exc:
+        _incoming.pop(uid, None)
+        _ended.pop(uid, None)
+        name = type(exc).__name__.lower()
+        logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
+        if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
+            return {"answered": False, "error": None}
+        return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+    logger.info("call %s: трубку взяли", uid)
+    try:
+        await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
+    except Exception:
+        logger.warning("record() failed — собеседника не слышно", exc_info=True)
+    return {"answered": True, "error": None, "incoming": queue, "ended": ended}
+
+
+async def send_audio(user_id: int, pcm: bytes) -> bool:
+    """Отправить в звонок кусок PCM (24 кГц моно, кратно 10 мс). False — звонка уже нет."""
+    try:
+        from pytgcalls.types import Device  # type: ignore
+
+        await _calls.send_frame(int(user_id), Device.MICROPHONE, pcm)
+        return True
+    except Exception as exc:
+        if "notincall" in type(exc).__name__.lower():
+            event = _ended.get(int(user_id))
+            if event is not None:
+                event.set()
+            return False
+        logger.debug("send_frame failed", exc_info=True)
+        return True
+
+
+async def hang_up(user_id: int) -> None:
+    uid = int(user_id)
+    _incoming.pop(uid, None)
+    _ended.pop(uid, None)
+    try:
+        await _calls.leave_call(uid)
+    except Exception:
+        logger.debug("leave_call failed", exc_info=True)
 
 
 async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds: int = 45,

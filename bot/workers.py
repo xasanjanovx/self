@@ -10,14 +10,12 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import LinkPreviewOptions
 
 from . import cache
-from . import insights
 from . import services
-from .context import ai, db, settings
+from .context import db, settings
 from .handlers.common import profile_by_id
 from .keyboards import back_to_menu_keyboard
 from .profile import h
 from .reports import build_summary
-from . import emoji as pe
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +39,6 @@ async def _send_report(bot: Bot, telegram_id: int, frequency: str, due_key: str)
     )
     summary = build_summary(profile, days=days, entries=payload["all_finance_entries"], logs=payload["calorie_logs"], nutrition_profile=nutrition_profile, title=title)
     text = summary.text
-    insight = await insights.generate_insight(ai, summary.stats, summary.nutrition, currency=profile.currency, lang=profile.lang)
-    if insight:
-        text += f"\n\n{pe.IDEA} <i>{h(insight)}</i>"
     await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang))
     await db.save_report_preferences(telegram_id, enabled=True, frequency=frequency, last_sent_key=due_key)
     cache.invalidate(telegram_id, "report_prefs")

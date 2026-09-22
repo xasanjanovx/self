@@ -6,14 +6,15 @@ import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import cache
 from .. import emoji as pe
 from .. import services
 from .. import ui
 from ..context import db
-from ..keyboards import settings_keyboard
+from ..keyboards import _btn, settings_keyboard
+from ..states import BotStates
 from ..profile import Profile, h
 from .common import answer_now, get_profile, safe_edit
 
@@ -37,29 +38,12 @@ async def render_settings(callback: CallbackQuery, profile: Profile) -> None:
             "Сводки недоступны: выполни <code>sql/migrations/004_v2_features.sql</code> в Supabase → SQL Editor.",
             "Xulosalar ishlamaydi: Supabase → SQL Editor da <code>sql/migrations/004_v2_features.sql</code> ni bajaring.",
         )
-    if lang == "uz":
-        text = ui.join(
-            ui.title(pe.SETTINGS, "Sozlamalar"),
-            ui.card("<b>🌅 Ertalabki xulosa</b> · 08:00", ["balans, hafta xarajati, bugungi kaloriya rejasi, yaqin to'lovlar"]),
-            ui.card("<b>🌙 Kechki eslatma</b> · 21:00", ["ovqat yoki xarajat yozilmagan bo'lsa — eslatadi; hammasi yozilgan bo'lsa — kun natijasi"]),
-            ui.card("<b>📊 Avto-hisobot</b>", ["yakshanba 20:00 (haftalik) yoki oyning 1-kuni (oylik)"]),
-            ui.card("<b>💡 Jarvis maslahatlari</b>", ["qarz muddatlari, xarajat sakrashlari, limit va maqsadlar, ovqatlanish, hafta yakuni — faqat gap bo'lganda"]),
-        )
-    else:
-        text = ui.join(
-            ui.title(pe.SETTINGS, "Настройки"),
-            ui.card("<b>🌅 Утренняя сводка</b> · 08:00", ["баланс, траты за неделю, план калорий на день, ближайшие платежи"]),
-            ui.card("<b>🌙 Вечернее напоминание</b> · 21:00", ["если сегодня не записал еду или расходы — напомнит; если всё записано — итог дня"]),
-            ui.card("<b>📊 Авто-отчёт</b>", ["воскресенье 20:00 (недельный) или 1-го числа (месячный)"]),
-            ui.card("<b>💡 Подсказки Джарвиса</b>", ["сроки долгов, всплески трат, лимиты и цели под угрозой, питание, итог недели — только когда есть что сказать"]),
-        )
+    text = ui.title(pe.SETTINGS, "Sozlamalar" if lang == "uz" else "Настройки")
     from .. import reminders as rem
 
     rems = await services.reminders(profile.telegram_id)
-    rem_lines = [f"• {h(rem.title(r))}" for r in rems] or [ui.muted(
-        "Yo'q. Yozing: «har kuni 20:00 da menga shu havolani yubor …»" if lang == "uz"
-        else "Нет. Напиши: «каждый день в 20:00 отправляй мне это видео …»")]
-    text = ui.join(text, ui.card(f"<b>⏰ {'Eslatmalar' if lang == 'uz' else 'Напоминания'}</b>", rem_lines))
+    if rems:
+        text = ui.join(text, ui.card(f"<b>⏰ {'Eslatmalar' if lang == 'uz' else 'Напоминания'}</b>", [f"• {h(rem.title(r))}" for r in rems]))
     await safe_edit(
         callback,
         text + hint,
@@ -192,8 +176,6 @@ async def render_wake(callback: CallbackQuery, profile: Profile, *, notice: str 
         ui.card(f"<b>{'Reja' if uz else 'План'}</b>", lines),
         ui.card(f"<b>{'Namoz vaqtlari (ertaga)' if uz else 'Намаз завтра'}</b>", [prayer.summary(rows, profile.lang, takbir=plan.takbir)]) if rows else None,
         ui.card(f"<b>{'Statistika' if uz else 'Статистика'}</b>", [stats]) if stats else None,
-        ui.muted("✍️ «takbir 5:20» · «meni 30 daqiqa oldin uyg'ot» · «bir hafta uyg'otma»" if uz
-                 else "✍️ «такбир в 5:20» · «буди за 30 минут» · «не буди неделю» · «позвони»"),
     ]
     text = ui.join(*blocks)
     if notice:
@@ -231,7 +213,9 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
         if not caller.available():
             await answer_now(callback, profile.tr("Звонки не настроены", "Qo'ng'iroq sozlanmagan"), alert=True)
             return
-        call_assistant.call_in_background(profile, lang=s.voice_lang)
+        if call_assistant.call_in_background(profile) is None:
+            await answer_now(callback, profile.tr("Уже звоню", "Allaqachon qo'ng'iroq qilyapman"))
+            return
         await answer_now(callback, profile.tr("Звоню 📞", "Qo'ng'iroq qilyapman 📞"))
         return
     if action == "toggle" and value in {"enabled", "call_enabled", "talk"}:
@@ -263,3 +247,147 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
         await services.save_wake_settings(profile.telegram_id, fields)
     await answer_now(callback, notice or "✅")
     await render_wake(callback, profile, notice=None)
+
+
+
+# ------------------------------------------------------------------ джарвис: голос, язык, характер, будильник
+async def render_jarvis(target, profile: Profile, *, notice: str | None = None) -> None:  # noqa: ANN001
+    """Раздел «Джарвис»: голос, язык звонков, обращение, тон, длина ответов, будильник."""
+    from datetime import timedelta
+
+    from .. import caller
+    from .. import persona as persona_mod
+    from .. import wake_runner
+    from ..keyboards import jarvis_settings_keyboard
+
+    uz = profile.lang == "uz"
+    p = await services.persona(profile.telegram_id)
+    s, plan = await wake_runner.plan_for(profile, profile.today + timedelta(days=1))
+    voice_ru, voice_uz = persona_mod.VOICES.get(p.voice, ("", ""))
+    tone = {"friendly": ("Дружелюбный", "Do'stona"), "calm": ("Спокойный", "Xotirjam"), "strict": ("Строгий", "Qat'iy")}[p.tone]
+    length = {"short": ("коротко", "qisqa"), "normal": ("обычно", "o'rtacha"), "detailed": ("подробно", "batafsil")}[p.verbosity]
+    if s.mode == "fixed":
+        alarm = (f"har kuni {s.fixed_time}" if uz else f"каждый день в {s.fixed_time}")
+    else:
+        alarm = (f"takbirdan {s.offset_min} daq oldin" if uz else f"за {s.offset_min} мин до такбира")
+    if plan.active and plan.wake_at:
+        alarm += (f" · ertaga {plan.wake_at:%H:%M}" if uz else f" · завтра в {plan.wake_at:%H:%M}")
+    if not s.enabled:
+        alarm = "o'chirilgan" if uz else "выключен"
+    lines = [
+        f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b>",
+        f"🗣 {'Qo`ng`iroq tili' if uz else 'Язык звонков'}: <b>{'o`zbekcha' if p.lang == 'uz' else 'русский'}</b>",
+        f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{'siz' if p.address == 'siz' else 'sen'}</b> · {'ohang' if uz else 'тон'}: <b>{tone[1] if uz else tone[0]}</b> · {'javoblar' if uz else 'ответы'}: <b>{length[1] if uz else length[0]}</b>",
+        f"⏰ {'Budilnik' if uz else 'Будильник'}: <b>{alarm}</b>",
+        f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
+    ]
+    text = ui.join(ui.title("🤖", "Jarvis" if uz else "Джарвис"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
+    if notice:
+        text += f"\n\n{notice}"
+    kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
+                                  verbosity=p.verbosity, alarm_mode=s.mode)
+    if isinstance(target, CallbackQuery):
+        await safe_edit(target, text, kb)
+    else:
+        from .. import screen as screen_mod
+
+        await screen_mod.show_screen(target.bot, target.chat.id, text, kb)
+
+
+@router.callback_query(F.data == "settings:jarvis")
+async def cb_jarvis(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    await state.clear()
+    await render_jarvis(callback, await get_profile(callback.from_user))
+
+
+@router.callback_query(F.data.startswith("jarvis:"))
+async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
+    from .. import persona as persona_mod
+
+    profile = await get_profile(callback.from_user)
+    _, action, *rest = callback.data.split(":")
+    value = rest[0] if rest else ""
+    if not await db.ensure_available("assistant_settings"):
+        await answer_now(callback, profile.tr("Нужна миграция 009", "009 migratsiyasi kerak"), alert=True)
+        return
+    if action == "sample":
+        await answer_now(callback, profile.tr("Записываю образец…", "Namuna tayyorlanmoqda…"))
+        await _send_voice_sample(callback, profile)
+        return
+    if action == "alarm" and value == "time":
+        await answer_now(callback)
+        await state.set_state(BotStates.waiting_alarm_time)
+        await safe_edit(callback, profile.tr("⏰ Во сколько будить? Напиши время, например <code>6:30</code>",
+                                             "⏰ Soat nechada uyg'otay? Vaqtni yozing, masalan <code>6:30</code>"),
+                        InlineKeyboardMarkup(inline_keyboard=[[_btn(profile.tr("Отмена", "Bekor"), "settings:jarvis")]]))
+        return
+    if action == "alarm" and value == "fajr":
+        if await db.ensure_available("wake_settings"):
+            await services.save_wake_settings(profile.telegram_id, {"mode": "fajr", "enabled": True})
+        await answer_now(callback, "🕌 ✅")
+        await render_jarvis(callback, profile)
+        return
+    fields = {}
+    if action == "voice" and value in persona_mod.VOICES:
+        fields["voice"] = value
+    elif action == "lang" and value in {"uz", "ru"}:
+        fields["lang"] = value
+    elif action == "address" and value in {"sen", "siz"}:
+        fields["address"] = value
+    elif action == "tone" and value in persona_mod.TONES:
+        fields["tone"] = value
+    elif action == "verbosity" and value in persona_mod.VERBOSITY:
+        fields["verbosity"] = value
+    if fields:
+        await services.save_persona(profile.telegram_id, fields)
+    await answer_now(callback, "✅")
+    await render_jarvis(callback, profile)
+    if "voice" in fields:
+        await _send_voice_sample(callback, profile)
+
+
+async def _send_voice_sample(callback: CallbackQuery, profile: Profile) -> None:
+    """Короткое голосовое выбранным голосом — выбрать на слух. Само исчезает через минуту."""
+    from aiogram.types import BufferedInputFile
+
+    from .. import screen as screen_mod
+    from .. import voice as voice_mod
+    from ..context import ai
+
+    p = await services.persona(profile.telegram_id)
+    name = p.name_for(profile.first_name)
+    phrase = (f"Assalomu alaykum, {name}. Men Jarvisman, sizga yordam berishga tayyorman." if p.lang == "uz"
+              else f"Ассалому алайкум, {name}. Я Джарвис, готова помочь.")
+    try:
+        pcm = await ai.synthesize(phrase, voice=p.voice)
+        ogg = await voice_mod.pcm_to_ogg(pcm) if pcm else None
+        if not ogg:
+            return
+        msg = await callback.bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jarvis.ogg"))
+        screen_mod._ephemerals[profile.telegram_id].append(msg.message_id)
+        import asyncio as _asyncio
+
+        _asyncio.create_task(screen_mod._delete_later(callback.bot, profile.telegram_id, msg.message_id, 60))
+    except Exception:
+        logger.warning("voice sample failed", exc_info=True)
+
+
+@router.message(BotStates.waiting_alarm_time, F.text)
+async def msg_alarm_time(message: Message, state: FSMContext) -> None:
+    from ..agent_tools import _time_arg
+
+    profile = await get_profile(message.from_user)
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    hhmm = _time_arg(raw)
+    if not hhmm:
+        await render_jarvis(message, profile, notice=profile.tr("Не понял время — напиши, например, 6:30", "Vaqtni tushunmadim — masalan 6:30"))
+        return
+    await state.clear()
+    if await db.ensure_available("wake_settings"):
+        await services.save_wake_settings(profile.telegram_id, {"mode": "fixed", "fixed_time": hhmm, "enabled": True})
+    await render_jarvis(message, profile, notice=profile.tr(f"⏰ Будильник: каждый день в {hhmm}", f"⏰ Budilnik: har kuni {hhmm}"))

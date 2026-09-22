@@ -347,6 +347,13 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
         snapshot = "(данные временно недоступны)"
     memory = await extra.memory_prompt(uid)
     try:
+        from .. import persona as persona_mod
+
+        rules = "ХАРАКТЕР (настройки пользователя): " + persona_mod.style_rules(await services.persona(uid))
+        memory = f"{memory}\n\n{rules}" if memory else rules
+    except Exception:
+        logger.debug("persona rules failed", exc_info=True)
+    try:
         result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory)
     except Exception:
         logger.exception("agent failed")

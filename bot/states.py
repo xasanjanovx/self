@@ -24,3 +24,5 @@ class BotStates(StatesGroup):
     waiting_task_input = State()
     waiting_goal_input = State()
     waiting_goal_amount = State()
+    # джарвис
+    waiting_alarm_time = State()
