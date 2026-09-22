@@ -258,8 +258,62 @@ def settings_keyboard(
     ]
     for rem_id, title in (reminders or [])[:8]:
         rows.append([_btn(f"🗑 {title}", f"settings:rem_del:{rem_id}", icon=_pe.ID_DELETE)])
+    rows.append([_btn("⏰📞 " + ("Uyg'otish va qo'ng'iroq" if lang == "uz" else "Подъём и звонки"), "settings:wake", style="primary")])
     rows.append([_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)])
     rows.append([_back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
+                           mode: str, days: list[int], hardness: str, tasks: list[str]) -> InlineKeyboardMarkup:
+    """Экран «Подъём и звонки»: всё, что чаще всего меняют, — кнопками."""
+    uz = lang == "uz"
+    weekdays = {1, 2, 3, 4, 5}
+    only_weekdays = set(days) == weekdays
+    rows = [
+        [_btn(("⏰ Uyg'otish: yoqilgan" if uz else "⏰ Подъём: включён") if enabled else ("⏰ Uyg'otish: o'chirilgan" if uz else "⏰ Подъём: выключен"),
+              "wakeset:toggle:enabled", style="success" if enabled else None)],
+        [_btn(("📞 Qo'ng'iroq: bor" if uz else "📞 Звонок: да") if call_enabled else ("📞 Faqat xabar" if uz else "📞 Только сообщение"),
+              "wakeset:toggle:call_enabled", style="success" if call_enabled else None)],
+        [_btn(("💬 Suhbat rejimi" if uz else "💬 Режим разговора") if talk else ("🔈 Faqat gapiradi" if uz else "🔈 Просто говорит"),
+              "wakeset:toggle:talk", style="success" if talk else None)],
+        [
+            _btn(("🇺🇿 O'zbekcha ✓" if voice_lang == "uz" else "🇺🇿 O'zbekcha") if uz else ("🇺🇿 Узбекский ✓" if voice_lang == "uz" else "🇺🇿 Узбекский"),
+                 "wakeset:lang:uz", style="primary" if voice_lang == "uz" else None),
+            _btn(("🇷🇺 Ruscha ✓" if voice_lang == "ru" else "🇷🇺 Ruscha") if uz else ("🇷🇺 Русский ✓" if voice_lang == "ru" else "🇷🇺 Русский"),
+                 "wakeset:lang:ru", style="primary" if voice_lang == "ru" else None),
+        ],
+        [
+            _btn(("🕌 Bomdodga" if uz else "🕌 К фаджру") + (" ✓" if mode == "fajr" else ""), "wakeset:mode:fajr", style="primary" if mode == "fajr" else None),
+            _btn(("🕘 Aniq vaqt" if uz else "🕘 Точное время") + (" ✓" if mode == "fixed" else ""), "wakeset:mode:fixed", style="primary" if mode == "fixed" else None),
+        ],
+        [
+            _btn("−5 " + ("daq" if uz else "мин"), "wakeset:offset:-5"),
+            _btn("+5 " + ("daq" if uz else "мин"), "wakeset:offset:5"),
+            _btn(("takbir −5" if uz else "такбир −5"), "wakeset:takbir:-5"),
+            _btn(("takbir +5" if uz else "такбир +5"), "wakeset:takbir:5"),
+        ],
+        [
+            _btn(("📅 Har kuni" if uz else "📅 Каждый день") + ("" if only_weekdays else " ✓"), "wakeset:days:all", style=None if only_weekdays else "primary"),
+            _btn(("📅 Ish kunlari" if uz else "📅 Будни") + (" ✓" if only_weekdays else ""), "wakeset:days:work", style="primary" if only_weekdays else None),
+        ],
+        [_btn(("🔥 Qattiqroq ✓" if hardness == "hard" else "🔥 Qattiqroq") if uz else ("🔥 Жёстче ✓" if hardness == "hard" else "🔥 Жёстче"),
+              "wakeset:toggle:hardness", style="danger" if hardness == "hard" else None)],
+    ]
+    labels_ru = {"water": "💧 Вода", "squats": "🏋️ Приседания", "pushups": "💪 Отжимания", "question": "🧮 Вопрос"}
+    labels_uz = {"water": "💧 Suv", "squats": "🏋️ Cho'kkalash", "pushups": "💪 Otjimaniye", "question": "🧮 Savol"}
+    labels = labels_uz if uz else labels_ru
+    task_row = []
+    for key in ("water", "squats", "pushups", "question"):
+        on = key in tasks
+        task_row.append(_btn(labels[key] + (" ✓" if on else ""), f"wakeset:task:{key}", style="success" if on else None))
+        if len(task_row) == 2:
+            rows.append(task_row)
+            task_row = []
+    if task_row:
+        rows.append(task_row)
+    rows.append([_btn("📞 " + ("Hozir qo'ng'iroq qil" if uz else "Позвонить сейчас"), "wakeset:calltest", style="primary")])
+    rows.append([_back(lang, "menu:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

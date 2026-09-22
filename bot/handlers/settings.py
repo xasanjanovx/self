@@ -144,3 +144,122 @@ async def cb_reminder_delete(callback: CallbackQuery) -> None:
     await db.delete_reminder(profile.telegram_id, rem_id)
     services.invalidate_reminders(profile.telegram_id)
     await render_settings(callback, profile)
+
+
+# ------------------------------------------------------------------ подъём и звонки
+async def render_wake(callback: CallbackQuery, profile: Profile, *, notice: str | None = None) -> None:
+    """Экран «Подъём и звонки»: что сейчас настроено и во сколько разбудим завтра."""
+    from datetime import timedelta
+
+    from .. import caller
+    from .. import prayer
+    from .. import wake as wake_mod
+    from .. import wake_runner
+    from ..keyboards import wake_settings_keyboard
+
+    uz = profile.lang == "uz"
+    if not await db.ensure_available("wake_settings"):
+        await safe_edit(callback, "⚠️ " + profile.tr(
+            "Нужна миграция: выполни <code>sql/migrations/008_wake.sql</code> в Supabase → SQL Editor.",
+            "Migratsiya kerak: Supabase → SQL Editor da <code>sql/migrations/008_wake.sql</code> ni bajaring."),
+            settings_keyboard(profile.lang, morning=True, evening=True, report_enabled=True, report_frequency="weekly"))
+        return
+    s = wake_mod.WakeSettings.from_row(await services.wake_settings(profile.telegram_id))
+    tomorrow = profile.today + timedelta(days=1)
+    _, plan = await wake_runner.plan_for(profile, tomorrow)
+    rows = await prayer.timings(tomorrow, latitude=s.latitude, longitude=s.longitude, method=s.calc_method)
+
+    when = plan.wake_at.strftime("%H:%M") if plan.wake_at else "—"
+    lines = [
+        f"{'Ertaga uyg`otaman' if uz else 'Завтра разбужу'}: <b>{when}</b>" if plan.active
+        else ("Ertaga uyg'otmayman" if uz else "Завтра не бужу") + f" ({plan.reason})",
+        f"{'Bomdod azoni' if uz else 'Азан фаджра'}: {plan.fajr or '—'} · {'takbir' if uz else 'такбир'}: <b>{plan.takbir or '—'}</b> "
+        f"({'azondan' if uz else 'после азана'} +{s.takbir_offset_min} {'daq' if uz else 'мин'})",
+        f"{'Takbirdan oldin' if uz else 'До такбира'}: {s.offset_min} {'daqiqa' if uz else 'минут'}",
+    ]
+    if s.mode == "fixed":
+        lines.append(f"{'Aniq vaqt' if uz else 'Точное время'}: {s.fixed_time or '—'}")
+    if s.skip_until:
+        lines.append(("Uyg'otmayman" if uz else "Не бужу") + f" {'gacha' if uz else 'до'} {s.skip_until:%d.%m}")
+    call_state = ("sozlangan ✅" if uz else "настроены ✅") if caller.available() else ("sozlanmagan ⚠️" if uz else "не настроены ⚠️")
+    lines.append(f"{'Qo`ng`iroqlar' if uz else 'Звонки'}: {call_state}")
+
+    history = await services.wake_history(profile.telegram_id, days=14)
+    stats = wake_mod.stats_line(history, profile.lang) if history else None
+
+    blocks = [
+        ui.title("⏰", "Uyg'otish va qo'ng'iroq" if uz else "Подъём и звонки"),
+        ui.card(f"<b>{'Reja' if uz else 'План'}</b>", lines),
+        ui.card(f"<b>{'Namoz vaqtlari (ertaga)' if uz else 'Намаз завтра'}</b>", [prayer.summary(rows, profile.lang, takbir=plan.takbir)]) if rows else None,
+        ui.card(f"<b>{'Statistika' if uz else 'Статистика'}</b>", [stats]) if stats else None,
+        ui.muted("✍️ «takbir 5:20» · «meni 30 daqiqa oldin uyg'ot» · «bir hafta uyg'otma»" if uz
+                 else "✍️ «такбир в 5:20» · «буди за 30 минут» · «не буди неделю» · «позвони»"),
+    ]
+    text = ui.join(*blocks)
+    if notice:
+        text += f"\n\n{notice}"
+    await safe_edit(callback, text, wake_settings_keyboard(
+        profile.lang, enabled=s.enabled, call_enabled=s.call_enabled, talk=s.talk, voice_lang=s.voice_lang,
+        mode=s.mode, days=list(s.days_of_week), hardness=s.hardness, tasks=list(s.confirm_tasks)))
+
+
+@router.callback_query(F.data == "settings:wake")
+async def cb_wake_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    await state.clear()
+    await render_wake(callback, await get_profile(callback.from_user))
+
+
+@router.callback_query(F.data.startswith("wakeset:"))
+async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
+    """Кнопки экрана подъёма: переключатели, язык, режим, сдвиг минут, дни, задания, тестовый звонок."""
+    from .. import call_assistant
+    from .. import caller
+    from .. import wake as wake_mod
+
+    profile = await get_profile(callback.from_user)
+    parts = callback.data.split(":")
+    action, value = parts[1], (parts[2] if len(parts) > 2 else "")
+    if not await db.ensure_available("wake_settings"):
+        await answer_now(callback, profile.tr("Нужна миграция 008_wake.sql", "008_wake.sql migratsiyasi kerak"), alert=True)
+        return
+    s = wake_mod.WakeSettings.from_row(await services.wake_settings(profile.telegram_id))
+    fields: dict = {}
+    notice = None
+
+    if action == "calltest":
+        if not caller.available():
+            await answer_now(callback, profile.tr("Звонки не настроены", "Qo'ng'iroq sozlanmagan"), alert=True)
+            return
+        call_assistant.call_in_background(profile, lang=s.voice_lang)
+        await answer_now(callback, profile.tr("Звоню 📞", "Qo'ng'iroq qilyapman 📞"))
+        return
+    if action == "toggle" and value in {"enabled", "call_enabled", "talk"}:
+        fields[value] = not getattr(s, value)
+    elif action == "toggle" and value == "hardness":
+        fields["hardness"] = "normal" if s.hardness == "hard" else "hard"
+    elif action == "lang" and value in {"uz", "ru"}:
+        fields["voice_lang"] = value
+    elif action == "mode" and value in {"fajr", "fixed"}:
+        fields["mode"] = value
+        if value == "fixed" and not s.fixed_time:
+            fields["fixed_time"] = "06:30"
+    elif action == "offset":
+        fields["offset_min"] = max(0, min(180, s.offset_min + int(value)))
+    elif action == "takbir":
+        fields["takbir_offset_min"] = max(0, min(120, s.takbir_offset_min + int(value)))
+    elif action == "days":
+        fields["days_of_week"] = [1, 2, 3, 4, 5] if value == "work" else [1, 2, 3, 4, 5, 6, 7]
+    elif action == "task" and value in wake_mod.TASKS:
+        tasks = list(s.confirm_tasks)
+        if value in tasks and len(tasks) > 1:
+            tasks.remove(value)
+        elif value not in tasks:
+            tasks.append(value)
+        else:
+            notice = profile.tr("Хотя бы одно задание нужно оставить", "Kamida bitta vazifa qolishi kerak")
+        fields["confirm_tasks"] = tasks
+    if fields:
+        await services.save_wake_settings(profile.telegram_id, fields)
+    await answer_now(callback, notice or "✅")
+    await render_wake(callback, profile, notice=None)
