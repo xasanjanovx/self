@@ -141,6 +141,22 @@ async def call_now(profile: Profile, *, topic: str = "", lang: str | None = None
             "transcript": transcript}
 
 
+async def _notify_failure(profile: Profile, error: str) -> None:
+    """Звонок не состоялся — сказать об этом в чат, а не молчать."""
+    reasons = {
+        "tts unavailable": ("Не смог синтезировать голос — отвечаю текстом.", "Ovozni tayyorlay olmadim — matn bilan javob beraman."),
+        "caller is not configured": ("Звонки пока не настроены.", "Qo'ng'iroqlar hali sozlanmagan."),
+    }
+    ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
+                                 "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
+    try:
+        from .context import bot_instance
+
+        await bot_instance().send_message(profile.telegram_id, f"📵 {profile.tr(ru, uz)}")
+    except Exception:
+        logger.debug("call failure notice failed", exc_info=True)
+
+
 def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = None) -> asyncio.Task:
     """Звонок фоном: инструмент агента должен ответить сразу, а не ждать конца разговора."""
     async def runner() -> None:
@@ -151,8 +167,11 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
 
             await services.log_agent(profile.telegram_id, text=f"call: {topic or 'разговор'}", kind="call",
                                      reply=" | ".join(result.get("transcript") or [])[:900], ok=bool(result.get("ok")))
+            if not result.get("ok"):
+                await _notify_failure(profile, str(result.get("error") or ""))
         except Exception:
             logger.exception("assistant call failed")
+            await _notify_failure(profile, "internal error")
 
     return asyncio.create_task(runner(), name=f"call-{profile.telegram_id}")
 

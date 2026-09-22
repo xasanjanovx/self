@@ -345,11 +345,24 @@ class AIService:
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
         }
-        candidate = self._first_candidate(await self._post(self.tts_model, payload))
-        for part in (candidate.get("content") or {}).get("parts") or []:
-            blob = part.get("inlineData") if isinstance(part, dict) else None
-            if blob and blob.get("data"):
-                return base64.b64decode(blob["data"])
+        # TTS изредка возвращает ответ без аудио (или ловит лимит) — в звонке это фатально,
+        # поэтому пробуем ещё раз, а причину пишем в лог.
+        last: dict[str, Any] = {}
+        for attempt in range(3):
+            try:
+                candidate = self._first_candidate(await self._post(self.tts_model, payload))
+            except Exception as exc:
+                logger.warning("TTS attempt %s failed: %s", attempt + 1, str(exc)[:200])
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            for part in (candidate.get("content") or {}).get("parts") or []:
+                blob = part.get("inlineData") if isinstance(part, dict) else None
+                if blob and blob.get("data"):
+                    return base64.b64decode(blob["data"])
+            last = candidate
+            logger.warning("TTS returned no audio (attempt %s, finish=%s) for %r", attempt + 1, candidate.get("finishReason"), text[:60])
+            await asyncio.sleep(0.8 * (attempt + 1))
+        logger.error("TTS gave up after 3 attempts (finish=%s)", last.get("finishReason"))
         return None
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
