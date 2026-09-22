@@ -1,7 +1,7 @@
 """Подъём на фаджр: план дня, повторные звонки, задания, подтверждение."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from bot import prayer, wake
