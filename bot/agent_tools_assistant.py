@@ -8,12 +8,14 @@ from datetime import date, timedelta
 from typing import Any
 
 from . import cache
+from . import caller
 from . import finance as fin
 from . import goals as goals_mod
 from . import habits
 from . import services
+from . import wake as wake_mod
 from . import undo
-from .agent_tools import DATE, ID, IDS, P, ToolContext, _bool, _num, _str, _time_arg, parse_day, tool
+from .agent_tools import ARR, DATE, ID, IDS, P, ToolContext, _bool, _int, _num, _str, _time_arg, parse_day, tool
 from .context import db
 
 
@@ -452,6 +454,148 @@ async def _list_deadlines(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
     if not await db.ensure_available("debt_deadlines"):
         return _migration_error("debt_deadlines")
     return {"deadlines": [deadline_view(r, ctx.profile.today) for r in await services.debt_deadlines(ctx.uid)]}
+
+
+# ------------------------------------------------------------------ подъём на фаджр
+WAKE_TASKS = ARR({"type": "STRING", "enum": list(wake_mod.TASKS)}, "какие задания на подтверждение подъёма разрешены")
+
+
+@tool("get_wake", "Настройки подъёма и план на завтра: во сколько звонить, такбир фаджра, времена намазов, статистика подъёмов за 2 недели. "
+      "Вопросы «во сколько ты меня разбудишь?», «когда такбир?», «когда намаз?» — сюда.")
+async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    if not await db.ensure_available("wake_settings"):
+        return {"error": "table wake_settings missing — run sql/migrations/008_wake.sql in Supabase"}
+    from . import prayer
+    from . import wake_runner
+
+    s, plan = await wake_runner.plan_for(ctx.profile)
+    tomorrow = ctx.profile.today + timedelta(days=1)
+    _, plan_tomorrow = await wake_runner.plan_for(ctx.profile, tomorrow)
+    rows = await prayer.timings(ctx.profile.today, latitude=s.latitude, longitude=s.longitude, method=s.calc_method)
+    history = await services.wake_history(ctx.uid, days=14)
+    return {
+        "settings": {"enabled": s.enabled, "mode": s.mode, "fixed_time": s.fixed_time, "offset_min": s.offset_min,
+                     "takbir_offset_min": s.takbir_offset_min, "days_of_week": list(s.days_of_week), "call_enabled": s.call_enabled,
+                     "tasks": list(s.confirm_tasks), "hardness": s.hardness, "skip_until": s.skip_until.isoformat() if s.skip_until else None},
+        "today": {"active": plan.active, "reason": plan.reason, "wake_at": plan.wake_at.strftime("%H:%M") if plan.wake_at else None,
+                  "fajr_azan": plan.fajr, "takbir": plan.takbir},
+        "tomorrow": {"active": plan_tomorrow.active, "wake_at": plan_tomorrow.wake_at.strftime("%H:%M") if plan_tomorrow.wake_at else None,
+                     "fajr_azan": plan_tomorrow.fajr, "takbir": plan_tomorrow.takbir},
+        "prayer_times_today": rows,
+        "caller_ready": caller.available(),
+        "history": [{"day": str(r.get("day"))[:10], "woke_at": r.get("woke_at"), "before_takbir": r.get("before_takbir"),
+                     "attempts": r.get("attempts"), "task": r.get("task_kind")} for r in history],
+    }
+
+
+@tool("set_wake", "Изменить подъём словами: «буди за 30 минут до такбира» (offset_min), «такбир в 5:20» (takbir_time — пересчитает поправку), "
+      "«буди в 6:30» (mode=fixed + fixed_time), «буди по будням» (days=[1,2,3,4,5]), «выключи будильник» (enabled=false), "
+      "«не звони, пиши» (call_enabled=false), «не буди до понедельника» (skip_until), «жёстче» (hardness=hard), какие задания оставить (tasks).",
+      {"enabled": P("BOOLEAN", "включить/выключить подъём"), "mode": P("STRING", "fajr — до такбира; fixed — фиксированное время", enum=["fajr", "fixed"]),
+       "fixed_time": P("STRING", "HH:MM для mode=fixed"), "offset_min": P("NUMBER", "за сколько минут до такбира звонить"),
+       "takbir_time": P("STRING", "во сколько такбир (HH:MM) — пересчитает поправку к азану"),
+       "takbir_offset_min": P("NUMBER", "минут между азаном фаджра и такбиром"),
+       "days": ARR({"type": "NUMBER"}, "дни недели 1=пн … 7=вс"), "call_enabled": P("BOOLEAN", "звонить или только писать"),
+       "tasks": WAKE_TASKS, "hardness": P("STRING", "normal | hard", enum=["normal", "hard"]),
+       "skip_until": DATE, "skip_days": P("NUMBER", "не будить столько дней подряд, начиная с сегодня")})
+async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    if not await db.ensure_available("wake_settings"):
+        return {"error": "table wake_settings missing — run sql/migrations/008_wake.sql in Supabase"}
+    from . import prayer
+    from . import wake_runner
+
+    current = await services.wake_settings(ctx.uid)
+    s = wake_mod.WakeSettings.from_row(current)
+    fields: dict[str, Any] = {}
+    if (v := _bool(a.get("enabled"))) is not None:
+        fields["enabled"] = v
+    if (v := _bool(a.get("call_enabled"))) is not None:
+        fields["call_enabled"] = v
+    if (mode := _str(a.get("mode"))) in {"fajr", "fixed"}:
+        fields["mode"] = mode
+    if (ft := _time_arg(a.get("fixed_time"))):
+        fields["fixed_time"] = ft
+        fields.setdefault("mode", "fixed")
+    if (off := _int(a.get("offset_min"))) is not None and 0 <= off <= 180:
+        fields["offset_min"] = off
+    if (tk := _time_arg(a.get("takbir_time"))):
+        rows = await prayer.timings(ctx.profile.today, latitude=s.latitude, longitude=s.longitude, method=s.calc_method)
+        delta = prayer.offset_from_takbir(rows.get("Fajr"), tk)
+        if delta is None:
+            return {"error": "takbir_time must be within 2 hours after the fajr azan"}
+        fields["takbir_offset_min"] = delta
+    if (tof := _int(a.get("takbir_offset_min"))) is not None and 0 <= tof <= 120:
+        fields["takbir_offset_min"] = tof
+    if a.get("days"):
+        days = sorted({int(_num(d) or 0) for d in (a.get("days") or []) if _num(d) and 1 <= int(_num(d)) <= 7})
+        if days:
+            fields["days_of_week"] = days
+    if a.get("tasks"):
+        tasks = [t for t in (_str(x) for x in (a.get("tasks") or [])) if t in wake_mod.TASKS]
+        if tasks:
+            fields["confirm_tasks"] = tasks
+    if (hard := _str(a.get("hardness"))) in {"normal", "hard"}:
+        fields["hardness"] = hard
+    if (skip_days := _int(a.get("skip_days"))) is not None and skip_days > 0:
+        fields["skip_until"] = (ctx.profile.today + timedelta(days=skip_days - 1)).isoformat()
+    elif _str(a.get("skip_until")):
+        day = parse_day(a.get("skip_until"), ctx.profile.today)
+        fields["skip_until"] = day.isoformat() if day else None
+    if not fields:
+        return {"error": "nothing to change"}
+    before = {k: current.get(k) for k in fields}
+    await services.save_wake_settings(ctx.uid, fields)
+    undo.push(ctx.uid, {"type": "wake_settings", "fields": before})
+    ctx.mutated = True
+    _, plan = await wake_runner.plan_for(ctx.profile, ctx.profile.today + timedelta(days=1))
+    return {"saved": fields, "tomorrow": {"wake_at": plan.wake_at.strftime("%H:%M") if plan.wake_at else None, "takbir": plan.takbir, "active": plan.active}}
+
+
+@tool("mark_awake", "Отметить, что пользователь проснулся («проснулся», «uyg'ondim», «я встал») — звонки на сегодня прекращаются. "
+      "snooze_minutes — отложить звонок на N минут («ещё 10 минут»).",
+      {"snooze_minutes": P("NUMBER", "отложить на столько минут вместо подтверждения")})
+async def _mark_awake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import wake_runner
+
+    minutes = _int(a.get("snooze_minutes"))
+    if minutes and minutes > 0:
+        until = await wake_runner.snooze(ctx.profile, minutes)
+        return {"snoozed_until": until.astimezone(ctx.profile.tz).strftime("%H:%M")}
+    if not await db.ensure_available("wake_log"):
+        return {"error": "table wake_log missing — run sql/migrations/008_wake.sql in Supabase"}
+    from .context import bot_instance
+
+    result = await wake_runner.mark_awake(bot_instance(), ctx.profile, source="agent", notify=False)
+    ctx.mutated = True
+    return {"awake": True, "before_takbir": result["before_takbir"], "streak_days": result["streak"], "takbir": result["plan"].takbir}
+
+
+@tool("prayer_times", "Времена намаза на день (Андижан по умолчанию): азан фаджра, такбир джамоата, пешин, аср, шом, хуфтон; и какой намаз ближайший.",
+      {"date": DATE})
+async def _prayer_times(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import prayer
+    from . import wake_runner
+
+    day = parse_day(a.get("date"), ctx.profile.today) or ctx.profile.today
+    s, _ = await wake_runner.plan_for(ctx.profile, day)
+    rows = await prayer.timings(day, latitude=s.latitude, longitude=s.longitude, method=s.calc_method)
+    if not rows:
+        return {"error": "prayer times are not available right now"}
+    takbir = prayer.takbir_time(rows.get("Fajr"), s.takbir_offset_min)
+    nxt = prayer.next_prayer(rows, ctx.profile.now, ctx.profile.lang) if day == ctx.profile.today else None
+    return {"date": day.isoformat(), "times": rows, "fajr_takbir": takbir.strftime("%H:%M") if takbir else None,
+            "next": {"name": nxt[0], "at": nxt[1], "in_minutes": nxt[2]} if nxt else None}
+
+
+@tool("daily_verse", "Аят дня на узбекском (перевод Муҳаммад Содиқ Муҳаммад Юсуф) и хадис дня (арабский + русский перевод с номером). "
+      "Хадис на узбекский переводи сам и обязательно помечай, что это твой перевод, с указанием источника.", {"date": DATE})
+async def _daily_verse(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import daily
+
+    day = parse_day(a.get("date"), ctx.profile.today) or ctx.profile.today
+    verse = await daily.verse_of_day(day)
+    hadith = await daily.hadith_of_day(day)
+    return {"verse": verse, "hadith": hadith}
 
 
 # ------------------------------------------------------------------ snapshot fragment

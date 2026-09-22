@@ -56,7 +56,15 @@ async def morning_brief(profile: Profile) -> str:
                 when = ("bugun" if lang == "uz" else "сегодня") if day == today.day else f"{day:02d}"
                 lines.append(f"   • {when}: {h(p.get('title'))} — {fin.fmt_money(float(p.get('amount') or 0))}")
 
-    # --- дела на сегодня, сроки долгов, цели
+    # --- намаз (если подъём настроен), дела на сегодня, сроки долгов, цели
+    try:
+        from . import wake_runner
+
+        namoz = await wake_runner.morning_extra(profile)
+        if namoz:
+            lines.append(namoz)
+    except Exception:
+        pass
     extra = await _assistant_lines(profile, today, lang)
     if extra:
         lines.append("")

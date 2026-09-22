@@ -293,6 +293,53 @@ async def _proactive_tick(bot: Bot) -> None:
                 logger.exception("proactive alert %s failed for %s", alert.key, telegram_id)
 
 
+async def _wake_tick(bot: Bot) -> None:
+    """Подъём на фаджр: раз в 20 секунд смотрим, не пора ли звонить (и перезванивать)."""
+    from . import wake as wake_mod
+    from . import wake_runner
+
+    if not db.available("wake_settings") or not db.available("wake_log"):
+        return
+    user_ids = sorted(settings.allowed_telegram_ids) or [int(u["telegram_id"]) for u in await db.list_users()]
+    now_utc = datetime.now(timezone.utc)
+    for telegram_id in user_ids:
+        try:
+            profile = await profile_by_id(telegram_id)
+            s, plan = await wake_runner.plan_for(profile)
+            if not plan.active:
+                continue
+            log = await services.wake_log(telegram_id, plan.day)
+            snoozed = wake_runner.snoozed_until(telegram_id)
+            if snoozed and now_utc < snoozed:
+                continue
+            state_last = None
+            if log and log.get("attempts"):
+                # последняя попытка держится в памяти процесса; после рестарта считаем, что пауза прошла
+                state_last = wake_runner._active.get(telegram_id, {}).get("last")
+            ok, reason = wake_mod.should_call(plan, {**(log or {}), "last_attempt_at": state_last}, now_utc, s)
+            if not ok:
+                continue
+            await wake_runner.run_attempt(bot, profile, s, plan, log)
+        except Exception:
+            logger.exception("wake tick failed for %s", telegram_id)
+
+
+async def wake_worker(bot: Bot) -> None:
+    from . import caller
+
+    logger.info("Wake worker started (caller: %s)", caller.status())
+    if caller.configured():
+        await caller.start()
+    while True:
+        try:
+            await _wake_tick(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Wake worker iteration failed")
+        await asyncio.sleep(20)
+
+
 async def proactive_worker(bot: Bot) -> None:
     logger.info("Proactive worker started")
     await asyncio.sleep(20)
@@ -319,4 +366,4 @@ async def reminder_worker(bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
-__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker"]
+__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker", "wake_worker"]

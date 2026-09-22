@@ -88,7 +88,7 @@ class Database:
             "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
-            "user_memory", "agent_log", "weight_logs", "goal_checkins",
+            "user_memory", "agent_log", "weight_logs", "goal_checkins", "wake_settings", "wake_log",
         )
 
         async def probe(name: str) -> str | None:
@@ -627,6 +627,34 @@ class Database:
     async def delete_goals(self, telegram_id: int, ids: list[Any]) -> None:
         if ids:
             await self._table("savings_goals").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+
+    # ---------------------------------------------------------- 008: подъём (wake)
+    async def get_wake_settings(self, telegram_id: int) -> dict[str, Any]:
+        res = await self._table("wake_settings").select("*").eq("telegram_id", telegram_id).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def save_wake_settings(self, telegram_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        payload = {"telegram_id": telegram_id, **fields, "updated_at": datetime.now(timezone.utc).isoformat()}
+        res = await self._table("wake_settings").upsert(payload, on_conflict="telegram_id").execute()
+        rows = res.data or []
+        return rows[0] if rows else payload
+
+    async def get_wake_log(self, telegram_id: int, day: str) -> dict[str, Any] | None:
+        res = await self._table("wake_log").select("*").eq("telegram_id", telegram_id).eq("day", day).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    async def save_wake_log(self, telegram_id: int, day: str, fields: dict[str, Any]) -> dict[str, Any]:
+        payload = {"telegram_id": telegram_id, "day": day, **fields}
+        res = await self._table("wake_log").upsert(payload, on_conflict="telegram_id,day").execute()
+        rows = res.data or []
+        return rows[0] if rows else payload
+
+    async def list_wake_log(self, telegram_id: int, *, days: int = 30) -> list[dict[str, Any]]:
+        since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        res = await self._table("wake_log").select("*").eq("telegram_id", telegram_id).gte("day", since).order("day", desc=True).execute()
+        return res.data or []
 
     async def list_debt_deadlines(self, telegram_id: int) -> list[dict[str, Any]]:
         res = await self._table("debt_deadlines").select("*").eq("telegram_id", telegram_id).order("due_date").execute()

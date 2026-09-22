@@ -15,8 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.txt requirements-caller.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# Звонки в Telegram (аккаунт-помощник). Если колёса ntgcalls недоступны для платформы —
+# образ всё равно собирается, бот просто будит сообщениями (bot/caller.py это переживает).
+RUN pip install --no-cache-dir -r requirements-caller.txt || echo "caller deps skipped"
 
 COPY . .
 CMD ["python", "-m", "bot.main"]

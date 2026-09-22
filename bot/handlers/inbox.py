@@ -23,6 +23,7 @@ from . import agent
 from . import finance as finance_h
 from . import nutrition as nutrition_h
 from . import vacancy as vacancy_h
+from . import wake as wake_h
 from .common import get_profile, message_text, safe_delete, show_progress, transcribe_audio
 from .menu import send_main_menu
 
@@ -73,6 +74,13 @@ async def route_text(
         await send_main_menu(message, profile, force_new=True)
         return True
     voice = transcript is not None
+    # подъём: «проснулся / ещё 10 минут» и ответ на задание — раньше всех остальных правил
+    if await wake_h.handle_awake_text(message, profile, text):
+        await safe_delete(message)
+        return True
+    if await wake_h.handle_task_reply(message, profile, text=text, transcript=transcript):
+        await safe_delete(message)
+        return True
     if cache.get(profile.telegram_id, ("agent_ask",)):
         # Джарвис ждёт ответ на свой вопрос — любой текст («вторую», «25000», «да, долг») идёт ему
         if await agent.handle_command(message, state, profile, text, voice=voice):
@@ -98,8 +106,10 @@ async def route_text(
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:
-    """Фото: с подписью-вакансией → вакансия, иначе → еда."""
+    """Фото: подтверждение подъёма (пустой стакан) → вакансия по подписи → иначе еда."""
     caption = message_text(message)
+    if await wake_h.handle_task_reply(message, profile, text=caption, has_photo=True):
+        return
     if caption and vac.looks_like_vacancy(caption):
         await vacancy_h.process_vacancy(message, state, profile, caption)
         return
@@ -129,6 +139,10 @@ async def fallback(message: Message, state: FSMContext) -> None:
         except Exception:
             logger.exception("transcribe failed")
             transcript = ""
+        seconds = int(getattr(message.voice or message.audio, "duration", 0) or 0)
+        if await wake_h.handle_task_reply(message, profile, transcript=transcript, voice_seconds=seconds):
+            await safe_delete(message)
+            return
         if transcript and await route_text(message, state, profile, transcript, transcript=transcript):
             return
         await safe_delete(message)

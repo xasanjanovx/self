@@ -16,7 +16,7 @@ from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
 from .middlewares import AccessMiddleware, DedupeMiddleware, global_error_handler
-from .workers import brief_worker, proactive_worker, reminder_worker, report_worker
+from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, wake_worker
 
 logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
@@ -37,6 +37,9 @@ class PremiumBot(Bot):
 
 
 async def on_startup(bot: Bot) -> None:
+    from .context import set_bot
+
+    set_bot(bot)
     await db.connect()
     missing = await db.health_check()
     if missing:
@@ -61,6 +64,7 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(brief_worker(bot), name="brief-worker"))
     background_tasks.append(asyncio.create_task(reminder_worker(bot), name="reminder-worker"))
     background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
+    background_tasks.append(asyncio.create_task(wake_worker(bot), name="wake-worker"))
     logger.info("Bot started. Allowed users: %s", sorted(settings.allowed_telegram_ids) or "everyone")
 
 
@@ -73,6 +77,9 @@ async def on_shutdown() -> None:
         except (asyncio.CancelledError, Exception):
             pass
     background_tasks.clear()
+    from . import caller
+
+    await caller.stop()
     await ai.close()
 
 

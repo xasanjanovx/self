@@ -289,6 +289,35 @@ async def uncheck(uid: int, *, goal_id: Any, day: date) -> None:
     cache.invalidate(uid, "checkins")
 
 
+# ------------------------------------------------------------------ 008: подъём (wake)
+async def wake_settings(uid: int) -> dict[str, Any]:
+    if not db.available("wake_settings"):
+        return {}
+    return await cache.remember(uid, ("wake",), 300, lambda: db.get_wake_settings(uid))
+
+
+async def save_wake_settings(uid: int, fields: dict[str, Any]) -> dict[str, Any]:
+    row = await db.save_wake_settings(uid, fields)
+    cache.invalidate(uid, "wake")
+    return row
+
+
+async def wake_log(uid: int, day: date) -> dict[str, Any] | None:
+    if not db.available("wake_log"):
+        return None
+    return await db.get_wake_log(uid, day.isoformat())
+
+
+async def save_wake_log(uid: int, day: date, fields: dict[str, Any]) -> dict[str, Any]:
+    return await db.save_wake_log(uid, day.isoformat(), fields)
+
+
+async def wake_history(uid: int, *, days: int = 30) -> list[dict[str, Any]]:
+    if not db.available("wake_log"):
+        return []
+    return await db.list_wake_log(uid, days=days)
+
+
 # ------------------------------------------------------------------ 006: agent memory / log
 async def user_memory(uid: int) -> dict[str, Any]:
     if not db.available("user_memory"):

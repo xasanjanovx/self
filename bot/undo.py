@@ -24,6 +24,7 @@
   delete_goals {ids} · restore_goals {rows} · goal_fields {goal_id, fields}
   delete_checkin {goal_id, day} · restore_checkin {goal_id, day} · restore_weight {day, row|None}
   restore_debt_deadline {person, side, row|None}
+  wake_settings {fields}
 """
 from __future__ import annotations
 
@@ -222,6 +223,11 @@ async def _apply_step(uid: int, step: dict[str, Any], *, tz_name: str) -> None:
         else:
             await db.delete_weight_logs(uid, [str(step["day"])])
         cache.invalidate(uid, "weights")
+    elif kind == "wake_settings":
+        fields = {k: v for k, v in (step.get("fields") or {}).items() if v is not None}
+        if fields:
+            await db.save_wake_settings(uid, fields)
+        cache.invalidate(uid, "wake")
     elif kind == "restore_debt_deadline":
         row = step.get("row")
         if row:
