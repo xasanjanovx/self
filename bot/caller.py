@@ -98,7 +98,7 @@ async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_se
     except Exception as exc:
         return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
     try:
-        await _calls.play(int(user_id), audio_path, config=CallConfig(timeout=ring_seconds, auto_start=True))
+        await _calls.play(int(user_id), audio_path, config=CallConfig(timeout=ring_seconds))
     except Exception as exc:
         name = type(exc).__name__
         # частые случаи: не взяли трубку / отклонили / занято — это не ошибка, просто «не ответил»
@@ -169,7 +169,7 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
     path = await cd.pcm_to_file(greeting_pcm)
     try:
         try:
-            await _calls.play(uid, path, config=CallConfig(timeout=ring_seconds, auto_start=True))
+            await _calls.play(uid, path, config=CallConfig(timeout=ring_seconds))
         except Exception as exc:
             name = type(exc).__name__.lower()
             if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
