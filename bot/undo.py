@@ -22,6 +22,7 @@
   delete_notes {ids} · restore_notes {rows}
   delete_tasks {ids} · restore_tasks {rows} · task_fields {task_id, fields}
   delete_goals {ids} · restore_goals {rows} · goal_fields {goal_id, fields}
+  delete_checkin {goal_id, day} · restore_checkin {goal_id, day} · restore_weight {day, row|None}
   restore_debt_deadline {person, side, row|None}
 """
 from __future__ import annotations
@@ -202,11 +203,25 @@ async def _apply_step(uid: int, step: dict[str, Any], *, tz_name: str) -> None:
         cache.invalidate(uid, "goals")
     elif kind == "restore_goals":
         for r in step.get("rows") or []:
-            await db.add_goal(uid, title=str(r.get("title") or ""), target_amount=float(r.get("target_amount") or 0), saved_amount=float(r.get("saved_amount") or 0), deadline=r.get("deadline"))
+            await db.add_goal(uid, title=str(r.get("title") or ""), target_amount=float(r.get("target_amount") or 0), saved_amount=float(r.get("saved_amount") or 0), deadline=r.get("deadline"),
+                              kind=str(r.get("kind") or "save"), params=r.get("params") if isinstance(r.get("params"), dict) else None, unit=r.get("unit"))
         cache.invalidate(uid, "goals")
     elif kind == "goal_fields":
         await db.update_goal(uid, step["goal_id"], step.get("fields") or {})
         cache.invalidate(uid, "goals")
+    elif kind == "delete_checkin":
+        await db.delete_checkin(uid, goal_id=step["goal_id"], day=str(step["day"]))
+        cache.invalidate(uid, "checkins")
+    elif kind == "restore_checkin":
+        await db.upsert_checkin(uid, goal_id=step["goal_id"], day=str(step["day"]))
+        cache.invalidate(uid, "checkins")
+    elif kind == "restore_weight":
+        row = step.get("row")
+        if row:
+            await db.upsert_weight_log(uid, weight=float(row.get("weight") or 0), day=str(step["day"]))
+        else:
+            await db.delete_weight_logs(uid, [str(step["day"])])
+        cache.invalidate(uid, "weights")
     elif kind == "restore_debt_deadline":
         row = step.get("row")
         if row:

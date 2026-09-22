@@ -12,6 +12,8 @@
   rec_low      — регулярный платёж через ≤ 2 дня, а на счетах не хватает;
   budget_proj  — при текущем темпе лимит категории будет превышен (с 10-го числа, раз в месяц);
   goal_pace    — цель накопления не успевается при текущем темпе (с 20-го числа, раз в месяц);
+  goal_day/goal_over/goal_ask — днём по любой цели, если выбиваешься из плана (лимит трат перебран,
+                 калорий мало/много к этому часу, привычку надо сделать сегодня, спросить прогресс) — раз в день;
   weekly       — воскресный обзор недели от Джарвиса.
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from typing import Any
 from . import analysis
 from . import categories as cats
 from . import finance as fin
+from . import goals as goals_mod
 from . import services
 from .agent_tools import fuzzy_contains
 from .profile import Profile, h
@@ -31,7 +34,7 @@ SPIKE_FACTOR = 3.0
 SPIKE_MIN = 100_000
 NUTRI_LOW = 0.65
 NUTRI_HIGH = 1.30
-DISCRETIONARY = ("food", "shopping", "entertainment", "beauty", "clothes", "gifts")
+DISCRETIONARY = ("food", "shopping", "fun", "clothes", "gifts")
 
 
 @dataclass
@@ -220,15 +223,33 @@ async def collect(profile: Profile) -> list[Alert]:
     if (a := spike_alert(snap.entries, today, lang=lang, hour=hour)):
         alerts.append(a)
     alerts += recurring_alerts(recurring, snap.wallet, today, lang=lang, hour=hour)
-    if budgets or goals:
+    save_goals = [g for g in goals if goals_mod.kind_of(g) == "save"]
+    if budgets or save_goals:
         fc = analysis.forecast(snap.entries, today, balances=snap.balances, recurring=recurring, budgets=budgets)
         alerts += budget_alerts(fc, today, lang=lang, hour=hour)
-        alerts += goal_alerts(goals, fc, snap.month, today, lang=lang, hour=hour)
+        alerts += goal_alerts(save_goals, fc, snap.month, today, lang=lang, hour=hour)
+    if goals:
+        alerts += await goal_day_alerts(profile, goals)
     if (a := nutrition_alert(logs, plan, today, tz=profile.tz, lang=lang, hour=hour)):
         alerts.append(a)
     if snap.entries and (a := weekly_alert(today, lang=lang, hour=hour)):
         alerts.append(a)
     return alerts
+
+
+async def goal_day_alerts(profile: Profile, goals: list[dict[str, Any]]) -> list[Alert]:
+    """Дневные подсказки по целям любого вида (bot/goals.midday_alert): только когда явно выбиваешься из плана."""
+    try:
+        statuses, data = await goals_mod.statuses_for(profile, goals=goals)
+    except Exception:
+        return []
+    now = profile.now
+    out: list[Alert] = []
+    for st in statuses:
+        hit = goals_mod.midday_alert(st, profile.lang, hour=now.hour, today=now.date(), meals=data.meals)
+        if hit:
+            out.append(Alert(hit[0], hit[1]))
+    return out
 
 
 def due_tasks(tasks: list[dict[str, Any]], now: Any) -> list[dict[str, Any]]:
@@ -251,4 +272,4 @@ def due_tasks(tasks: list[dict[str, Any]], now: Any) -> list[dict[str, Any]]:
     return out
 
 
-__all__ = ["Alert", "collect", "due_tasks", "debtor_message", "debt_alerts", "spike_alert", "recurring_alerts", "budget_alerts", "goal_alerts", "nutrition_alert", "weekly_alert"]
+__all__ = ["Alert", "collect", "due_tasks", "goal_day_alerts", "debtor_message", "debt_alerts", "spike_alert", "recurring_alerts", "budget_alerts", "goal_alerts", "nutrition_alert", "weekly_alert"]

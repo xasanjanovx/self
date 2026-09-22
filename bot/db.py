@@ -88,7 +88,7 @@ class Database:
             "users", "finance_entries", "calorie_logs", "nutrition_profiles", "finance_settings", "report_preferences",
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
-            "user_memory", "agent_log",
+            "user_memory", "agent_log", "weight_logs", "goal_checkins",
         )
 
         async def probe(name: str) -> str | None:
@@ -572,12 +572,53 @@ class Database:
         res = await q.order("created_at").execute()
         return res.data or []
 
-    async def add_goal(self, telegram_id: int, *, title: str, target_amount: float, saved_amount: float = 0.0, deadline: str | None = None) -> dict[str, Any]:
-        res = await self._table("savings_goals").insert(
-            {"telegram_id": telegram_id, "title": title, "target_amount": float(target_amount), "saved_amount": float(saved_amount), "deadline": deadline}
+    async def add_goal(
+        self, telegram_id: int, *, title: str, target_amount: float, saved_amount: float = 0.0, deadline: str | None = None,
+        kind: str = "save", params: dict[str, Any] | None = None, unit: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "telegram_id": telegram_id, "title": title, "target_amount": float(target_amount), "saved_amount": float(saved_amount), "deadline": deadline,
+        }
+        if self.available("goal_checkins"):
+            # колонки kind/params/unit появились в миграции 007 (вместе с goal_checkins); до неё пишем только накопления
+            payload.update({"kind": kind, "params": dict(params or {}), "unit": unit})
+        elif kind != "save":
+            raise RuntimeError("goals of this kind need sql/migrations/007_goals.sql")
+        res = await self._table("savings_goals").insert(payload).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    # ---------------------------------------------------------- 007: weight logs / goal check-ins
+    async def list_weight_logs(self, telegram_id: int, *, days: int = 120) -> list[dict[str, Any]]:
+        since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        res = await self._table("weight_logs").select("*").eq("telegram_id", telegram_id).gte("day", since).order("day", desc=True).execute()
+        return res.data or []
+
+    async def upsert_weight_log(self, telegram_id: int, *, weight: float, day: str) -> dict[str, Any]:
+        res = await self._table("weight_logs").upsert(
+            {"telegram_id": telegram_id, "weight": float(weight), "day": day}, on_conflict="telegram_id,day"
         ).execute()
         rows = res.data or []
         return rows[0] if rows else {}
+
+    async def delete_weight_logs(self, telegram_id: int, days: list[str]) -> None:
+        if days:
+            await self._table("weight_logs").delete().eq("telegram_id", telegram_id).in_("day", list(days)).execute()
+
+    async def list_checkins(self, telegram_id: int, *, days: int = 90) -> list[dict[str, Any]]:
+        since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        res = await self._table("goal_checkins").select("*").eq("telegram_id", telegram_id).gte("day", since).order("day", desc=True).execute()
+        return res.data or []
+
+    async def upsert_checkin(self, telegram_id: int, *, goal_id: Any, day: str, value: float = 1.0, note: str | None = None) -> dict[str, Any]:
+        res = await self._table("goal_checkins").upsert(
+            {"telegram_id": telegram_id, "goal_id": goal_id, "day": day, "value": float(value), "note": note}, on_conflict="telegram_id,goal_id,day"
+        ).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def delete_checkin(self, telegram_id: int, *, goal_id: Any, day: str) -> None:
+        await self._table("goal_checkins").delete().eq("telegram_id", telegram_id).eq("goal_id", goal_id).eq("day", day).execute()
 
     async def update_goal(self, telegram_id: int, goal_id: str | int, fields: dict[str, Any]) -> None:
         payload = {**fields, "updated_at": datetime.now(timezone.utc).isoformat()}

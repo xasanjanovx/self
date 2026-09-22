@@ -167,8 +167,9 @@ class FakeDB:
     async def list_goals(self, uid, *, include_done=False):
         return list(self.goals)
 
-    async def add_goal(self, uid, *, title, target_amount, saved_amount=0.0, deadline=None):
-        row = {"id": self._next(), "title": title, "target_amount": target_amount, "saved_amount": saved_amount, "deadline": deadline, "done": False}
+    async def add_goal(self, uid, *, title, target_amount, saved_amount=0.0, deadline=None, kind="save", params=None, unit=None):
+        row = {"id": self._next(), "title": title, "target_amount": target_amount, "saved_amount": saved_amount, "deadline": deadline, "done": False,
+               "kind": kind, "params": dict(params or {}), "unit": unit, "created_at": TODAY.isoformat(), "updated_at": TODAY.isoformat()}
         self.goals.append(row)
         return row
 
@@ -176,6 +177,56 @@ class FakeDB:
         for g in self.goals:
             if g["id"] == goal_id:
                 g.update(fields)
+
+    async def delete_goals(self, uid, ids):
+        self.goals = [g for g in self.goals if g["id"] not in ids]
+
+    # --- данные, которые читает движок целей (bot/goals.statuses_for)
+    entries: list[dict] = []
+    weights: list[dict] = []
+    checkins: list[dict] = []
+    plan: dict | None = None
+
+    async def list_finance_entries_all(self, uid):
+        return list(self.entries)
+
+    async def get_finance_settings(self, uid):
+        return {}
+
+    async def list_budgets(self, uid):
+        return {}
+
+    async def list_recurring(self, uid):
+        return []
+
+    async def get_nutrition_profile(self, uid):
+        return self.plan
+
+    async def list_calorie_logs(self, uid, *, days, tz_name=None):
+        return []
+
+    async def list_calorie_logs_between(self, uid, start, end, *, columns=None):
+        return []
+
+    async def list_weight_logs(self, uid, *, days=120):
+        return sorted(self.weights, key=lambda r: r["day"], reverse=True)
+
+    async def upsert_weight_log(self, uid, *, weight, day):
+        self.weights = [w for w in self.weights if w["day"] != day] + [{"weight": weight, "day": day}]
+        return self.weights[-1]
+
+    async def delete_weight_logs(self, uid, days):
+        self.weights = [w for w in self.weights if w["day"] not in days]
+
+    async def list_checkins(self, uid, *, days=90):
+        return list(self.checkins)
+
+    async def upsert_checkin(self, uid, *, goal_id, day, value=1.0, note=None):
+        self.checkins = [c for c in self.checkins if not (c["goal_id"] == goal_id and c["day"] == day)] + [{"goal_id": goal_id, "day": day, "value": value, "note": note}]
+        return self.checkins[-1]
+
+    async def delete_checkin(self, uid, *, goal_id, day):
+        self.checkins = [c for c in self.checkins if not (c["goal_id"] == goal_id and c["day"] == day)]
 
     async def list_debt_deadlines(self, uid):
         return list(self.deadlines)
@@ -220,11 +271,59 @@ def test_goal_tools_add_amount_and_status(monkeypatch):
     fdb = _wire(monkeypatch)
     ctx = tools.ToolContext(profile=_profile(72), text="")
     out = _run(tools.run("add_goal", {"title": "Ноутбук", "target_amount": "10 млн", "deadline": "2027-01-01", "saved_amount": 1000000}, ctx))
-    assert out["added"]["target"] == 10_000_000 and out["added"]["saved"] == 1_000_000 and "needed_per_month" in out["added"]
+    assert out["added"]["kind"] == "save" and out["added"]["target"] == 10_000_000 and out["added"]["saved"] == 1_000_000 and "needed_per_month" in out["added"]
     gid = str(fdb.goals[0]["id"])
     out = _run(tools.run("update_goal", {"id": gid, "add_amount": "500к"}, ctx))
     assert out["goal"]["saved"] == 1_500_000
     assert "error" in _run(tools.run("update_goal", {"id": "999", "add_amount": 1}, ctx))
+
+
+def test_goal_tools_spend_cap_from_save_amount(monkeypatch):
+    fdb = _wire(monkeypatch)
+    today = _profile().today
+    # три прошлых месяца по 3 млн (одна операция в месяц), в этом месяце — 700к
+    fdb.entries = [_e(i, (today.replace(day=1) - timedelta(days=1)).replace(day=5) - timedelta(days=31 * k), 3_000_000, "shopping") for k, i in enumerate((1, 2, 3))]
+    fdb.entries.append(_e(4, today, 700_000, "food"))
+    ctx = tools.ToolContext(profile=_profile(73), text="")
+    out = _run(tools.run("add_goal", {"title": "Сэкономить 1 млн", "kind": "spend_cap", "save_amount": "1 млн"}, ctx))
+    added = out["added"]
+    assert added["kind"] == "spend_cap" and added["limit"] == 2_000_000 and added["baseline"] == 3_000_000
+    assert added["spent"] == 700_000 and added["today_spent"] == 700_000 and added["remaining"] == 1_300_000
+    assert added["allowed_per_day"] > 0 and "cut_candidates" in added
+    # лимит только на категорию
+    out = _run(tools.run("add_goal", {"title": "Еда", "kind": "spend_cap", "target_amount": 500000, "category": "food"}, ctx))
+    assert out["added"]["category"] == "food" and out["added"]["spent"] == 700_000 and "over" in out["added"]["flags"]
+
+
+def test_goal_tools_weight_habit_custom(monkeypatch):
+    fdb = _wire(monkeypatch)
+    fdb.plan = {"daily_calories": 2500, "tdee": 2400, "weight": 68, "protein": 120, "fat": 70, "carbs": 300}
+    ctx = tools.ToolContext(profile=_profile(74), text="")
+    out = _run(tools.run("add_goal", {"title": "Набрать до 75", "kind": "weight", "target_amount": 75, "current_weight": 69, "deadline": (_profile().today + timedelta(days=70)).isoformat()}, ctx))
+    st = out["added"]
+    assert st["kind"] == "weight" and st["current"] == 69 and st["start_weight"] == 69 and st["direction"] == "gain"
+    assert st["recommended_kcal"] > 2900 and "plan_mismatch" in st["flags"]
+    assert fdb.weights and fdb.weights[0]["weight"] == 69
+    out = _run(tools.run("log_weight", {"weight": "69,6"}, ctx))
+    assert out["logged"]["weight"] == 69.6 and out["weight_goals"][0]["current"] == 69.6 and out["plan_kcal"] == 2500
+    # привычка
+    out = _run(tools.run("add_goal", {"title": "Зал", "kind": "habit", "target_amount": 3}, ctx))
+    hid = out["added"]["id"]
+    assert out["added"]["per_week"] == 3 and out["added"]["this_week"] == 0
+    out = _run(tools.run("goal_checkin", {"id": hid}, ctx))
+    assert out["goal"]["today_checked"] is True and out["goal"]["this_week"] == 1
+    out = _run(tools.run("goal_checkin", {"id": hid, "undo": True}, ctx))
+    assert out["goal"]["today_checked"] is False
+    # свободная цель в процентах
+    out = _run(tools.run("add_goal", {"title": "Выучить 500 слов", "kind": "custom", "deadline": (_profile().today + timedelta(days=60)).isoformat(), "progress_pct": 10}, ctx))
+    cid = out["added"]["id"]
+    assert out["added"]["progress_pct"] == 10 and out["added"]["target"] if "target" in out["added"] else True
+    out = _run(tools.run("update_goal", {"id": cid, "progress_pct": 100}, ctx))
+    assert out["goal"]["done"] is True
+    listed = _run(tools.run("list_goals", {}, ctx))
+    assert {g["kind"] for g in listed["goals"]} == {"weight", "habit", "custom"}
+    habits_out = _run(tools.run("my_habits", {}, ctx))
+    assert "meals" in habits_out and "spending" in habits_out
 
 
 def test_set_debt_deadline_matches_fuzzy_name(monkeypatch):

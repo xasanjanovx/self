@@ -14,11 +14,11 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import agent_tools as tools
-from .. import agent_tools_assistant as asst
 from .. import analysis
 from .. import cache
 from .. import finance as fin
+from .. import goals as goals_mod
+from .. import habits
 from .. import services
 from .. import tasks as tasks_mod
 from .. import ui
@@ -248,39 +248,34 @@ async def msg_task_other(message: Message, state: FSMContext) -> None:
 
 
 # ------------------------------------------------------------------ goals screen
-def _goal_lines(st: dict[str, Any], profile: Profile) -> list[str]:
-    uz, cur = profile.lang == "uz", profile.currency
-    lines = [
-        f"{fin.bar(float(st.get('ratio') or 0), 12)} {ui.pct(float(st.get('ratio') or 0))}",
-        f"<b>{fin.fmt_money(float(st.get('saved') or 0))}</b> / {fin.fmt_money(float(st.get('target') or 0))} {cur}",
-        f"{'Qoldi' if uz else 'Осталось'}: {fin.fmt_money(float(st.get('remaining') or 0))}",
-    ]
-    if st.get("deadline"):
-        try:
-            from datetime import date
-
-            dl = date.fromisoformat(st["deadline"])
-            lines.append(f"{'Muddat' if uz else 'Срок'}: {dl:%d.%m.%Y}" + (f" · {st['months_left']} {'oy' if uz else 'мес.'}" if st.get("months_left") is not None else ""))
-        except ValueError:
-            pass
-    if st.get("needed_per_month"):
-        lines.append(f"{'Oyiga kerak' if uz else 'Нужно в месяц'}: <b>{fin.fmt_money(float(st['needed_per_month']))}</b>")
-    if "on_track" in st:
-        if st["on_track"]:
-            lines.append("✅ " + ("Hozirgi sur'atda ulguramiz" if uz else "При текущем темпе успеваем"))
-        else:
-            pace = st.get("months_at_current_pace")
-            tail = f" (~{pace} {'oy' if uz else 'мес.'})" if pace else ""
-            lines.append("⚠️ " + ("Hozirgi sur'atda ulgurmaymiz" if uz else "При текущем темпе не успеваем") + tail)
-    return lines
+_GOAL_ICON = {"save": "🎯", "spend_cap": "💸", "weight": "⚖️", "habit": "🔁", "custom": "🏁"}
 
 
-async def _goal_statuses(profile: Profile) -> list[dict[str, Any]]:
+def _goal_lines(st: dict[str, Any], profile: Profile, *, meals: dict[str, Any] | None = None) -> list[str]:
+    return goals_mod.lines(st, profile.lang, meals=meals)
+
+
+async def _goal_statuses(profile: Profile, goals: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
-        return await asst.goals_with_status(tools.ToolContext(profile=profile, text=""))
+        statuses, data = await goals_mod.statuses_for(profile, goals=goals)
+        return statuses, data.meals
     except Exception:
-        logger.exception("goals_with_status failed")
-        return [analysis.goal_status(g, profile.today) for g in await services.goals(profile.telegram_id)]
+        logger.exception("goal statuses failed")
+        rows = goals if goals is not None else await services.goals(profile.telegram_id)
+        return [analysis.goal_status(g, profile.today) | {"kind": "save", "flags": []} for g in rows], {}
+
+
+async def _habits_block(profile: Profile) -> str | None:
+    """Карточка «Что я о тебе знаю» — привычки из данных (еда по слотам, средние траты)."""
+    try:
+        logs, entries = await services.calorie_logs(profile, 30), await services.finance_entries(profile.telegram_id)
+        lines = habits.habits_card(habits.meal_patterns(logs, tz=profile.tz, today=profile.today), habits.spending_patterns(entries, today=profile.today), profile.lang)
+    except Exception:
+        logger.debug("habits card failed", exc_info=True)
+        return None
+    if not lines:
+        return None
+    return ui.card(f"🧠 <b>{'Odatlaringiz' if profile.lang == 'uz' else 'Что я о тебе знаю'}</b>", lines)
 
 
 async def render_goals(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
@@ -289,15 +284,17 @@ async def render_goals(target: Message | CallbackQuery, state: FSMContext, profi
         text, goals = "⚠️ " + profile.tr(*MIGRATION_HINT), []
     else:
         goals = await services.goals(profile.telegram_id)
-        statuses = await _goal_statuses(profile) if goals else []
-        header = ui.title("🎯", "Maqsadlar" if uz else "Цели накоплений")
+        statuses, meals = await _goal_statuses(profile, goals) if goals else ([], {})
+        header = ui.title("🎯", "Maqsadlar" if uz else "Цели")
         blocks: list[str | None] = [header]
         for st in statuses:
-            blocks.append(ui.card(f"🎯 <b>{h(st.get('title'))}</b>", _goal_lines(st, profile)))
+            icon = _GOAL_ICON.get(str(st.get("kind") or "save"), "🎯")
+            blocks.append(ui.card(f"{icon} <b>{h(st.get('title'))}</b>", _goal_lines(st, profile, meals=meals)))
         if not goals:
             blocks.append(ui.muted("Maqsadlar yo'q." if uz else "Целей пока нет."))
-        blocks.append(ui.muted("✍️ «10 mln noutbukka yanvargacha» · «noutbukka 500k qo'shdim»" if uz
-                               else "✍️ «накопить 10 млн на ноутбук к январю» · «отложил 500к на ноутбук»"))
+        blocks.append(await _habits_block(profile))
+        blocks.append(ui.muted("✍️ «10 mln noutbukka yanvargacha» · «oyiga 5 mln dan ko'p sarflamaslik» · «75 kg gacha yig'ish» · «zal haftasiga 3 marta»" if uz
+                               else "✍️ «накопить 10 млн на ноутбук к январю» · «тратить не больше 5 млн в месяц» · «набрать до 75 кг» · «зал 3 раза в неделю» · «вес 72.5»"))
         text = ui.join(*blocks)
     if notice:
         text += f"\n\n{notice}"
@@ -325,8 +322,10 @@ async def cb_goal_add(callback: CallbackQuery, state: FSMContext) -> None:
     await safe_edit(
         callback,
         profile.tr(
-            "Напиши цель: <b>сумма, на что, к какому сроку</b>\n<code>накопить 10 млн на ноутбук к январю</code> · <code>5 млн на отпуск, уже есть 1 млн</code>",
-            "Maqsadni yozing: <b>summa, nimaga, qachongacha</b>\n<code>yanvargacha noutbukka 10 mln</code> · <code>ta'tilga 5 mln, 1 mln bor</code>",
+            "Напиши цель своими словами — любую:\n<code>накопить 10 млн на ноутбук к январю</code>\n<code>сэкономить 2 млн в этом месяце</code>\n"
+            "<code>набрать до 75 кг к декабрю</code> · <code>сбросить до 80</code>\n<code>зал 3 раза в неделю</code>\n<code>выучить 500 слов к марту</code>",
+            "Maqsadni o'z so'zingiz bilan yozing:\n<code>yanvargacha noutbukka 10 mln</code>\n<code>shu oyda 2 mln tejash</code>\n"
+            "<code>dekabrgacha 75 kg</code> · <code>80 kg gacha tushish</code>\n<code>zal haftasiga 3 marta</code>\n<code>martgacha 500 so'z</code>",
         ),
         goals_keyboard([], profile.lang),
     )
@@ -337,6 +336,18 @@ async def _find_goal(profile: Profile, goal_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+async def _render_goal_detail(callback: CallbackQuery, state: FSMContext, profile: Profile, goal: dict[str, Any], *, notice: str | None = None) -> None:
+    statuses, meals = await _goal_statuses(profile, [goal])
+    st = statuses[0] if statuses else analysis.goal_status(goal, profile.today) | {"kind": "save", "flags": []}
+    kind = goals_mod.kind_of(goal)
+    await state.set_state(BotStates.waiting_goal_input)
+    await remember_panel(callback, state)
+    text = ui.join(ui.title(_GOAL_ICON.get(kind, "🎯"), h(goal.get("title"))), ui.card(f"<b>{'Holat' if profile.lang == 'uz' else 'Прогресс'}</b>", _goal_lines(st, profile, meals=meals)))
+    if notice:
+        text += f"\n\n{notice}"
+    await safe_edit(callback, text, goal_detail_keyboard(goal["id"], profile.lang, kind=kind, today_checked=bool(st.get("today_checked"))))
+
+
 @router.callback_query(F.data.startswith("goal:view:"))
 async def cb_goal_view(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
@@ -345,30 +356,56 @@ async def cb_goal_view(callback: CallbackQuery, state: FSMContext) -> None:
     if goal is None:
         await render_goals(callback, state, profile)
         return
-    st = next((s for s in await _goal_statuses(profile) if s.get("id") == str(goal.get("id"))), None) or analysis.goal_status(goal, profile.today)
-    await state.set_state(BotStates.waiting_goal_input)
-    await remember_panel(callback, state)
-    await safe_edit(callback, ui.join(ui.title("🎯", h(goal.get("title"))), ui.card(f"<b>{'Holat' if profile.lang == 'uz' else 'Прогресс'}</b>", _goal_lines(st, profile))),
-                    goal_detail_keyboard(goal["id"], profile.lang))
+    await _render_goal_detail(callback, state, profile, goal)
+
+
+@router.callback_query(F.data.startswith("goal:check:"))
+@router.callback_query(F.data.startswith("goal:uncheck:"))
+async def cb_goal_check(callback: CallbackQuery, state: FSMContext) -> None:
+    profile = await get_profile(callback.from_user)
+    goal = await _find_goal(profile, callback.data.split(":")[-1])
+    if goal is None:
+        await answer_now(callback)
+        await render_goals(callback, state, profile)
+        return
+    if not await db.ensure_available("goal_checkins"):
+        await answer_now(callback, profile.tr("Нужна миграция 007_goals.sql", "007_goals.sql migratsiyasi kerak"))
+        return
+    if callback.data.startswith("goal:uncheck:"):
+        await services.uncheck(profile.telegram_id, goal_id=goal["id"], day=profile.today)
+        undo.remember(profile.telegram_id, {"type": "restore_checkin", "goal_id": goal["id"], "day": profile.today.isoformat()})
+        await answer_now(callback, profile.tr("Отметка снята", "Belgi olib tashlandi"))
+    else:
+        await services.checkin(profile.telegram_id, goal_id=goal["id"], day=profile.today)
+        undo.remember(profile.telegram_id, {"type": "delete_checkin", "goal_id": goal["id"], "day": profile.today.isoformat()})
+        await answer_now(callback, profile.tr("Отмечено ✅", "Belgilandi ✅"))
+    await _render_goal_detail(callback, state, profile, goal)
 
 
 @router.callback_query(F.data.startswith("goal:deposit:"))
+@router.callback_query(F.data.startswith("goal:weight:"))
+@router.callback_query(F.data.startswith("goal:progress:"))
+@router.callback_query(F.data.startswith("goal:limit:"))
 async def cb_goal_deposit(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback)
     profile = await get_profile(callback.from_user)
+    mode = callback.data.split(":")[1]
     goal = await _find_goal(profile, callback.data.split(":")[-1])
     if goal is None:
         await render_goals(callback, state, profile)
         return
     await state.set_state(BotStates.waiting_goal_amount)
-    await state.update_data(goal_id=str(goal["id"]))
+    await state.update_data(goal_id=str(goal["id"]), goal_mode=mode)
     await remember_panel(callback, state)
-    await safe_edit(
-        callback,
-        profile.tr(f"Сколько отложил на «{h(goal.get('title'))}»? Напиши сумму: <code>500000</code> · <code>1.5 млн</code> · <code>-200к</code> (снять)",
-                   f"«{h(goal.get('title'))}» uchun qancha qo'shdingiz? Summa: <code>500000</code> · <code>1.5 mln</code> · <code>-200k</code>"),
-        goal_detail_keyboard(goal["id"], profile.lang),
-    )
+    title = h(goal.get("title"))
+    prompts = {
+        "deposit": (f"Сколько отложил на «{title}»? Напиши сумму: <code>500000</code> · <code>1.5 млн</code> · <code>-200к</code> (снять)",
+                    f"«{title}» uchun qancha qo'shdingiz? Summa: <code>500000</code> · <code>1.5 mln</code> · <code>-200k</code>"),
+        "weight": ("Текущий вес, кг: <code>72.5</code>", "Hozirgi vazn, kg: <code>72.5</code>"),
+        "progress": (f"«{title}» — на сколько процентов готово? <code>60</code>", f"«{title}» — necha foiz bajarildi? <code>60</code>"),
+        "limit": (f"Новый лимит в месяц для «{title}»: <code>4 млн</code>", f"«{title}» uchun yangi oylik limit: <code>4 mln</code>"),
+    }
+    await safe_edit(callback, profile.tr(*prompts.get(mode, prompts["deposit"])), goal_detail_keyboard(goal["id"], profile.lang, kind=goals_mod.kind_of(goal)))
 
 
 @router.message(BotStates.waiting_goal_amount, F.text)
@@ -377,23 +414,46 @@ async def msg_goal_amount(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     await safe_delete(message)
     data = await state.get_data()
+    mode = str(data.get("goal_mode") or "deposit")
     goal = await _find_goal(profile, str(data.get("goal_id") or ""))
     parsed = fin.parse_amount(text)
     if goal is None or parsed is None:
-        await render_goals(message, state, profile, notice=profile.tr("Не понял сумму.", "Summani tushunmadim.") if goal else None)
+        await render_goals(message, state, profile, notice=profile.tr("Не понял число.", "Raqamni tushunmadim.") if goal else None)
         return
-    amount = -parsed[0] if text.lstrip().startswith("-") else parsed[0]
-    before = float(goal.get("saved_amount") or 0)
-    after = max(0.0, before + amount)
-    await db.update_goal(profile.telegram_id, goal["id"], {"saved_amount": after})
-    cache.invalidate(profile.telegram_id, "goals")
-    undo.remember(profile.telegram_id, {"type": "goal_fields", "goal_id": goal["id"], "fields": {"saved_amount": before}})
-    target = float(goal.get("target_amount") or 0)
-    done_note = " 🎉" if target and after >= target else ""
-    await render_goals(message, state, profile, notice=profile.tr(
-        f"✅ {h(goal.get('title'))}: {fin.fmt_money(after)} / {fin.fmt_money(target)}{done_note}",
-        f"✅ {h(goal.get('title'))}: {fin.fmt_money(after)} / {fin.fmt_money(target)}{done_note}",
-    ))
+    value = parsed[0]
+    uid = profile.telegram_id
+    if mode == "weight":
+        if not (25 <= value <= 350) or not await db.ensure_available("weight_logs"):
+            await render_goals(message, state, profile, notice=profile.tr("Вес должен быть 25–350 кг (и нужна миграция 007).", "Vazn 25–350 kg bo'lishi kerak."))
+            return
+        prev = next((r for r in await services.weight_logs(uid) if str(r.get("day"))[:10] == profile.today.isoformat()), None)
+        await services.log_weight(uid, weight=value, day=profile.today)
+        undo.remember(uid, {"type": "restore_weight", "day": profile.today.isoformat(), "row": prev})
+        notice = f"⚖️ {value:g} {'kg' if profile.lang == 'uz' else 'кг'} ✅"
+    elif mode == "progress":
+        pct = max(0.0, min(100.0, value))
+        before = float(goal.get("saved_amount") or 0)
+        fields: dict[str, Any] = {"saved_amount": pct}
+        if pct >= 100:
+            fields["done"] = True
+        await db.update_goal(uid, goal["id"], fields)
+        undo.remember(uid, {"type": "goal_fields", "goal_id": goal["id"], "fields": {"saved_amount": before, "done": False}})
+        notice = f"📈 {h(goal.get('title'))}: {int(pct)}%" + (" 🎉" if pct >= 100 else "")
+    elif mode == "limit":
+        before = float(goal.get("target_amount") or 0)
+        await db.update_goal(uid, goal["id"], {"target_amount": value})
+        undo.remember(uid, {"type": "goal_fields", "goal_id": goal["id"], "fields": {"target_amount": before}})
+        notice = f"💸 {h(goal.get('title'))}: {fin.fmt_money(value)}/{'oy' if profile.lang == 'uz' else 'мес'}"
+    else:
+        amount = -value if text.lstrip().startswith("-") else value
+        before = float(goal.get("saved_amount") or 0)
+        after = max(0.0, before + amount)
+        await db.update_goal(uid, goal["id"], {"saved_amount": after})
+        undo.remember(uid, {"type": "goal_fields", "goal_id": goal["id"], "fields": {"saved_amount": before}})
+        target = float(goal.get("target_amount") or 0)
+        notice = f"✅ {h(goal.get('title'))}: {fin.fmt_money(after)} / {fin.fmt_money(target)}" + (" 🎉" if target and after >= target else "")
+    cache.invalidate(uid, "goals")
+    await render_goals(message, state, profile, notice=notice)
 
 
 @router.callback_query(F.data.startswith("goal:close:"))

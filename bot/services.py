@@ -259,6 +259,36 @@ async def debt_deadlines(uid: int) -> list[dict[str, Any]]:
     return await cache.remember(uid, ("debt_deadlines",), 600, lambda: db.list_debt_deadlines(uid))
 
 
+# ------------------------------------------------------------------ 007: weight logs / goal check-ins
+async def weight_logs(uid: int) -> list[dict[str, Any]]:
+    if not db.available("weight_logs"):
+        return []
+    return await cache.remember(uid, ("weights",), 600, lambda: db.list_weight_logs(uid))
+
+
+async def log_weight(uid: int, *, weight: float, day: date) -> dict[str, Any]:
+    row = await db.upsert_weight_log(uid, weight=weight, day=day.isoformat())
+    cache.invalidate(uid, "weights")
+    return row
+
+
+async def checkins(uid: int) -> list[dict[str, Any]]:
+    if not db.available("goal_checkins"):
+        return []
+    return await cache.remember(uid, ("checkins",), 600, lambda: db.list_checkins(uid))
+
+
+async def checkin(uid: int, *, goal_id: Any, day: date, value: float = 1.0, note: str | None = None) -> dict[str, Any]:
+    row = await db.upsert_checkin(uid, goal_id=goal_id, day=day.isoformat(), value=value, note=note)
+    cache.invalidate(uid, "checkins")
+    return row
+
+
+async def uncheck(uid: int, *, goal_id: Any, day: date) -> None:
+    await db.delete_checkin(uid, goal_id=goal_id, day=day.isoformat())
+    cache.invalidate(uid, "checkins")
+
+
 # ------------------------------------------------------------------ 006: agent memory / log
 async def user_memory(uid: int) -> dict[str, Any]:
     if not db.available("user_memory"):

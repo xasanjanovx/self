@@ -111,19 +111,24 @@ def _assistant_card(goals: list[dict], tasks: list[dict], today: date, lang: str
     """Карточка «Цели и дела»: прогресс накоплений + задачи на сегодня/просроченные."""
     uz = lang == "uz"
     lines: list[str] = []
-    for g in goals[:2]:
+    for g in goals[:3]:
+        kind = str(g.get("kind") or "save")
         target = float(g.get("target_amount") or 0)
         saved = float(g.get("saved_amount") or 0)
-        ratio = min(1.0, saved / target) if target > 0 else 0.0
-        tail = ""
-        if g.get("deadline"):
-            try:
-                dl = date.fromisoformat(str(g["deadline"])[:10])
-                tail = " · " + ui.muted(f"{dl:%d.%m} gacha" if uz else f"до {dl:%d.%m}")
-            except ValueError:
-                tail = ""
-        lines.append(f"🎯 {h(g.get('title'))}: {fin.bar(ratio, 8)} {ui.pct(ratio)}")
-        lines.append(f"   {fin.fmt_money(saved)} / {fin.fmt_money(target)}{tail}")
+        icon = {"save": "🎯", "spend_cap": "💸", "weight": "⚖️", "habit": "🔁", "custom": "🏁"}.get(kind, "🎯")
+        if kind == "save":
+            ratio = min(1.0, saved / target) if target > 0 else 0.0
+            lines.append(f"{icon} {h(g.get('title'))}: {fin.bar(ratio, 8)} {ui.pct(ratio)}")
+            lines.append(f"   {fin.fmt_money(saved)} / {fin.fmt_money(target)}")
+        elif kind == "custom":
+            ratio = min(1.0, saved / 100)
+            lines.append(f"{icon} {h(g.get('title'))}: {fin.bar(ratio, 8)} {ui.pct(ratio)}")
+        elif kind == "weight":
+            lines.append(f"{icon} {h(g.get('title'))} → {target:g} {'kg' if uz else 'кг'}")
+        elif kind == "habit":
+            lines.append(f"{icon} {h(g.get('title'))} · {int(target)}×/{'hafta' if uz else 'нед'}")
+        else:
+            lines.append(f"{icon} {h(g.get('title'))} · ≤ {fin.fmt_money(target)}/{'oy' if uz else 'мес'}")
     picked, hidden = tasks_mod.dashboard_pick(tasks, today)
     if picked:
         if lines:

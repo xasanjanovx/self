@@ -8,6 +8,7 @@ from typing import Any
 from . import categories as cats
 from . import emoji as pe
 from . import finance as fin
+from . import goals as goals_mod
 from . import nutrition as nutri
 from . import services
 from .profile import Profile, h
@@ -126,11 +127,17 @@ async def _assistant_lines(profile: Profile, today: Any, lang: str) -> list[str]
             out.append(f"⏳ {who}: " + ("bugun qaytarish muddati" if uz else "сегодня срок возврата"))
         else:
             out.append(f"⏳ {who}: " + (f"qaytarish {d:%d.%m} ({left} kun)" if uz else f"возврат {d:%d.%m} ({left} дн.)"))
-    for g in goals[:2]:
-        target = float(g.get("target_amount") or 0)
-        saved = float(g.get("saved_amount") or 0)
-        if target > 0:
-            out.append(f"🎯 {h(g.get('title'))}: {fin.fmt_money(saved)} / {fin.fmt_money(target)} ({int(saved / target * 100)}%)")
+    if goals:
+        # план на сегодня по каждой цели — по реальным данным (bot/goals.py)
+        try:
+            statuses, data = await goals_mod.statuses_for(profile, goals=goals)
+            plan = goals_mod.plan_lines(statuses, lang, meals=data.meals, when="morning")
+        except Exception:
+            plan = []
+        if plan:
+            out.append("")
+            out.append(f"🎯 <b>{'Bugungi reja' if uz else 'План на сегодня'}</b>")
+            out.extend(f"   {line}" for line in plan)
     return out
 
 
@@ -155,7 +162,8 @@ async def evening_brief(profile: Profile) -> str | None:
         what = " va ".join(missing) if lang == "uz" else " и ".join(missing)
         return (f"🌙 {'Bugun yozilmagan' if lang == 'uz' else 'Сегодня не записано'}: <b>{what}</b>.\n"
                 + ("Bir qatorda yuboring — 10 soniya: «tushlik 40000», «osh yedim»." if lang == "uz"
-                   else "Скинь одной строкой — это 10 секунд: «обед 40000», «съел плов»."))
+                   else "Скинь одной строкой — это 10 секунд: «обед 40000», «съел плов».")
+                + "\n".join(await goal_evening_lines(profile)))
     totals = nutri.totals(logs)
     target = int((nutrition_profile or {}).get("daily_calories") or 0)
     lines = [f"🌙 <b>{'Kun yakuni' if lang == 'uz' else 'Итог дня'}</b>",
@@ -164,7 +172,23 @@ async def evening_brief(profile: Profile) -> str | None:
         lines.append(f"{pe.INCOME} {fin.fmt_money(day.income)} {cur}")
     if nutrition_profile:
         lines.append(f"{pe.NUTRITION} {int(totals['calories'])}" + (f" / {target}" if target else "") + f" {'kkal' if lang == 'uz' else 'ккал'} · {int(totals['meals'])} {'qabul' if lang == 'uz' else 'приёмов'}")
+    lines.extend(await goal_evening_lines(profile))
     return "\n".join(lines)
+
+
+async def goal_evening_lines(profile: Profile) -> list[str]:
+    """Итог дня по целям: лимит — уложился ли, вес — сколько добрать и чем, привычка — отметился ли."""
+    goals = await services.goals(profile.telegram_id)
+    if not goals:
+        return []
+    try:
+        statuses, data = await goals_mod.statuses_for(profile, goals=goals)
+        plan = goals_mod.plan_lines(statuses, profile.lang, meals=data.meals, when="evening")
+    except Exception:
+        return []
+    if not plan:
+        return []
+    return ["", f"🎯 <b>{'Maqsadlar' if profile.lang == 'uz' else 'Цели'}</b>"] + [f"   {line}" for line in plan]
 
 
 def parse_hhmm(value: str, default: tuple[int, int]) -> tuple[int, int]:
@@ -175,4 +199,4 @@ def parse_hhmm(value: str, default: tuple[int, int]) -> tuple[int, int]:
         return default
 
 
-__all__: list[Any] = ["morning_brief", "evening_brief", "parse_hhmm"]
+__all__: list[Any] = ["morning_brief", "evening_brief", "goal_evening_lines", "parse_hhmm"]

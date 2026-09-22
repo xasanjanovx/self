@@ -672,16 +672,32 @@ def notes_keyboard(notes: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_GOAL_ICON = {"save": "🎯", "spend_cap": "💸", "weight": "⚖️", "habit": "🔁", "custom": "🏁"}
+
+
 def goals_keyboard(goals: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
-    rows = [[_btn(f"🎯 {_short(g.get('title'))}", f"goal:view:{g.get('id')}", icon=_pe.ID_GOAL)] for g in goals[:10]]
+    rows = [[_btn(f"{_GOAL_ICON.get(str(g.get('kind') or 'save'), '🎯')} {_short(g.get('title'))}", f"goal:view:{g.get('id')}", icon=_pe.ID_GOAL)] for g in goals[:10]]
     rows.append([_btn(t(lang, "goal_add"), "goal:add", style="primary", icon=_pe.ID_ADD), _back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def goal_detail_keyboard(goal_id: str | int, lang: str = "ru") -> InlineKeyboardMarkup:
+def goal_detail_keyboard(goal_id: str | int, lang: str = "ru", *, kind: str = "save", today_checked: bool = False) -> InlineKeyboardMarkup:
+    """Первая кнопка зависит от вида цели: отложить / отметить сегодня / записать вес / прогресс %."""
+    uz = lang == "uz"
+    if kind == "habit":
+        first = (_btn(("✅ Bugun bajarildi" if uz else "✅ Сегодня сделано") if today_checked else ("Bugun qildim" if uz else "Отметить сегодня"),
+                      f"goal:uncheck:{goal_id}" if today_checked else f"goal:check:{goal_id}", style=None if today_checked else "primary", icon=_pe.ID_SAVE))
+    elif kind == "weight":
+        first = _btn("⚖️ " + ("Vaznni yozish" if uz else "Записать вес"), f"goal:weight:{goal_id}", style="primary", icon=_pe.ID_ADD)
+    elif kind == "custom":
+        first = _btn("📈 " + ("Progress %" if uz else "Прогресс %"), f"goal:progress:{goal_id}", style="primary", icon=_pe.ID_ADD)
+    elif kind == "spend_cap":
+        first = _btn("💸 " + ("Limitni o'zgartirish" if uz else "Изменить лимит"), f"goal:limit:{goal_id}", style="primary", icon=_pe.ID_ADD)
+    else:
+        first = _btn(t(lang, "goal_deposit"), f"goal:deposit:{goal_id}", style="primary", icon=_pe.ID_ADD)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(t(lang, "goal_deposit"), f"goal:deposit:{goal_id}", style="primary", icon=_pe.ID_ADD)],
+            [first],
             [
                 _btn(t(lang, "goal_close"), f"goal:close:{goal_id}", style="success", icon=_pe.ID_SAVE),
                 _btn(t(lang, "delete"), f"goal:del:{goal_id}", style="danger", icon=_pe.ID_DELETE),
