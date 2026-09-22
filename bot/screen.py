@@ -147,13 +147,33 @@ async def send_ephemeral(
     reply_markup: Any | None = None,
     *,
     keep_previous: bool = False,
+    ttl: float | None = None,
 ) -> int:
-    """Send a transient message that will be removed on the next interaction."""
+    """Send a transient message that will be removed on the next interaction.
+
+    `ttl` (seconds) additionally removes it on a timer — for notices like
+    «Звоню», «Готово», которые не должны копиться в чате, даже если человек
+    больше ничего не пишет."""
     if not keep_previous:
         await clear_ephemerals(bot, chat_id)
     msg = await bot.send_message(chat_id, text, reply_markup=reply_markup)
     _ephemerals[chat_id].append(msg.message_id)
+    if ttl:
+        asyncio.create_task(_delete_later(bot, chat_id, msg.message_id, ttl))
     return msg.message_id
+
+
+async def _delete_later(bot: Bot, chat_id: int, message_id: int, delay: float) -> None:
+    try:
+        await asyncio.sleep(delay)
+        await _safe_delete(bot, chat_id, message_id)
+        ids = _ephemerals.get(chat_id)
+        if ids and message_id in ids:
+            ids.remove(message_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug("delayed delete failed", exc_info=True)
 
 
 async def send_chart(

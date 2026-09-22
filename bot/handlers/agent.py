@@ -227,6 +227,21 @@ _BULLET_RE = re.compile(r"^\s*[\*\-–]\s+", re.MULTILINE)
 _HEADER_RE = re.compile(r"^\s*#{1,6}\s*", re.MULTILINE)
 
 
+NOTICE_TTL = 120.0      # через столько секунд короткая реплика сама удаляется
+NOTICE_MAX_CHARS = 140  # длиннее — это уже содержательный ответ, ему нужен экран с кнопками
+
+
+def _is_notice(reply: str, *, mutated: bool) -> bool:
+    """Короткая реплика-подтверждение, которой не нужен ни экран, ни кнопки.
+
+    Изменения данных сюда не попадают: там нужна кнопка «Отменить».
+    """
+    if mutated or not reply:
+        return False
+    plain = re.sub(r"<[^>]+>", "", reply).strip()
+    return len(plain) <= NOTICE_MAX_CHARS and plain.count("\n") <= 1
+
+
 def render_reply(text: str) -> str:
     """Текст модели → безопасный HTML: экранируем, **жирный** оставляем, маркеры списков → «•»."""
     clean = html.escape(str(text or "").strip())
@@ -366,7 +381,12 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
         await _open_screen(message, state, profile, ctx.open_screen, notice=reply, undo_available=mutated)
         return True
     await state.clear()
-    await show_panel(message, state, reply, _reply_kb(profile.lang, undo_available=mutated))
+    if _is_notice(reply, mutated=mutated):
+        # короткая реплика («Звоню 📞», «Готово») — отдельным сообщением без кнопок,
+        # оно само исчезнет; главный экран при этом остаётся на месте
+        await screen_mod.send_ephemeral(message.bot, message.chat.id, reply, keep_previous=False, ttl=NOTICE_TTL)
+    else:
+        await show_panel(message, state, reply, _reply_kb(profile.lang, undo_available=mutated))
     if voice:
         await _send_voice_reply(message, profile, result.text)
     return True

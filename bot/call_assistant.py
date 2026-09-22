@@ -150,9 +150,11 @@ async def _notify_failure(profile: Profile, error: str) -> None:
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
     try:
+        from . import screen as screen_mod
         from .context import bot_instance
 
-        await bot_instance().send_message(profile.telegram_id, f"📵 {profile.tr(ru, uz)}")
+        await screen_mod.send_ephemeral(bot_instance(), profile.telegram_id, f"📵 {profile.tr(ru, uz)}",
+                                        keep_previous=True, ttl=180)
     except Exception:
         logger.debug("call failure notice failed", exc_info=True)
 
