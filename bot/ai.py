@@ -195,7 +195,7 @@ class AIService:
             return
         if not available:
             return
-        preferred = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]
+        preferred = ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash"]
         newer = sorted(n for n in available if n.startswith("gemini-3") and "flash" in n and "tts" not in n and "image" not in n)
         if newer:
             logger.info("Newer Gemini flash models available for this key: %s", ", ".join(newer))

@@ -69,7 +69,7 @@ def _ids(name: str) -> frozenset[int]:
     return frozenset(result)
 
 
-def _gemini_model(name: str, default: str = "gemini-2.5-flash") -> str:
+def _gemini_model(name: str, default: str = "gemini-3.5-flash-lite") -> str:
     value = os.getenv(name, "").strip()
     return value or default
 

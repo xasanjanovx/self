@@ -4,7 +4,7 @@
 (доходы/расходы/долги/переводы + статистика по категориям) и **вакансии**
 (оформление поста для канала @ishdasiz + промпт для картинки).
 
-Стек: Python 3.12 · aiogram 3 · Supabase (async) · Gemini · Docker.
+Стек: Python 3.12 · aiogram 3 · Supabase (async) · Gemini (gemini-3.5-flash-lite везде; GEMINI_MODEL / AGENT_MODEL в .env) · Docker.
 
 ## Как устроено
 
