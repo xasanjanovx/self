@@ -30,7 +30,7 @@ def test_wake_instruction_has_takbir_task_and_confirm_rule():
     text = live_call.system_instruction(_profile(), persona.Persona(), mode="wake",
                                         wake={"takbir": "05:07", "minutes_left": 25, "task": "выпей стакан воды"})
     assert "05:07" in text and "25 минут" in text and "стакан воды" in text
-    assert "confirm_awake" in text and "НЕ подтверждение" in text
+    assert "confirm_awake" in text and "ещё НЕ проснулся" in text and "1–2 минуты" in text
     assert "ДАННЫЕ" not in text  # подъёму данные не нужны
 
 
@@ -84,3 +84,45 @@ def test_setup_payload_rich_and_plain():
     assert "web_search" in {d["name"] for d in plain["tools"][0]["functionDeclarations"]}
     wake = live_call._Session(_profile(), persona.Persona(), mode="wake", system="x").setup_payload("m", rich=True)["setup"]
     assert "web_search" not in {d["name"] for d in wake["tools"][0]["functionDeclarations"]}
+
+
+class _WS:
+    def __init__(self, closed: bool = False) -> None:
+        self.closed = closed
+        self.sent: list[str] = []
+
+    async def send_str(self, data: str) -> None:
+        if self.closed:
+            raise ConnectionResetError("Cannot write to closing transport")
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_live_reconnects_if_session_died_while_ringing():
+    """Утром трубку взяли через 32 с — сессия Gemini уже закрылась, бот падал с висящим звонком."""
+    import asyncio
+
+    fresh = _WS()
+
+    class _Sess:
+        connects = 0
+
+        async def connect(self, http):  # noqa: ANN001
+            _Sess.connects += 1
+            return fresh
+
+    async def scenario():
+        dead = _WS(closed=True)
+
+        async def early_conn():
+            return dead
+
+        early = asyncio.create_task(early_conn())
+        ws = await live_call._live_ready(_Sess(), None, early)
+        assert ws is fresh and _Sess.connects == 1
+        import json
+        assert "Звонок соединён" in json.loads(fresh.sent[0])["clientContent"]["turns"][0]["parts"][0]["text"]
+
+    asyncio.run(scenario())

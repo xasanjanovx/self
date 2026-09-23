@@ -197,6 +197,9 @@ _ended: dict[int, asyncio.Event] = {}
 FRAME_MS = 10
 LIVE_RATE = 24000                      # Gemini Live отдаёт 24 кГц моно; в звонок шлём так же
 FRAME_BYTES = LIVE_RATE // 1000 * FRAME_MS * 2   # 10 мс s16le моно = 480 байт
+MEDIA_RETRIES = 3          # перезвонов, если трубку взяли, а медиа не соединилось (TelegramServerError)
+MEDIA_RETRY_DELAY = 5.0    # через столько секунд телефон уже свободен (через 2 с было «занято»)
+BUSY_RETRY_DELAY = 4.0
 
 
 async def open_stream_call(user_id: int, *, username: str | None = None, ring_seconds: int = 45) -> dict[str, Any]:
@@ -216,12 +219,18 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
         await resolve_peer(uid, username)
     except LookupError:
         return {"answered": False, "error": "peer_unknown"}
+    if uid in _incoming or uid in _ended:
+        # прошлый звонок не закрыли (сбой посреди разговора) — иначе «соединимся» с мёртвым звонком
+        logger.info("call %s: закрываю висящий прошлый звонок", uid)
+        await hang_up(uid)
+        await asyncio.sleep(1.5)
     queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
     ended = asyncio.Event()
     _incoming[uid] = queue
     _ended[uid] = ended
     last_exc: Exception | None = None
-    for attempt in (1, 2):
+    media_failed = False
+    for attempt in range(1, MEDIA_RETRIES + 2):
         logger.info("call %s: набираю (поток, попытка %s, гудки до %s с)", uid, attempt, ring_seconds)
         try:
             await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
@@ -231,10 +240,18 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
             last_exc = exc
             name = type(exc).__name__.lower()
             logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
-            # трубку взяли, но медиа не соединилось (известная болезнь ntgcalls, #70) — сразу перенабираем один раз
-            if "telegramserver" in name and attempt == 1:
+            if attempt > MEDIA_RETRIES:
+                break
+            # трубку взяли, но медиа не соединилось (ntgcalls#70: либо за ~1 с, либо никогда) —
+            # помогает перезвон через несколько секунд. Сразу нельзя: телефон ещё «занят» прошлым звонком.
+            if "telegramserver" in name:
+                media_failed = True
                 ended.clear()
-                await asyncio.sleep(2)
+                await asyncio.sleep(MEDIA_RETRY_DELAY)
+                continue
+            if "busy" in name and media_failed:
+                ended.clear()
+                await asyncio.sleep(BUSY_RETRY_DELAY)
                 continue
             break
     if last_exc is not None:

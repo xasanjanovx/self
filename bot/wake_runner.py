@@ -204,6 +204,10 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             else:
                 call_error = "tts unavailable"
 
+    if uid not in _active and not confirmed:
+        # пока звонил, он написал «проснулся» (mark_awake) — никаких «Пора вставать» и повторов
+        logger.info("wake %s: проснулся во время звонка — попытка закрыта", uid)
+        return {"attempts": attempts, "answered": answered, "confirmed": True, "task": task, "call_error": call_error}
     text = wake_mod.wake_message(name=profile.first_name or "", plan=plan, task=task, attempt=attempts, lang=profile.lang)
     try:
         await _drop_wake_message(bot, uid)  # прошлая попытка — не копим «Пора вставать» в чате
@@ -235,6 +239,12 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
     local_now = now.astimezone(profile.tz)
     before = bool(plan.takbir_at and local_now <= plan.takbir_at)
     state = _active.pop(uid, None)
+    if state and source != "call":
+        # написал «проснулся», пока телефон звонит, — кладём трубку сразу, а не ждём конца гудков
+        try:
+            await caller.hang_up(uid)
+        except Exception:
+            logger.debug("hang up on awake failed", exc_info=True)
     fields: dict[str, Any] = {"woke_at": now.isoformat(), "woke_source": source, "before_takbir": before,
                               "takbir_at": plan.takbir, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None}
     if state and state.get("task"):

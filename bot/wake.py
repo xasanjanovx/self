@@ -41,7 +41,7 @@ class WakeSettings:
     takbir_offset_min: int = 20
     days_of_week: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
     call_enabled: bool = True
-    max_attempts: int = 20
+    max_attempts: int = 150  # фактически «пока не встанет»: окно 2 часа (~65 с на попытку) закончится раньше
     retry_seconds: int = 45
     confirm_tasks: tuple[str, ...] = DEFAULT_TASKS
     hardness: str = "normal"
@@ -66,7 +66,7 @@ class WakeSettings:
             enabled=bool(row.get("enabled", True)), mode=str(row.get("mode") or "fajr"), fixed_time=row.get("fixed_time"),
             offset_min=int(row.get("offset_min") or 25), takbir_offset_min=int(row.get("takbir_offset_min") or 20),
             days_of_week=days or (1, 2, 3, 4, 5, 6, 7), call_enabled=bool(row.get("call_enabled", True)),
-            max_attempts=int(row.get("max_attempts") or 20), retry_seconds=int(row.get("retry_seconds") or 45),
+            max_attempts=max(int(row.get("max_attempts") or 0), 150), retry_seconds=int(row.get("retry_seconds") or 45),
             confirm_tasks=tasks, hardness=str(row.get("hardness") or "normal"), skip_until=_d(row.get("skip_until")),
             voice_lang=("ru" if str(row.get("voice_lang") or "uz") == "ru" else "uz"), talk=bool(row.get("talk", True)),
             latitude=float(row.get("latitude") or 40.7821), longitude=float(row.get("longitude") or 72.3442),

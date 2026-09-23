@@ -36,6 +36,7 @@ MODELS = ("gemini-3.8-live", "gemini-3.1-flash-live-preview", "gemini-2.5-flash-
 UPLINK_BATCH_MS = 40         # шлём звук в Gemini пачками по 40 мс
 MAX_SECONDS = 600            # 10 минут — страховка
 DRAIN_SECONDS = 8.0          # после «до связи» даём договорить фразу
+SILENCE_NUDGE_SECONDS = 7.0  # подъём: столько тишины — и Джарвис снова зовёт по имени
 
 # инструменты чата, которые в голосе не нужны или мешают
 _SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me"}
@@ -74,11 +75,18 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
             "\nЗАДАЧА ЗВОНКА: разбудить его на утренний намаз (бомдод/фаджр). "
             f"Такбир в {w.get('takbir') or 'скоро'}, до него {w.get('minutes_left', '')} минут. "
             f"Задание на утро: {w.get('task') or 'выпить стакан воды'}.\n"
-            "1) Поздоровайся («Ассалому алайкум»), скажи, сколько осталось до такбира. "
-            "2) Убедись, что он РЕАЛЬНО проснулся: попроси ответить осмысленно, выпить стакан воды, встать с кровати. "
-            "Сонное «угу», «щас», «ещё пять минут» — НЕ подтверждение: мягко, но настойчиво продолжай будить, можно с лёгкой шуткой. "
-            "3) Когда он ясно и связно ответил, что встал, — вызови confirm_awake, коротко скажи задание и время такбира, попрощайся и вызови end_call. "
-            "Если просит отложить — не соглашайся больше чем на 5 минут; если настаивает — snooze(minutes). "
+            "Говори СРАЗУ, без пауз, бодрым тёплым голосом — первая фраза в первую же секунду.\n"
+            "1) Поздоровайся («Ассалому алайкум»), по имени, скажи, сколько осталось до такбира.\n"
+            "2) ВЕДИ РАЗГОВОР, ПОКА ОН ПО-НАСТОЯЩЕМУ НЕ ПРОСНЁТСЯ. Первое «встал», «uyg'ondim», «да-да» — ещё НЕ проснулся: "
+            "так отвечают сквозь сон и засыпают обратно. Будить по шагам: попроси сесть на кровати → встать → включить свет → "
+            "выпить стакан воды (он стоит рядом) → умыться/омовение. На каждом шаге спрашивай, сделал ли, и задавай вопросы, "
+            "на которые сонный не ответит: какой сегодня день, что у него сегодня по планам, сколько будет 17 плюс 25, "
+            "что он видит вокруг. Шути, подбадривай, говори живо — не монотонно.\n"
+            "3) Слушай голос: сонный, невнятный, долгие паузы, односложно — продолжай. Проснулся — это когда он отвечает "
+            "бодро, связно, развёрнуто, уже встал и ходит (обычно через 1–2 минуты разговора, не раньше). "
+            "Только тогда вызови confirm_awake, коротко скажи задание на утро и время такбира, тепло попрощайся и вызови end_call.\n"
+            "4) Замолчал больше чем на 5–7 секунд — сразу громче и бодрее позови его по имени. "
+            "Просит отложить — не больше 5 минут, и только если настаивает — snooze(minutes).\n"
             "Без нотаций и проповедей."
         )
     rules = (
@@ -154,6 +162,7 @@ class _Session:
         self.ctx = agent_tools.ToolContext(profile=profile, text="(звонок)")
         self._in_text: list[str] = []
         self._out_text: list[str] = []
+        self.last_activity = 0.0               # когда последний раз кто-то говорил (для «толкача» при подъёме)
 
     # --- websocket
     async def connect(self, session):  # noqa: ANN001 — aiohttp.ClientSession
@@ -242,6 +251,7 @@ class _Session:
                 if blob.get("data"):
                     self.out.extend(base64.b64decode(blob["data"]))
             if (t := (sc.get("inputTranscription") or {}).get("text")):
+                self.last_activity = asyncio.get_running_loop().time()
                 self._in_text.append(t)
             if (t := (sc.get("outputTranscription") or {}).get("text")):
                 self._out_text.append(t)
@@ -263,6 +273,7 @@ class _Session:
         drained_at = None
         while not self.stop.is_set():
             if len(self.out) >= frame:
+                self.last_activity = loop.time()
                 chunk = bytes(self.out[:frame])
                 del self.out[:frame]
             else:
@@ -281,6 +292,24 @@ class _Session:
                 await asyncio.sleep(delay)
             elif delay < -0.2:  # отстали (сеть/CPU) — не пытаемся догнать рывком
                 next_at = loop.time()
+
+    async def nudger(self, ws) -> None:  # noqa: ANN001
+        """Подъём: если он замолчал (мог снова заснуть), модель сама не заговорит — толкаем её."""
+        loop = asyncio.get_running_loop()
+        self.last_activity = loop.time()
+        while not self.stop.is_set():
+            await asyncio.sleep(1.0)
+            if self.out or self.hangup_after_speech or self.result.confirmed:
+                continue
+            if loop.time() - self.last_activity < SILENCE_NUDGE_SECONDS:
+                continue
+            self.last_activity = loop.time()
+            logger.info("live: тишина %s с — бужу снова", SILENCE_NUDGE_SECONDS)
+            nudge = "[Он молчит уже несколько секунд — возможно, снова засыпает. Громко и бодро позови его по имени и задай вопрос.]"
+            try:
+                await ws.send_str(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": nudge}]}], "turnComplete": True}}))
+            except Exception:
+                return
 
     # --- инструменты
     async def _run_tools(self, ws, calls: list[dict[str, Any]]) -> None:  # noqa: ANN001
@@ -357,6 +386,47 @@ def _jsonable(value: Any) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ точка входа
+KICK = "[Звонок соединён. Начинай.]"
+
+
+async def _close_early(early: asyncio.Task) -> None:
+    if not early.done():
+        early.cancel()
+    try:
+        ws = await early
+        await ws.close()
+    except BaseException:
+        pass
+
+
+async def _live_ready(sess: "_Session", http, early: asyncio.Task):  # noqa: ANN001
+    """Живая сессия Gemini к моменту «трубку взяли»: берём заранее открытую, а если она уже
+    закрылась или не открылась — открываем заново. И сразу просим модель заговорить первой."""
+    ws = None
+    try:
+        ws = await early
+    except Exception as exc:
+        logger.info("live: заранее не подключились (%s) — подключаюсь сейчас", exc)
+    for attempt in (1, 2):
+        if ws is None or ws.closed:
+            if ws is not None:
+                logger.info("live: сессия закрылась, пока шли гудки — переподключаюсь")
+            ws = await sess.connect(http)
+        try:
+            await ws.send_str(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": KICK}]}], "turnComplete": True}}))
+            return ws
+        except Exception:
+            if attempt == 2:
+                raise
+            logger.info("live: сессия оборвалась на старте — переподключаюсь")
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            ws = None
+    return ws
+
+
 async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wake: dict[str, Any] | None = None,
               ring_seconds: int = 45) -> LiveResult:
     """Позвонить и провести разговор целиком. Возвращает итог (что сказано, что сделано)."""
@@ -380,46 +450,53 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
     sess = _Session(profile, persona, mode=mode, system=system)
 
     async with aiohttp.ClientSession() as http:
-        # модель подключаем заранее, пока идут гудки — чтобы ответить сразу, как возьмут трубку
-        try:
-            ws = await sess.connect(http)
-        except Exception as exc:
-            sess.result.error = f"live: {exc}"
-            logger.warning("live connect failed: %s", exc)
-            return sess.result
+        # Модель подключаем параллельно с гудками — чтобы ответить сразу, как возьмут трубку.
+        # Но Gemini закрывает простаивающую сессию (~30 с): если трубку взяли поздно (утром — через
+        # 32 с), соединение уже мёртвое — тогда переподключаемся (~0.5 с), а не падаем с висящим звонком.
+        early = asyncio.create_task(sess.connect(http), name="live-connect")
         call = await caller.open_stream_call(uid, username=profile.username, ring_seconds=ring_seconds)
         if not call.get("answered"):
             sess.result.error = call.get("error")
-            await ws.close()
+            await _close_early(early)
             return sess.result
         sess.result.answered = True
         undo.begin_turn(uid)
-        # «трубку взяли» — пусть модель заговорит первой
-        kick = "[Звонок соединён. Начинай.]"
-        await ws.send_str(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": kick}]}], "turnComplete": True}}))
-        tasks = [
-            asyncio.create_task(sess.uplink(ws, call["incoming"]), name="live-up"),
-            asyncio.create_task(sess.downlink(ws), name="live-down"),
-            asyncio.create_task(sess.playout(), name="live-play"),
-        ]
-        ended: asyncio.Event = call["ended"]
-        watcher = asyncio.create_task(ended.wait(), name="live-ended")
-        stopper = asyncio.create_task(sess.stop.wait(), name="live-stop")
+        ws = None
+        tasks: list[asyncio.Task] = []
+        watcher = stopper = None
         try:
+            ws = await _live_ready(sess, http, early)
+            tasks = [
+                asyncio.create_task(sess.uplink(ws, call["incoming"]), name="live-up"),
+                asyncio.create_task(sess.downlink(ws), name="live-down"),
+                asyncio.create_task(sess.playout(), name="live-play"),
+            ]
+            if mode == "wake":
+                tasks.append(asyncio.create_task(sess.nudger(ws), name="live-nudge"))
+            ended: asyncio.Event = call["ended"]
+            watcher = asyncio.create_task(ended.wait(), name="live-ended")
+            stopper = asyncio.create_task(sess.stop.wait(), name="live-stop")
             await asyncio.wait({watcher, stopper}, timeout=MAX_SECONDS, return_when=asyncio.FIRST_COMPLETED)
             if ended.is_set():
                 logger.info("call %s: собеседник положил трубку", uid)
+        except Exception as exc:
+            sess.result.error = f"live: {type(exc).__name__}: {exc}"[:300]
+            logger.exception("call %s: разговор сорвался", uid)
         finally:
+            # что бы ни случилось после «трубку взяли» — кладём трубку, иначе звонок висит,
+            # а следующая попытка «соединяется» с этим мёртвым звонком
             sess.stop.set()
-            for task in (*tasks, watcher, stopper):
+            extra = [t for t in (watcher, stopper) if t is not None]
+            for task in (*tasks, *extra):
                 task.cancel()
-            await asyncio.gather(*tasks, watcher, stopper, return_exceptions=True)
+            await asyncio.gather(*tasks, *extra, return_exceptions=True)
             sess._flush_transcript()
             await caller.hang_up(uid)
-            try:
-                await ws.close()
-            except Exception:
-                pass
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
             sess.result.mutated = bool(undo.end_turn(uid))
     logger.info("call %s: итог — модель %s, реплик %s, действия %s", uid, sess.result.model, len(sess.result.transcript), sess.result.actions)
     return sess.result
