@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from . import billing
 from . import categories as cats
 from .config import Settings
 
@@ -34,6 +35,19 @@ _MAX_DELAY = 4.0
 def _backoff(attempt: int) -> float:
     delay = min(_BASE_DELAY * (2 ** (attempt - 1)), _MAX_DELAY)
     return delay + random.uniform(0, delay * 0.25)
+
+
+def _usage_kind(model: str, payload: dict[str, Any]) -> str:
+    """Для отчёта о расходе: на что ушли деньги."""
+    if "tts" in model:
+        return "tts"
+    mimes = {str((p.get("inline_data") or p.get("inlineData") or {}).get("mime_type") or (p.get("inline_data") or p.get("inlineData") or {}).get("mimeType") or "")
+             for c in payload.get("contents") or [] for p in (c.get("parts") or []) if isinstance(p, dict)}
+    if any(m.startswith("audio") for m in mimes):
+        return "stt"
+    if any(m.startswith("image") for m in mimes):
+        return "vision"
+    return "agent" if payload.get("tools") else "text"
 
 
 # ----------------------------------------------------------------- dataclasses
@@ -226,18 +240,24 @@ class AIService:
             try:
                 response = await self._client.post(url, json=payload)
                 if response.status_code in _RETRY_STATUSES:
+                    if response.status_code == 429:
+                        billing.rate_limited()
                     raise httpx.HTTPStatusError(
                         f"Gemini transient {response.status_code}: {response.text[:200]}",
                         request=response.request,
                         response=response,
                     )
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                billing.record(model, data.get("usageMetadata"), kind=_usage_kind(model, payload))
+                return data
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status is not None and status not in _RETRY_STATUSES:
                     body = getattr(getattr(exc, "response", None), "text", "")
                     logger.error("Gemini request rejected (%s): %s %s", status, exc, str(body)[:300])
+                    if billing.is_billing_error(status, str(body)):
+                        billing.exhausted(str(body))
                     raise
                 if attempt >= _MAX_ATTEMPTS:
                     logger.error("Gemini call failed after %d attempts (%s): %s", attempt, model, exc)

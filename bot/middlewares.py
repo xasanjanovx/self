@@ -169,6 +169,43 @@ class DedupeMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class TidyMiddleware(BaseMiddleware):
+    """Чистый чат: его сообщение (текст, голос, фото) удаляем, когда бот его обработал; то, что Джарвис
+    скинул в чат по просьбе, убираем при нажатии любой кнопки. Упал обработчик — сообщение оставляем,
+    чтобы было видно, что не сработало."""
+
+    DELAY = 1.0
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        from . import screen
+
+        if isinstance(event, CallbackQuery):
+            if event.message is not None and event.bot is not None:
+                try:
+                    await screen.clear_sent(event.bot, event.message.chat.id)
+                except Exception:
+                    logger.debug("clear sent failed", exc_info=True)
+            return await handler(event, data)
+        result = await handler(event, data)
+        if isinstance(event, Message) and event.chat.type == "private" and not data.get("keep_message"):
+            screen._spawn(self._drop_later(event))
+        return result
+
+    async def _drop_later(self, message: Message) -> None:
+        import asyncio
+
+        await asyncio.sleep(self.DELAY)
+        try:
+            await message.delete()
+        except Exception:
+            pass  # уже удалил сам обработчик — это нормально
+
+
 async def global_error_handler(event: ErrorEvent) -> bool:
     exc = event.exception
     update = event.update
@@ -210,4 +247,4 @@ async def global_error_handler(event: ErrorEvent) -> bool:
     return True
 
 
-__all__ = ["AccessMiddleware", "DedupeMiddleware", "global_error_handler"]
+__all__ = ["AccessMiddleware", "DedupeMiddleware", "TidyMiddleware", "global_error_handler"]

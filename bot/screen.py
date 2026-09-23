@@ -142,6 +142,25 @@ def track_ephemeral(chat_id: int, message_id: int, ttl: float | None = None) -> 
         _spawn(_delete_later(None, chat_id, message_id, ttl))
 
 
+# chat_id -> то, что Джарвис прислал в чат по просьбе («скинь в чат»): исчезает при нажатии любой кнопки
+_sent: dict[int, list[int]] = defaultdict(list)
+
+
+def track_sent(chat_id: int, message_id: int) -> None:
+    """Текст, который Джарвис скинул в чат (из звонка/с телефона): живёт до первой нажатой кнопки
+    (или сутки — потом его подберёт sweep, как любое временное сообщение)."""
+    _sent[chat_id].append(message_id)
+    _spawn(_remember(chat_id, message_id, None))
+
+
+async def clear_sent(bot: Bot, chat_id: int) -> None:
+    ids = _sent.pop(chat_id, [])
+    if not ids:
+        return
+    await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
+    _spawn(_forget(chat_id, ids))
+
+
 async def clear_ephemerals(bot: Bot, chat_id: int) -> None:
     ids = _ephemerals.pop(chat_id, [])
     if _trash is not None and chat_id not in _trash_loaded:

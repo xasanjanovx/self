@@ -347,4 +347,53 @@ def wake_test_in_background(profile: Profile) -> asyncio.Task | None:
     return asyncio.create_task(runner(), name=f"wake-test-{uid}")
 
 
-__all__ = ["call_now", "call_in_background", "wake_test_in_background", "is_goodbye", "voice_reply", "greeting", "farewell", "MAX_TURNS"]
+async def on_incoming_call(user_id: int) -> bool:
+    """Он сам позвонил аккаунту Джарвиса в Telegram — берём трубку и говорим (Gemini Live).
+    Только владельцу: чужим звонкам caller отвечает сбросом. False — трубку не берём."""
+    from .context import settings
+
+    uid = int(user_id)
+    if uid not in settings.allowed_telegram_ids:
+        logger.info("call %s: входящий от постороннего — не беру", uid)
+        return False
+    if uid in _running:
+        return False  # уже разговариваем (или звоним ему сами)
+    from .handlers.common import profile_by_id
+
+    profile = await profile_by_id(uid)
+
+    async def runner() -> None:
+        from . import live_call, services
+
+        _running.add(uid)
+        try:
+            result = await live_call.answer(profile)
+            await services.log_agent(uid, text="call: входящий", kind="call", tools=",".join(result.actions),
+                                     reply=" | ".join(result.transcript)[:900], ok=result.answered)
+            if result.answered:
+                await _remember_call(profile, result.transcript)
+                await _send_summary(profile, result.actions, result.mutated)
+        except Exception:
+            logger.exception("incoming call failed")
+        finally:
+            _running.discard(uid)
+
+    task = asyncio.create_task(runner(), name=f"incoming-call-{uid}")
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
+    return True
+
+
+_bg: set[asyncio.Task] = set()
+
+
+async def start_listening() -> None:
+    """При запуске бота: аккаунт Джарвиса в сети и берёт трубку, когда владелец звонит сам."""
+    caller.set_incoming_handler(on_incoming_call)
+    if caller.configured():
+        if await caller.start():
+            logger.info("caller: жду входящих звонков")
+
+
+__all__ = ["call_now", "call_in_background", "wake_test_in_background", "on_incoming_call", "start_listening",
+           "is_goodbye", "voice_reply", "greeting", "farewell", "MAX_TURNS"]

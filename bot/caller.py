@@ -74,6 +74,7 @@ async def start() -> bool:
             global helper_id, helper_username
             helper_id = getattr(me, "id", None)
             helper_username = getattr(me, "username", None)
+            _hook_updates()  # сразу: входящие звонки Джарвису и «положили трубку» — с первой секунды
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
             return True
         except Exception as exc:
@@ -164,10 +165,42 @@ async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_se
 # ------------------------------------------------------------------ живой разговор
 _incoming: dict[int, "asyncio.Queue[bytes]"] = {}
 _hooked = False
+# входящий звонок аккаунту Джарвиса: async fn(user_id) — решает, брать ли трубку (ставит call_assistant)
+_on_incoming = None
+_bg: set[asyncio.Task] = set()
+
+
+def set_incoming_handler(handler) -> None:  # noqa: ANN001
+    global _on_incoming
+    _on_incoming = handler
+
+
+def is_call_over(status: Any) -> bool:
+    """Звонок окончен: положили трубку, занято, отклонили, выкинули. Проверяем флаги pytgcalls
+    (ChatUpdate.Status — Flag), а не текст: «занято» приходит как DISCARDED_CALL|BUSY_CALL."""
+    try:
+        from pytgcalls.types import ChatUpdate  # type: ignore
+
+        if isinstance(status, ChatUpdate.Status):
+            return bool(status & ChatUpdate.Status.LEFT_CALL)
+    except Exception:
+        pass
+    return any(k in str(status) for k in ("DISCARDED", "BUSY", "KICKED", "CLOSED", "LEFT"))
+
+
+def _is_incoming(status: Any) -> bool:
+    try:
+        from pytgcalls.types import ChatUpdate  # type: ignore
+
+        if isinstance(status, ChatUpdate.Status):
+            return bool(status & ChatUpdate.Status.INCOMING_CALL)
+    except Exception:
+        pass
+    return "INCOMING_CALL" in str(status) and "CONFERENCE" not in str(status)
 
 
 def _hook_updates() -> None:
-    """Подписка на входящие аудиокадры звонка (один раз на процесс)."""
+    """Подписка на события звонков (один раз на процесс): аудио собеседника, входящий, «положили трубку»."""
     global _hooked
     if _hooked or _calls is None:
         return
@@ -186,15 +219,20 @@ def _hook_updates() -> None:
                 if queue is None:
                     return
                 for frame in update.frames:
+                    if queue.full():  # разговор подвис — старое выбрасываем, новое важнее
+                        queue.get_nowait()
                     queue.put_nowait(bytes(frame.frame))
                 return
             # всё остальное (ответили, положили трубку, смена состояния) — в лог: без этого
             # не видно, на каком шаге рвётся звонок
             status = getattr(update, "status", "") or getattr(update, "state", "")
+            chat_id = int(getattr(update, "chat_id", 0) or 0)
             logger.info("call update: %s %s", type(update).__name__, status)
+            if _is_incoming(status):
+                _answer_or_decline(chat_id)
+                return
             # собеседник положил трубку / занято → разговор окончен (и НЕ перезваниваем сами)
-            if any(k in str(status) for k in ("DISCARDED", "BUSY", "KICKED", "CLOSED")):
-                chat_id = int(getattr(update, "chat_id", 0) or 0)
+            if is_call_over(status):
                 event = _ended.get(chat_id)
                 if event is not None:
                     event.set()
@@ -202,6 +240,59 @@ def _hook_updates() -> None:
             logger.debug("frame hook failed", exc_info=True)
 
     _hooked = True
+
+
+def _answer_or_decline(chat_id: int) -> None:
+    """Кто-то звонит аккаунту Джарвиса. Владелец — берём трубку (разговор ведёт call_assistant),
+    остальным — сбрасываем: это личный помощник, а не общий номер."""
+    async def run() -> None:
+        taken = False
+        if _on_incoming is not None:
+            try:
+                taken = bool(await _on_incoming(chat_id))
+            except Exception:
+                logger.exception("incoming call handler failed")
+        if not taken:
+            logger.info("call %s: входящий — сбрасываю", chat_id)
+            try:
+                await _calls.leave_call(chat_id)
+            except Exception:
+                logger.debug("decline failed", exc_info=True)
+
+    task = asyncio.get_running_loop().create_task(run(), name=f"incoming-{chat_id}")
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
+
+
+async def accept_stream_call(user_id: int) -> dict[str, Any]:
+    """Взять трубку входящего звонка так, чтобы звук шёл потоком (как open_stream_call).
+    Возвращает {'answered': bool, 'error': str|None, 'incoming': Queue, 'ended': Event}."""
+    try:
+        from pytgcalls.types import AudioQuality, ExternalMedia, MediaStream, RecordStream  # type: ignore
+    except Exception as exc:
+        return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+    from . import call_net
+
+    uid = int(user_id)
+    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
+    _incoming[uid] = queue
+    ended = asyncio.Event()
+    _ended[uid] = ended
+    stats = call_net.begin(uid)
+    try:
+        await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW))
+    except Exception as exc:
+        logger.info("call %s: входящий не принят — %s: %s · %s", uid, type(exc).__name__, str(exc)[:200], stats.summary())
+        call_net.end(uid)
+        _incoming.pop(uid, None)
+        _ended.pop(uid, None)
+        return {"answered": False, "error": classify_error(exc)}
+    logger.info("call %s: входящий принят, соединение через %s · %s", uid, stats.at(), stats.summary())
+    try:
+        await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
+    except Exception:
+        logger.warning("record() failed — собеседника не слышно", exc_info=True)
+    return {"answered": True, "error": None, "incoming": queue, "ended": ended}
 
 
 # ------------------------------------------------------------------ потоковый звонок (Gemini Live)

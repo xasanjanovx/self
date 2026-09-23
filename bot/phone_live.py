@@ -27,6 +27,7 @@ import time
 import wave
 from typing import Any
 
+from . import billing
 from . import live_call
 from . import phone
 from . import services
@@ -52,7 +53,8 @@ def phone_declarations() -> list[dict[str, Any]]:
 
 
 # на заблокированном телефоне — только после разблокировки (звонки, сообщения, чужая переписка)
-NEED_UNLOCK = {"phone_call", "send_sms", "telegram_send", "confirm_send", "telegram_read", "open_app", "open_link", "navigate", "undo_last"}
+NEED_UNLOCK = {"phone_call", "send_sms", "telegram_send", "confirm_send", "telegram_read", "open_app", "open_link", "navigate", "undo_last",
+               "recent_calls", "call_back", "call_forwarding", "settings_panel", "look"}
 
 _SKY_ICON = (("гроз", "⛈"), ("снег", "🌨"), ("дожд", "🌧"), ("ливн", "🌧"), ("морос", "🌦"), ("туман", "🌫"), ("пасмур", "☁️"),
              ("облач", "⛅"), ("ясн", "☀️"))
@@ -89,8 +91,7 @@ class PhoneLive(_Session):
         self.turn = phone.PhoneTurn(uid=self.uid, device=device)
         self.runner = phone.make_runner(self.turn)
         self._phone_lock = asyncio.Lock()
-        self._gem_lock = asyncio.Lock()
-        self._tool_tasks: set[asyncio.Task] = set()
+        self._gem_lock = self._send_lock
         self.user_lines: list[str] = []
         self.jarvis_lines: list[str] = []
 
@@ -166,6 +167,13 @@ class PhoneLive(_Session):
                     await self.say_text(gem, "[Телефон разблокирован — сразу сделай то, что он просил.]")
                 elif kind == "greet":
                     await self.say_text(gem, GREET)
+                elif kind == "image" and data.get("data"):
+                    # кадр живой камеры (JPEG ~1 в секунду) — модель «видит», что он показывает
+                    await self.to_gemini(gem, {"realtimeInput": {"video": {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")}}})
+                elif kind == "camera":
+                    note = ("[Камера включена — ты видишь то, что он показывает. Кадры идут потоком.]" if data.get("on")
+                            else "[Камера выключена — ты больше ничего не видишь.]")
+                    await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
                 elif kind == "action_error":
                     await self.say_text(gem, f"[Действие на телефоне не удалось: {str(data.get('text') or '')[:200]}. Коротко скажи ему об этом.]")
                 elif kind == "bye":
@@ -181,10 +189,16 @@ class PhoneLive(_Session):
             data = _decode(msg)
             if data is None:
                 if msg.type.name in {"CLOSE", "CLOSED", "CLOSING", "ERROR"}:
-                    logger.info("phone live: Gemini закрыл соединение (%s)", getattr(msg, "extra", ""))
+                    extra = str(getattr(msg, "extra", "") or "")
+                    logger.info("phone live: Gemini закрыл соединение (%s)", extra)
+                    if billing.is_billing_error(None, extra):
+                        billing.exhausted(extra)
+                        await self.to_phone({"type": "error", "text": "Баланс Gemini закончился — пополните в AI Studio"})
                     self.stop.set()
                     return
                 continue
+            if "usageMetadata" in data:
+                billing.record(self.result.model or live_call.MODELS[0], data["usageMetadata"], kind="live")
             sc = data.get("serverContent") or {}
             if sc.get("interrupted"):
                 await self.to_phone({"type": "interrupted"})
@@ -256,13 +270,12 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
     from .handlers.common import profile_by_id
 
     started = time.monotonic()
-    profile = await profile_by_id(uid)
-    persona = await services.persona(uid)
-    snapshot, memory = await asyncio.gather(phone._snapshot(profile), extra.memory_prompt(uid))
+    profile, persona, memory = await asyncio.gather(profile_by_id(uid), services.persona(uid), extra.memory_prompt(uid))
+    snapshot = await phone._snapshot(profile)
+    prepared = time.monotonic() - started
     device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
     system = live_call.system_instruction(profile, persona, mode="phone", snapshot=snapshot, memory=memory)
-    if device.get("battery") is not None:
-        system += f"\nТелефон: батарея {device.get('battery')}%{', заряжается' if device.get('charging') else ''}."
+    system += phone.device_prompt(device) + billing.voice_note()
     sess = PhoneLive(profile, persona, system=system, phone_ws=phone_ws, device=device)
     async with aiohttp.ClientSession() as http:
         try:
@@ -272,7 +285,7 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
             await sess.to_phone({"type": "error", "text": "Не удалось подключиться к Gemini"})
             return
         await sess.to_phone({"type": "ready", "model": sess.result.model})
-        logger.info("phone live %s: готов за %.1f с", uid, time.monotonic() - started)
+        logger.info("phone live %s: готов за %.1f с (данные %.1f с)", uid, time.monotonic() - started, prepared)
         if str(hello.get("text") or "").strip():
             await sess.to_phone({"type": "user", "text": str(hello["text"]), "final": True})
             sess.user_lines.append(str(hello["text"]))

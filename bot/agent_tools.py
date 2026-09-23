@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 from dataclasses import dataclass, field
@@ -496,13 +497,21 @@ async def _update_entry(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {"before": entry_view(row), "after": entry_view({**row, **fields})}
 
 
-@tool("delete_finance_entries", "Удалить операции по id (можно несколько).", {"ids": IDS}, ("ids",))
+MASS_DELETE = 10  # больше — сначала переспросить (голосом легко ошибиться: «удали всё за месяц»)
+
+
+@tool("delete_finance_entries", "Удалить операции по id (можно несколько). Больше 10 сразу — вернёт confirm_needed: переспроси и повтори с confirm=true.",
+      {"ids": IDS, "confirm": P("BOOLEAN", "он подтвердил массовое удаление")}, ("ids",))
 async def _delete_entries(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     ids = {str(x) for x in (a.get("ids") or []) if _str(x)}
     entries = await services.finance_entries(ctx.uid)
     rows = [r for r in entries if str(r.get("id")) in ids]
     if not rows:
         return {"error": "no matching entries"}
+    if len(rows) > MASS_DELETE and not _bool(a.get("confirm")):
+        total = sum(float(r.get("amount") or 0) for r in rows)
+        return {"confirm_needed": len(rows), "total_amount": total, "preview": [entry_view(r) for r in rows[:5]],
+                "hint": f"спроси: «Удалить {len(rows)} операций на {fin.fmt_money(total)}?» — «да» → повтори с confirm=true"}
     await db.delete_finance_entries(ctx.uid, [r["id"] for r in rows])
     cache.invalidate(ctx.uid, "fin_entries")
     undo.push(ctx.uid, {"type": "restore_entries", "rows": rows})
@@ -1055,10 +1064,10 @@ async def _open_screen(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 async def snapshot(profile: Profile) -> str:
     """Короткий срез данных для системного промпта: балансы, сегодня, лимиты, регулярные, напоминания, питание, последние операции с id."""
     uid = profile.telegram_id
-    snap = await services.finance_snapshot(profile)
-    limits, recurring, rems, plan, today_logs = (
-        await services.budgets(uid), await services.recurring(uid), await services.reminders(uid),
-        await services.nutrition_profile(uid), await services.today_calorie_logs(profile),
+    # всё сразу: по очереди это десяток походов в Supabase (до 5 с на холодную)
+    snap, limits, recurring, rems, plan, today_logs, extra_lines = await asyncio.gather(
+        services.finance_snapshot(profile), services.budgets(uid), services.recurring(uid), services.reminders(uid),
+        services.nutrition_profile(uid), services.today_calorie_logs(profile), _assistant_lines(profile),
     )
     m = fin.fmt_money
     parts = [
@@ -1094,14 +1103,20 @@ async def snapshot(profile: Profile) -> str:
             what = f"{v['from']}→{v['to']}" if v["kind"] == "transfer" else f"{'+' if v['kind'] == 'income' else '−'}{v.get('category')}"
             lines.append(f"[{v['id']}] {v['date']} {m(v['amount'])} {what}{(' «' + v['note'] + '»') if v.get('note') else ''}")
         parts.append("Последние операции (id, дата, сумма, категория): " + "; ".join(lines))
+    parts.extend(extra_lines)
+    return "\n".join(parts)
+
+
+async def _assistant_lines(profile: Profile) -> list[str]:
     try:
-        parts.extend(await agent_tools_assistant.snapshot_lines(profile))
+        return await agent_tools_assistant.snapshot_lines(profile)
     except Exception:
         logger.debug("assistant snapshot failed", exc_info=True)
-    return "\n".join(parts)
+        return []
 
 
 from . import agent_tools_assistant  # noqa: E402  — регистрирует инструменты заметок/задач/целей/сроков
 from . import agent_tools_extra  # noqa: E402,F401  — ask_user, память, курсы валют, калькулятор, поиск, погода
+from . import agent_tools_bulk  # noqa: E402,F401  — найти любую запись, массовые правки
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

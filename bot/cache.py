@@ -42,6 +42,19 @@ def invalidate(user_id: int, prefix: str | None = None) -> None:
         bucket.pop(key, None)
 
 
+def drop_expiring(user_id: int, within: float, prefixes: set[str]) -> int:
+    """Убрать данные (только ключи с этими префиксами), которые истекут в ближайшие `within` секунд, —
+    чтобы фоновая подгрузка обновила их заранее, а живой запрос не ждал базу."""
+    bucket = _store.get(user_id)
+    if not bucket:
+        return 0
+    limit = time.monotonic() + within
+    stale = [k for k, (expires, _) in bucket.items() if isinstance(k, tuple) and k and k[0] in prefixes and expires < limit]
+    for k in stale:
+        bucket.pop(k, None)
+    return len(stale)
+
+
 async def remember(
     user_id: int,
     key: Hashable,

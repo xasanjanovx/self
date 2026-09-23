@@ -17,7 +17,7 @@ from . import i18n
 from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
-from .middlewares import AccessMiddleware, DedupeMiddleware, global_error_handler
+from .middlewares import AccessMiddleware, DedupeMiddleware, TidyMiddleware, global_error_handler
 from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, wake_worker
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,10 @@ async def on_startup(bot: Bot) -> None:
         await phone_api.start()  # голосовой Джарвис на телефоне (нужен JARVIS_TOKEN)
     except Exception:
         logger.exception("phone api failed to start")
+    from . import call_assistant
+
+    # аккаунт Джарвиса — в сети сразу (входящие звонки), не мешая старту бота
+    background_tasks.append(asyncio.create_task(call_assistant.start_listening(), name="caller-start"))
     logger.info("Bot started. Owner: %s, members: %s", sorted(settings.allowed_telegram_ids) or "everyone", len(access.user_ids()) - len(settings.allowed_telegram_ids))
 
 
@@ -128,8 +132,9 @@ async def on_shutdown() -> None:
         except (asyncio.CancelledError, Exception):
             pass
     background_tasks.clear()
-    from . import caller, phone_api
+    from . import billing, caller, phone_api
 
+    billing.flush()
     await caller.stop()
     try:
         await phone_api.stop()
@@ -151,6 +156,9 @@ async def main() -> None:
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
     dp.callback_query.middleware(DedupeMiddleware(window=1.2))
+    tidy = TidyMiddleware()  # чистый чат: его сообщения и присланное «в чат» не копятся
+    dp.message.middleware(tidy)
+    dp.callback_query.middleware(tidy)
     dp.errors.register(global_error_handler)
 
     dp.include_router(build_router())

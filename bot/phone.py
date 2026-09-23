@@ -27,7 +27,7 @@ from . import names
 from . import services
 from . import tg_user
 from . import undo
-from .agent_tools import ARR, P, Tool, ToolContext, _str
+from .agent_tools import ARR, P, Tool, ToolContext, _bool, _str
 from .voice import speakable
 
 logger = logging.getLogger(__name__)
@@ -360,6 +360,148 @@ async def _undo_last(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     return {"ok": bool(ok)}
 
 
+# ------------------------------------------------------------------ звонки: журнал, перезвон, переадресация
+_CALL_KINDS = {"in": "входящий", "out": "исходящий", "missed": "пропущенный", "rejected": "отклонённый"}
+
+
+def recent_calls(device: dict[str, Any]) -> list[dict[str, Any]]:
+    """Журнал звонков, который телефон прислал в hello/device (последние ~10, свежие первыми)."""
+    out = []
+    for c in device.get("calls") or []:
+        if isinstance(c, dict) and (c.get("number") or c.get("name")):
+            out.append({"name": str(c.get("name") or "")[:60], "number": str(c.get("number") or "")[:30],
+                        "kind": _CALL_KINDS.get(str(c.get("type")), str(c.get("type") or "")), "when": str(c.get("when") or "")[:20],
+                        "seconds": int(c.get("duration") or 0)})
+    return out
+
+
+@ptool("recent_calls", "Кто звонил / кому звонил он: журнал последних звонков телефона («кто мне звонил?», «пропущенные есть?»).")
+async def _recent_calls(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    calls = recent_calls(turn.device)
+    if not calls:
+        if turn.device.get("calls_denied"):
+            return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении Джарвис выдать «Журнал звонков»"}
+        return {"calls": [], "note": "журнал пуст"}
+    return {"calls": calls}
+
+
+@ptool("call_back", "Перезвонить: последнему звонившему, последнему пропущенному или последнему, с кем говорил («перезвони», «набери, кто сейчас звонил»).",
+       {"which": P("STRING", "last_incoming | last_missed | last_any", enum=["last_incoming", "last_missed", "last_any"])})
+async def _call_back(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    which = _str(a.get("which")) or "last_incoming"
+    want = {"last_missed": {"пропущенный"}, "last_incoming": {"входящий", "пропущенный", "отклонённый"}}.get(which)
+    for c in recent_calls(turn.device):
+        if c["number"] and (want is None or c["kind"] in want):
+            return _action(turn, "call", number=c["number"], name=c["name"] or c["number"])
+    return {"error": "в журнале нет подходящего звонка"}
+
+
+_FORWARD = {"always": "21", "busy": "67", "no_answer": "61", "unreachable": "62"}
+
+
+@ptool("call_forwarding", "Переадресация обычных звонков SIM на другой номер (USSD-код оператора) или её отключение. "
+       "Перед включением ОДНОЙ фразой переспроси номер и условие, если он их не назвал явно.",
+       {"to": WHO, "variants": VARIANTS,
+        "when": P("STRING", "always (всегда) | busy (занято) | no_answer (не ответил) | unreachable (недоступен) | off (отключить всё)",
+                  enum=["always", "busy", "no_answer", "unreachable", "off"])}, ("when",))
+async def _call_forwarding(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    when = _str(a.get("when")) or "always"
+    if when == "off":
+        return _action(turn, "ussd", code="##002#", label="переадресация отключена")
+    number = names.as_phone_number(a.get("to"))
+    name = number
+    if not number:
+        if not load_contacts(turn.uid):
+            turn.need_contacts = True
+            return {"error": "Контакты с телефона ещё не загружены"}
+        found = find_contact(turn.uid, a.get("to"), a.get("variants"))
+        if "candidates" in found:
+            return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси, на кого переадресовать"}
+        if "match" not in found:
+            return {"error": f"В контактах нет «{a.get('to')}»"}
+        number, name = found["match"]["phones"][0], found["match"]["name"]
+    code = _FORWARD.get(when, "21")
+    return _action(turn, "ussd", code=f"**{code}*{number}#", label=f"переадресация на {name}")
+
+
+# ------------------------------------------------------------------ система
+@ptool("phone_status", "Состояние телефона: заряд батареи, зарядка, громкость, режим звонка, «не беспокоить», Wi-Fi, Bluetooth, версия приложения.")
+async def _phone_status(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    d = turn.device or {}
+    keys = ("battery", "charging", "volume", "ringer", "dnd", "wifi", "bluetooth", "brightness", "model", "app_version", "locked")
+    return {k: d.get(k) for k in keys if d.get(k) is not None} or {"error": "телефон не прислал состояние"}
+
+
+@ptool("brightness", "Яркость экрана: уровень в процентах, ярче/темнее или авто.",
+       {"percent": P("INTEGER", "0–100 (необязательно)"), "direction": P("STRING", "up | down | auto", enum=["up", "down", "auto"])})
+async def _brightness(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    if a.get("percent") is not None:
+        return _action(turn, "brightness", percent=max(0, min(100, int(a.get("percent")))))
+    direction = _str(a.get("direction"))
+    if direction not in {"up", "down", "auto"}:
+        return {"error": "нужно percent или direction"}
+    return _action(turn, "brightness", direction=direction)
+
+
+@ptool("do_not_disturb", "Режим «Не беспокоить»: включить / выключить.", {"on": P("BOOLEAN", "true — включить")}, ("on",))
+async def _dnd(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    return _action(turn, "dnd", on=bool(a.get("on")))
+
+
+@ptool("ringer_mode", "Режим звонка телефона: normal (со звуком), vibrate (вибрация), silent (без звука).",
+       {"mode": P("STRING", "normal | vibrate | silent", enum=["normal", "vibrate", "silent"])}, ("mode",))
+async def _ringer(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    mode = _str(a.get("mode"))
+    if mode not in {"normal", "vibrate", "silent"}:
+        return {"error": "mode: normal | vibrate | silent"}
+    return _action(turn, "ringer", mode=mode)
+
+
+_PANELS = ["wifi", "bluetooth", "internet", "volume", "nfc", "hotspot", "airplane", "battery", "display", "location", "settings"]
+
+
+@ptool("settings_panel", "Открыть переключатель системы: wifi, bluetooth, internet (моб. данные), volume, nfc, hotspot, airplane, "
+       "battery, display, location, settings. Сам Android не даёт приложениям включать Wi-Fi/Bluetooth — открываем панель, он нажимает один раз.",
+       {"panel": P("STRING", " | ".join(_PANELS), enum=_PANELS)}, ("panel",))
+async def _panel(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    panel = _str(a.get("panel"))
+    if panel not in _PANELS:
+        return {"error": "неизвестная панель"}
+    return _action(turn, "panel", panel=panel)
+
+
+# ------------------------------------------------------------------ камера
+@ptool("look", "Включить камеру и смотреть вместе с ним, как Gemini Live: «посмотри», «что это?», «что у меня в руках», "
+       "«прочитай/переведи, что тут написано», «отсканируй документ». Кадры придут тебе в разговор — описывай, что видишь, "
+       "отвечай на вопросы. Документ — перепиши текст и, если просит, send_to_chat. Выключить — look с on=false.",
+       {"on": P("BOOLEAN", "true — включить (по умолчанию), false — выключить"),
+        "camera": P("STRING", "back (основная) | front (селфи)", enum=["back", "front"])})
+async def _look(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    on = _bool(a.get("on"))
+    if on is False:
+        return _action(turn, "camera", on=False)
+    res = _action(turn, "camera", on=True, facing=_str(a.get("camera")) or "back")
+    res["note"] = "камера открывается — через секунду начнут приходить кадры; пока скажи коротко «Смотрю»"
+    return res
+
+
+def device_prompt(device: dict[str, Any]) -> str:
+    """Строки о телефоне для системного промпта живого разговора."""
+    d = device or {}
+    parts = []
+    if d.get("battery") is not None:
+        parts.append(f"батарея {d.get('battery')}%" + (", заряжается" if d.get("charging") else ""))
+    if d.get("app_version"):
+        parts.append(f"приложение Джарвис v{d.get('app_version')}")
+    if d.get("model"):
+        parts.append(str(d.get("model"))[:40])
+    missed = [c for c in recent_calls(d) if c["kind"] == "пропущенный"][:3]
+    line = ("\nТелефон: " + ", ".join(parts) + ".") if parts else ""
+    if missed:
+        line += " Пропущенные: " + "; ".join(f"{c['name'] or c['number']} ({c['when']})" for c in missed) + "."
+    return line
+
+
 def declarations() -> list[dict[str, Any]]:
     bot_tools = [d for d in tools.declarations() if d["name"] not in EXCLUDED_BOT_TOOLS]
     return bot_tools + [t.declaration() for t in PHONE_TOOLS.values()]
@@ -559,6 +701,27 @@ async def prefetch(uid: int) -> None:
         await asyncio.gather(_snapshot(profile), extra.memory_prompt(uid), _persona_rules(uid, profile.lang))
     except Exception:
         logger.debug("phone prefetch failed", exc_info=True)
+
+
+# данные для промпта Джарвиса (services.*): холодная сборка — до 5 с (десяток запросов в Supabase)
+WARM_KEYS = {"fin_entries", "fin_settings", "budgets", "recurring", "reminders", "notes", "tasks", "goals", "debt_deadlines",
+             "weights", "checkins", "persona", "memory", "user_settings", "kcal_today", "kcal_days", "nutri_profile", "profile"}
+WARM_EVERY = 120.0
+
+
+async def keep_warm(uid: int) -> None:
+    """Держим данные владельца свежими в памяти: «Джарвис» → разговор готов за ~0.4 с (подключение к Gemini),
+    а не 1.5–5 с. Раз в 2 минуты обновляем то, что истечёт до следующего раза; изменения данных
+    сбрасывают кэш как раньше, так что устаревшего Джарвис не видит."""
+    while True:
+        try:
+            cache.drop_expiring(uid, WARM_EVERY + 15, WARM_KEYS)
+            await prefetch(uid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("keep warm failed", exc_info=True)
+        await asyncio.sleep(WARM_EVERY)
 
 
 async def handle(uid: int, text: str, device: dict[str, Any] | None = None, *, step_fn=None) -> dict[str, Any]:

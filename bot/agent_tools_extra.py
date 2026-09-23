@@ -321,3 +321,36 @@ async def _weather(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
                 "wind_kmh": cur.get("wind_speed_10m"), "humidity": cur.get("relative_humidity_2m")},
         "days": days,
     }
+
+
+# ------------------------------------------------------------------ баланс Gemini и версия
+@tool(
+    "ai_status",
+    "Про самого Джарвиса: остаток предоплаты Gemini (AI Studio), на сколько дней хватит, расход сегодня/за месяц/в среднем, "
+    "нужно ли пополнять, какая версия бота и приложения, какие модели. «Сколько осталось на балансе?», «когда пополнять?», «какая у тебя версия?».",
+)
+async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import billing, version
+    from .context import ai
+    from .live_call import MODELS
+
+    out: dict[str, Any] = {"money": billing.status(), "version": version.info(),
+                           "models": {"chat": ai.agent_model, "text": ai.text_model, "voice_calls": MODELS[0], "tts": ai.tts_model}}
+    out["how_counted"] = ("остаток считает сам бот по ценам Google из каждого ответа Gemini; точный — в AI Studio → Billing. "
+                          "Скажет фактический остаток — вызови set_ai_balance, счёт станет точнее")
+    return out
+
+
+@tool(
+    "set_ai_balance",
+    "Он назвал остаток предоплаты Gemini в AI Studio («на балансе 7.40$») — balance_usd; или пополнил («пополнил на 10 долларов») — topup_usd. "
+    "Суммы в долларах США.",
+    {"balance_usd": P("NUMBER", "фактический остаток, $"), "topup_usd": P("NUMBER", "сумма пополнения, $")},
+)
+async def _set_ai_balance(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import billing
+
+    balance, topup = _num(a.get("balance_usd")), _num(a.get("topup_usd"))
+    if balance is None and topup is None:
+        return {"error": "назови сумму: остаток или пополнение в долларах"}
+    return billing.set_balance(usd=balance, topup=topup if balance is None else None)

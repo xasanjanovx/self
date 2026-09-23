@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import date, timedelta
 from typing import Any
 
@@ -17,6 +19,8 @@ from . import wake as wake_mod
 from . import undo
 from .agent_tools import ARR, DATE, ID, IDS, P, ToolContext, _bool, _int, _num, _str, _time_arg, parse_day, tool
 from .context import db
+
+logger = logging.getLogger(__name__)
 
 
 def _migration_error(table: str) -> dict[str, Any]:
@@ -618,17 +622,26 @@ async def snapshot_lines(ctx_profile: Any) -> list[str]:
     uid = ctx_profile.telegram_id
     today = ctx_profile.today
     parts: list[str] = []
-    notes = await services.notes(uid)
+
+    async def safe(coro, default):  # noqa: ANN001
+        try:
+            return await coro
+        except Exception:
+            logger.debug("snapshot part failed", exc_info=True)
+            return default
+
+    # всё сразу, а не по очереди (каждое — поход в Supabase, если кэш остыл)
+    notes, tasks, goals, logs, entries, deadlines = await asyncio.gather(
+        services.notes(uid), services.tasks(uid), services.goals(uid),
+        safe(services.calorie_logs(ctx_profile, 30), None), safe(services.finance_entries(uid), None), services.debt_deadlines(uid))
     if notes:
         parts.append("Заметки (id · текст): " + "; ".join(f"[{r.get('id')}] {str(r.get('text') or '')[:80]}" for r in notes[:20]))
-    tasks = await services.tasks(uid)
     if tasks:
         def _t(r: dict[str, Any]) -> str:
             due = str(r.get("due_date") or "")[:10]
             when = (f" до {due}" if due else "") + (f" {r.get('due_time')}" if r.get("due_time") else "")
             return f"[{r.get('id')}] {str(r.get('text') or '')[:60]}{when}"
         parts.append(f"Открытые задачи ({len(tasks)}): " + "; ".join(_t(r) for r in tasks[:15]))
-    goals = await services.goals(uid)
     if goals:
         try:
             statuses, _ = await goals_mod.statuses_for(ctx_profile, goals=goals[:8])
@@ -636,11 +649,10 @@ async def snapshot_lines(ctx_profile: Any) -> list[str]:
         except Exception:
             parts.append("Цели: " + "; ".join(f"[{g.get('id')}] {g.get('title')} ({goals_mod.kind_of(g)})" for g in goals[:8]))
     try:
-        logs, entries = await services.calorie_logs(ctx_profile, 30), await services.finance_entries(uid)
-        parts.extend(habits.prompt_lines(habits.meal_patterns(logs, tz=ctx_profile.tz, today=today), habits.spending_patterns(entries, today=today)))
+        if logs is not None and entries is not None:
+            parts.extend(habits.prompt_lines(habits.meal_patterns(logs, tz=ctx_profile.tz, today=today), habits.spending_patterns(entries, today=today)))
     except Exception:
         pass
-    deadlines = await services.debt_deadlines(uid)
     if deadlines:
         def _d(r: dict[str, Any]) -> str:
             due = str(r.get("due_date") or "")[:10]

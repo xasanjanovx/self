@@ -12,6 +12,7 @@
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
   POST /jarvis/v1/wake_check    — {"audio": WAV} → прозвучало ли «Джарвис» (защита от ложных срабатываний)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
+  POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY = 8 * 1024 * 1024
 _runner: web.AppRunner | None = None
+_warm: asyncio.Task | None = None
 _lock = asyncio.Lock()
 
 _STT_PROMPT = (
@@ -186,6 +188,46 @@ async def wake_check(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
 
 
+_CALL_COMMAND_PROMPT = (
+    "Телефон владельца звонит (звонит: «{caller}»). Помощник сказал, кто звонит, и 5 секунд слушает команду. "
+    "На записи — его голос (может быть и мелодия звонка). Язык — русский или узбекский. Реши, что он велел:\n"
+    "answer — ответить/взять трубку («ответь», «возьми», «алло», «javob ber», «ol»);\n"
+    "decline — сбросить/отклонить («сбрось», «не бери», «отклони», «o'chir», «olma»);\n"
+    "decline_message — сбросить и написать («скажи, что перезвоню», «напиши, что я занят», «keyin qo'ng'iroq qilaman de») — "
+    "в message готовый короткий текст от первого лица на языке его речи;\n"
+    "none — ничего из этого (тишина, мелодия, посторонний разговор).\n"
+    'Верни JSON: {{"intent": "answer|decline|decline_message|none", "message": "", "heard": "дословно"}}'
+)
+
+
+async def call_command(request: web.Request) -> web.Response:
+    """Входящий звонок: после «Звонит мама» телефон 5 с слушает — «ответь», «сбрось», «скажи, что перезвоню»."""
+    data = await _json(request)
+    try:
+        audio = base64.b64decode(str(data.get("audio") or ""), validate=False)
+    except (binascii.Error, ValueError):
+        return web.json_response({"error": "bad audio"}, status=400)
+    if not audio:
+        return web.json_response({"intent": "none"})
+    started = time.monotonic()
+    prompt = _CALL_COMMAND_PROMPT.format(caller=str(data.get("caller") or "неизвестно")[:60])
+    try:
+        raw = await ai.generate([{"text": prompt}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
+                                model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
+        verdict = json.loads(raw) if raw.strip().startswith("{") else {}
+    except Exception:
+        logger.warning("call command failed", exc_info=True)
+        return web.json_response({"intent": "none"})
+    intent = str(verdict.get("intent") or "none")
+    if intent not in {"answer", "decline", "decline_message"}:
+        intent = "none"
+    message = str(verdict.get("message") or "").strip()[:300]
+    if intent == "decline_message" and not message:
+        message = "Сейчас не могу говорить, перезвоню позже."
+    logger.info("call command: %s за %.1f с «%s»", intent, time.monotonic() - started, str(verdict.get("heard") or "")[:60])
+    return web.json_response({"intent": intent, "message": message, "heard": str(verdict.get("heard") or "")})
+
+
 async def announce(request: web.Request) -> web.Response:
     """Входящий звонок: «Звонит мама» голосом бота (контакт «Onajonim» → «мама»)."""
     from . import phone_live
@@ -255,6 +297,7 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/greetings", greetings)
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
     app.router.add_post("/jarvis/v1/announce", announce)
+    app.router.add_post("/jarvis/v1/call_command", call_command)
     app.router.add_post("/jarvis/v1/contacts", contacts)
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
@@ -274,12 +317,18 @@ async def start() -> bool:
     await _runner.setup()
     await web.TCPSite(_runner, "0.0.0.0", port).start()
     logger.info("phone api listening on :%s (owner %s)", port, owner_id())
+    global _warm
+    if owner_id() is not None:
+        _warm = asyncio.create_task(phone.keep_warm(owner_id()), name="jarvis-warm")
     return True
 
 
 async def stop() -> None:
-    global _runner
+    global _runner, _warm
     runner, _runner = _runner, None
+    if _warm is not None:
+        _warm.cancel()
+        _warm = None
     if runner is not None:
         await runner.cleanup()
     await tg_user.stop()

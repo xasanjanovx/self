@@ -103,29 +103,120 @@ class _WS:
         self.closed = True
 
 
+class _RingSess:
+    """Сессия для _live_ready: подключение, отправка и приём — без сети."""
+
+    def __init__(self, fresh: "_WS", out: bytes = b"", greeting: str = "") -> None:
+        self.fresh = fresh
+        self.connects = 0
+        self.out = bytearray(out)
+        self.greeting = greeting
+        self.pre_answer = True
+
+    async def connect(self, http):  # noqa: ANN001
+        self.connects += 1
+        return self.fresh
+
+    async def send(self, ws, payload):  # noqa: ANN001
+        import json
+
+        try:
+            await ws.send_str(json.dumps(payload, ensure_ascii=False))
+            return True
+        except Exception:
+            return False
+
+    async def downlink(self, ws):  # noqa: ANN001
+        import asyncio
+
+        await asyncio.sleep(3600)
+
+
+def _first_turn(ws: "_WS") -> dict:
+    import json
+
+    return json.loads(ws.sent[0])["clientContent"]
+
+
 def test_live_reconnects_if_session_died_while_ringing():
     """Утром трубку взяли через 32 с — сессия Gemini уже закрылась, бот падал с висящим звонком."""
     import asyncio
-
-    fresh = _WS()
-
-    class _Sess:
-        connects = 0
-
-        async def connect(self, http):  # noqa: ANN001
-            _Sess.connects += 1
-            return fresh
 
     async def scenario():
         dead = _WS(closed=True)
 
         async def early_conn():
-            return dead
+            return dead, None
 
-        early = asyncio.create_task(early_conn())
-        ws = await live_call._live_ready(_Sess(), None, early)
-        assert ws is fresh and _Sess.connects == 1
-        import json
-        assert "Звонок соединён" in json.loads(fresh.sent[0])["clientContent"]["turns"][0]["parts"][0]["text"]
+        # приветствие не успело — просим начать заново
+        sess = _RingSess(_WS())
+        ws, down = await live_call._live_ready(sess, None, asyncio.create_task(early_conn()), live_call.KICK)
+        assert ws is sess.fresh and sess.connects == 1 and not sess.pre_answer
+        turn = _first_turn(ws)
+        assert "Звонок соединён" in turn["turns"][0]["parts"][0]["text"] and turn["turnComplete"] is True
+        down.cancel()
+
+        # приветствие уже накоплено — не здороваемся второй раз, только сообщаем модели, что сказала
+        sess = _RingSess(_WS(), out=b"\x00" * 4800, greeting="Доброе утро, Шеф!")
+        ws, down = await live_call._live_ready(sess, None, asyncio.create_task(early_conn()), live_call.KICK)
+        turn = _first_turn(ws)
+        assert "уже поздоровалась" in turn["turns"][0]["parts"][0]["text"] and turn["turnComplete"] is False
+        assert len(sess.out) == 4800  # накопленный голос сыграем сразу
+        down.cancel()
 
     asyncio.run(scenario())
+
+
+def test_live_keeps_pregreeted_session():
+    """Трубку взяли, пока сессия жива: берём её и её приём как есть — приветствие уже в очереди."""
+    import asyncio
+
+    async def scenario():
+        alive = _WS()
+        sess = _RingSess(_WS())
+        down = asyncio.create_task(asyncio.sleep(3600))
+
+        async def early_conn():
+            return alive, down
+
+        ws, d = await live_call._live_ready(sess, None, asyncio.create_task(early_conn()), live_call.KICK)
+        assert ws is alive and d is down and sess.connects == 0 and not sess.pre_answer
+        down.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_call_over_flags():
+    """«Положили трубку» — по флагам pytgcalls (занято приходит как DISCARDED|BUSY), текст — запасной путь."""
+    from bot import caller
+
+    assert caller.is_call_over("Status.DISCARDED_CALL|BUSY_CALL")
+    assert caller.is_call_over("LEFT_CALL")
+    assert not caller.is_call_over("Status.INCOMING_CALL")
+    assert caller._is_incoming("Status.INCOMING_CALL") and not caller._is_incoming("Status.INCOMING_CONFERENCE_CALL")
+
+
+def test_live_tools_run_in_parallel():
+    """Два инструмента в одном ходе не ждут друг друга, и один ответ уходит модели."""
+    import asyncio
+    import json
+    import time
+
+    sess = live_call._Session(_profile(), persona.Persona(), mode="assistant", system="x")
+
+    async def slow(call):  # noqa: ANN001
+        await asyncio.sleep(0.2)
+        return {"id": call["id"], "name": call["name"], "response": {"ok": True}}
+
+    sess._run_one = slow  # type: ignore[method-assign]
+    ws = _WS()
+
+    async def scenario():
+        t = time.monotonic()
+        await sess._run_tools(ws, [{"id": "1", "name": "weather"}, {"id": "2", "name": "currency_rates"}])
+        return time.monotonic() - t
+
+    took = asyncio.run(scenario())
+    assert took < 0.35
+    sent = json.loads(ws.sent[0])["toolResponse"]["functionResponses"]
+    assert [r["id"] for r in sent] == ["1", "2"]
