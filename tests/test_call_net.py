@@ -69,3 +69,21 @@ def test_wake_test_call_is_available_in_chat_not_inside_calls():
     kb = wake_settings_keyboard("ru", enabled=True, call_enabled=True, talk=True, voice_lang="uz", mode="fajr", days=[1, 2, 3, 4, 5, 6, 7])
     data = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert "wakeset:testwake" in data and not any("task" in d or "hardness" in d for d in data if d)
+
+
+def test_call_failures_are_classified_so_user_knows_what_to_do():
+    from bot import caller
+
+    class UserPrivacyRestrictedError(Exception):
+        pass
+
+    class TimedOutAnswer(Exception):
+        pass
+
+    class CallDeclined(Exception):
+        pass
+
+    assert caller.classify_error(UserPrivacyRestrictedError()) == "privacy"
+    assert caller.classify_error(TimedOutAnswer()) == "no_answer"
+    assert caller.classify_error(CallDeclined()) is None
+    assert caller.classify_error(RuntimeError("x")).startswith("RuntimeError")

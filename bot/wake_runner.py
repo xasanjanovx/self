@@ -220,6 +220,10 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     await services.save_wake_log(uid, plan.day, fields)
     if call_error:
         logger.info("wake call error for %s: %s", uid, call_error)
+        if call_error in {"privacy", "peer_unknown", "no_answer"}:
+            from . import call_assistant
+
+            await call_assistant.helper_intro(profile)  # один раз: чат с Джарвисом → «Добавить в контакты»
     if confirmed:
         await mark_awake(bot, profile, source="call")  # подтвердил голосом — больше не звоним
     return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "call_error": call_error}

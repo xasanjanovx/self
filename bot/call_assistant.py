@@ -141,32 +141,92 @@ async def call_now(profile: Profile, *, topic: str = "", lang: str | None = None
             "transcript": transcript}
 
 
+# что сделать, если звонок не доходит (у приглашённых чаще всего: аккаунта Джарвиса нет в контактах)
+_FIX_RU = ("Сделай один раз: 1) открой аккаунт Джарвиса (кнопка ниже или чат от него) → «Добавить в контакты»; "
+           "2) Telegram → Настройки → Конфиденциальность → Звонки → «Все» (или «Мои контакты»).")
+_FIX_UZ = ("Bir marta qiling: 1) Jarvis akkauntini oching (pastdagi tugma yoki undan kelgan chat) → «Kontaktga qo'shish»; "
+           "2) Telegram → Sozlamalar → Maxfiylik → Qo'ng'iroqlar → «Hamma» (yoki «Kontaktlarim»).")
+_DEVICE_RU = ("Если телефон не звонил, а пришёл только «пропущенный»: добавь Джарвиса в контакты; на iPhone выключи "
+              "Настройки → Телефон → «Заглушение неизвестных»; на Android разреши Telegram уведомления о звонках и работу в фоне.")
+_DEVICE_UZ = ("Telefon jiringlamay, faqat «o'tkazib yuborilgan» kelgan bo'lsa: Jarvisni kontaktlarga qo'shing; iPhone'da "
+              "Sozlamalar → Telefon → «Noma'lumlarni o'chirish»ni o'chiring; Android'da Telegram'ga qo'ng'iroq bildirishnomalari va fon rejimiga ruxsat bering.")
+HELPER_INTRO = {
+    "ru": ("Ассалому алайкум! Я — Джарвис, помощник из бота. С этого аккаунта я вам звоню (будильник и разговор). "
+           "Чтобы звонки приходили, добавьте меня в контакты — кнопка «Добавить в контакты» вверху этого чата — "
+           "и разрешите звонки: Настройки → Конфиденциальность → Звонки."),
+    "uz": ("Assalomu alaykum! Men — Jarvis, botdagi yordamchi. Shu akkauntdan sizga qo'ng'iroq qilaman (budilnik va suhbat). "
+           "Qo'ng'iroqlar kelishi uchun meni kontaktlarga qo'shing — shu chat tepasidagi «Kontaktga qo'shish» tugmasi — "
+           "va qo'ng'iroqlarga ruxsat bering: Sozlamalar → Maxfiylik → Qo'ng'iroqlar."),
+    "en": ("Assalamu alaikum! I'm Jarvis, the assistant from the bot. I call you from this account (alarm and conversations). "
+           "For calls to come through, add me to your contacts — the “Add contact” button at the top of this chat — "
+           "and allow calls: Settings → Privacy → Calls."),
+}
+
+
+async def helper_intro(profile: Profile) -> bool:
+    """Аккаунт Джарвиса один раз пишет человеку: появляется чат с кнопкой Telegram «Добавить в контакты»
+    (номер телефона никому давать не нужно). Только приглашённым, не чаще одного раза."""
+    from . import access
+    from .context import db
+
+    uid = profile.telegram_id
+    if access.is_owner(uid) or not caller.available():
+        return False
+    try:
+        if db.available("alerts_log"):
+            if await db.alert_was_sent(uid, "helper_intro"):
+                return False
+            await db.mark_alert_sent(uid, "helper_intro")
+        lang = profile.lang if profile.lang in HELPER_INTRO else "ru"
+        return await caller.send_message(uid, HELPER_INTRO[lang])
+    except Exception:
+        logger.warning("helper intro failed for %s", uid, exc_info=True)
+        return False
+
+
 async def _notify_failure(profile: Profile, error: str) -> None:
-    """Звонок не состоялся — сказать об этом в чат, а не молчать."""
+    """Звонок не состоялся — сказать, ЧТО сделать, а не просто «не удалось»."""
     reasons = {
         "tts unavailable": ("Не смог синтезировать голос — отвечаю текстом.", "Ovozni tayyorlay olmadim — matn bilan javob beraman."),
         "caller is not configured": ("Звонки пока не настроены.", "Qo'ng'iroqlar hali sozlanmagan."),
-        "peer_unknown": ("Аккаунт-помощник тебя ещё «не знает». Напиши ему любое сообщение в личку — и звонки заработают.",
-                         "Yordamchi akkaunt sizni hali tanimaydi. Unga shaxsiy xabar yozing — keyin qo'ng'iroq ishlaydi."),
+        "peer_unknown": ("Аккаунт Джарвиса тебя ещё «не знает». " + _FIX_RU, "Jarvis akkaunti sizni hali tanimaydi. " + _FIX_UZ),
+        "privacy": ("Telegram не пропустил звонок: твои настройки «Кто может мне звонить» запрещают аккаунту Джарвиса. " + _FIX_RU,
+                    "Telegram qo'ng'iroqni o'tkazmadi: «Kim menga qo'ng'iroq qila oladi» sozlamasi Jarvis akkauntiga ruxsat bermayapti. " + _FIX_UZ),
+        "no_answer": ("Звонила, но трубку не взяли. " + _DEVICE_RU, "Qo'ng'iroq qildim, lekin javob bo'lmadi. " + _DEVICE_UZ),
     }
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
-    await show_home(profile, f"📵 {profile.tr(ru, uz)}")
+    fixable = error in {"privacy", "no_answer", "peer_unknown"}
+    if fixable:
+        await helper_intro(profile)
+    await show_home(profile, f"📵 {profile.tr(ru, uz)}", helper_button=fixable)
 
 
-async def show_home(profile: Profile, notice: str | None = None, *, undo: bool = False) -> None:
+async def show_home(profile: Profile, notice: str | None = None, *, undo: bool = False, helper_button: bool = False) -> None:
     """Главный экран (он в чате один) + строка про звонок — вместо отдельных сообщений,
     которые потом висят в чате. Заодно убирает экран Джарвиса, с которого звонили."""
     try:
+        from aiogram.types import InlineKeyboardMarkup
+
         from . import screen as screen_mod
         from .context import bot_instance
         from .handlers.menu import build_dashboard
-        from .keyboards import main_menu_keyboard
+        from .keyboards import _btn, main_menu_keyboard
 
         text = await build_dashboard(profile)
         if notice:
             text += f"\n\n{notice}"
-        await screen_mod.show_screen(bot_instance(), profile.telegram_id, text, main_menu_keyboard(profile.lang, undo=undo))
+        kb = main_menu_keyboard(profile.lang, undo=undo)
+        if helper_button and caller.helper_id:
+            # открыть профиль аккаунта Джарвиса → «Добавить в контакты» (без номера телефона)
+            button = _btn("👤 " + profile.tr("Аккаунт Джарвиса", "Jarvis akkaunti"), url=f"tg://user?id={caller.helper_id}")
+            try:
+                await screen_mod.show_screen(bot_instance(), profile.telegram_id, text,
+                                             InlineKeyboardMarkup(inline_keyboard=[[button], *kb.inline_keyboard]))
+                return
+            except Exception:
+                logger.info("helper button rejected by Telegram — показываю без неё")
+        await screen_mod.show_screen(bot_instance(), profile.telegram_id, text, kb)
     except Exception:
         logger.debug("call home screen failed", exc_info=True)
 

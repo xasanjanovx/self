@@ -108,15 +108,15 @@ WELCOME = {
     "ru": ("👋 <b>Добро пожаловать!</b>\n\nЭто личный помощник с ИИ «Джарвис». Просто пиши или говори голосом, как человеку:\n"
            "• «такси 25 000», «обед 40к» — расходы\n• фото еды — калории\n• «напомни завтра в 9 позвонить маме»\n"
            "• «накопить 5 млн к декабрю» — цели\n• 🤖 Джарвис — звонок, будильник, голос\n\n"
-           "Все твои данные видишь только ты."),
+           "Все твои данные видишь только ты.\n\n📞 Джарвис написал тебе из своего аккаунта — добавь его в контакты, чтобы его звонки доходили."),
     "uz": ("👋 <b>Xush kelibsiz!</b>\n\nBu sun'iy intellektli shaxsiy yordamchi — «Jarvis». Odamga yozgandek yozing yoki ovozli gapiring:\n"
            "• «taksi 25 000», «tushlik 40k» — xarajatlar\n• ovqat rasmi — kaloriya\n• «ertaga 9 da onamga qo'ng'iroq qilishni eslat»\n"
            "• «dekabrgacha 5 mln yig'ish» — maqsadlar\n• 🤖 Jarvis — qo'ng'iroq, budilnik, ovoz\n\n"
-           "Ma'lumotlaringizni faqat siz ko'rasiz."),
+           "Ma'lumotlaringizni faqat siz ko'rasiz.\n\n📞 Jarvis o'z akkauntidan sizga yozdi — qo'ng'iroqlari kelishi uchun uni kontaktlarga qo'shing."),
     "en": ("👋 <b>Welcome!</b>\n\nThis is your personal AI assistant, Jarvis. Just write or speak to it like to a person:\n"
            "• “taxi 25 000”, “lunch 40k” — expenses\n• a food photo — calories\n• “remind me tomorrow at 9 to call mom”\n"
            "• “save 5 mln by December” — goals\n• 🤖 Jarvis — calls, alarm, voice\n\n"
-           "Only you can see your data."),
+           "Only you can see your data.\n\n📞 Jarvis has messaged you from its own account — add it to your contacts so its calls come through."),
 }
 
 
@@ -127,6 +127,15 @@ async def _welcome(message: Message, lang: str) -> None:
         await screen_mod.send_ephemeral(message.bot, message.chat.id, WELCOME.get(lang, WELCOME["en"]), keep_previous=True, ttl=6 * 3600)
     except Exception:
         logger.debug("welcome failed", exc_info=True)
+    # аккаунт Джарвиса сразу пишет новому человеку: у него появляется чат с кнопкой «Добавить в контакты» —
+    # без этого звонки Джарвиса часто не доходят (приватность «Мои контакты», iPhone глушит незнакомых)
+    try:
+        from . import call_assistant
+        from .handlers.common import profile_by_id
+
+        await call_assistant.helper_intro(await profile_by_id(message.chat.id))
+    except Exception:
+        logger.debug("helper intro on join failed", exc_info=True)
 
 
 class DedupeMiddleware(BaseMiddleware):

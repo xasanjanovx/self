@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _client: Any = None
 _calls: Any = None
+helper_id: int | None = None  # id аккаунта-помощника (для кнопки «открыть Джарвиса» / добавить в контакты)
 _lock = asyncio.Lock()
 _import_error: str | None = None
 
@@ -69,7 +70,9 @@ async def start() -> bool:
             except Exception:
                 logger.warning("call diagnostics not installed", exc_info=True)
             me = await _client.get_me()
-            logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), getattr(me, "id", None))
+            global helper_id
+            helper_id = getattr(me, "id", None)
+            logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
             return True
         except Exception as exc:
             _import_error = f"{type(exc).__name__}: {exc}"
@@ -269,10 +272,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
     if last_exc is not None:
         _incoming.pop(uid, None)
         _ended.pop(uid, None)
-        name = type(last_exc).__name__.lower()
-        if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
-            return {"answered": False, "error": None}
-        return {"answered": False, "error": f"{type(last_exc).__name__}: {last_exc}"}
+        return {"answered": False, "error": classify_error(last_exc)}
     # свежее событие после ответа: всё, что пришло про прошлые попытки, больше не считается
     ended = asyncio.Event()
     _ended[uid] = ended
@@ -283,6 +283,22 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
     except Exception:
         logger.warning("record() failed — собеседника не слышно", exc_info=True)
     return {"answered": True, "error": None, "incoming": queue, "ended": ended}
+
+
+def classify_error(exc: Exception) -> str | None:
+    """Почему звонок не состоялся — чтобы сказать человеку, ЧТО сделать, а не «не удалось».
+
+    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт Джарвиса;
+    no_answer — звонило, но трубку не взяли (часто: звонящего нет в контактах → телефон глушит);
+    None      — отклонил / занято (сам решил не брать)."""
+    name = type(exc).__name__.lower()
+    if "privacy" in name:
+        return "privacy"
+    if "timeout" in name or "notanswer" in name:
+        return "no_answer"
+    if any(k in name for k in ("discarded", "busy", "declined")):
+        return None
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def send_audio(user_id: int, pcm: bytes) -> bool:
