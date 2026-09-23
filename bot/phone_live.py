@@ -39,6 +39,7 @@ from .live_call import MAX_SECONDS, _decode, _jsonable, _send_to_chat, _Session
 logger = logging.getLogger(__name__)
 
 INPUT_RATE = 16000
+VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 700)
 SCREEN_MODEL = os.getenv("SCREEN_MODEL") or "gemini-3.8-flash"
 MAX_CONTROL_STEPS = 30
 CONTROL_SECONDS = 180
@@ -188,6 +189,26 @@ class PhoneLive(_Session):
         self.controlling = False
         self.user_lines: list[str] = []
         self.jarvis_lines: list[str] = []
+
+    # --- Gemini: быстрее понимать, что он договорил (по умолчанию модель ждёт паузу ~2–3 с)
+    vad_tuned = True
+
+    def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
+        payload = super().setup_payload(model, rich=rich)
+        if self.vad_tuned:
+            payload["setup"]["realtimeInputConfig"] = {"automaticActivityDetection": {
+                "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH", "silenceDurationMs": VAD_SILENCE_MS, "prefixPaddingMs": 200}}
+        return payload
+
+    async def connect(self, session):  # noqa: ANN001
+        try:
+            return await super().connect(session)
+        except Exception as exc:
+            if not self.vad_tuned:
+                raise
+            logger.warning("phone live: настройка VAD не принята (%s) — без неё", str(exc)[:160])
+            self.vad_tuned = False
+            return await super().connect(session)
 
     # --- связь с телефоном
     async def to_phone(self, payload: dict[str, Any] | bytes) -> None:
@@ -433,11 +454,13 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
 
 
 # ------------------------------------------------------------------ «Да?» голосом бота — мгновенно, без ожидания Gemini
+# совсем короткое («Да?») TTS Gemini часто не озвучивает — фразы чуть длиннее
 _GREETINGS = {
-    "ru": ["Да?", "Слушаю.", "Да, {hon}?"],
-    "uz": ["Ha?", "Eshitaman.", "Ha, {hon}?"],
-    "en": ["Yes?", "I'm listening.", "Yes, {hon}?"],
+    "ru": ["Да, слушаю.", "Слушаю вас.", "Да, {hon}, я здесь."],
+    "uz": ["Ha, eshitaman.", "Labbay, eshitaman.", "Ha, {hon}, shu yerdaman."],
+    "en": ["Yes, I'm listening.", "I'm here.", "Yes, {hon}?"],
 }
+GREETINGS_VERSION = 2
 _HON = {"shef": ("Шеф", "Shef"), "ser": ("Сэр", "Ser"), "boss": ("Босс", "Boss"), "mix": ("Шеф", "Shef")}
 
 
@@ -463,19 +486,16 @@ async def greetings(uid: int) -> dict[str, Any]:
                 continue
             t = t.format(hon=hon[0] if persona.lang == "ru" else hon[1])
         texts.append(t)
-    key = f"{persona.voice}_{persona.lang}_{persona.honorific}"
+    key = f"v{GREETINGS_VERSION}_{persona.voice}_{persona.lang}_{persona.honorific}"
     cache_file = data_dir() / f"greetings_{key}.json"
     try:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    clips = []
-    for t in texts:
-        pcm = await ai.synthesize(t, voice=persona.voice)
-        if pcm:
-            clips.append({"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()})
+    pcms = await asyncio.gather(*(ai.synthesize(t, voice=persona.voice) for t in texts), return_exceptions=True)
+    clips = [{"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()} for t, pcm in zip(texts, pcms) if isinstance(pcm, bytes) and pcm]
     out = {"key": key, "clips": clips}
-    if clips:
+    if len(clips) == len(texts):
         try:
             cache_file.write_text(json.dumps(out), encoding="utf-8")
         except OSError:
