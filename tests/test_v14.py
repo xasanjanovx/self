@@ -280,3 +280,10 @@ def test_tidy_deletes_user_message_and_sent_on_button(monkeypatch):
 
     _run(sent_then_button())
     assert bot_deleted == [(5, 101)] and not screen._sent.get(5)
+
+
+def test_phone_api_routes_include_new_endpoints():
+    from bot import phone_api
+
+    routes = {r.resource.canonical for r in phone_api.build_app().router.routes() if r.resource is not None}
+    assert {"/jarvis/v1/call_command", "/jarvis/v1/tg/quick_send", "/jarvis/v1/live"} <= routes

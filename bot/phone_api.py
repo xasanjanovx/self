@@ -17,6 +17,7 @@
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
   GET  /jarvis/v1/tg/status
+  POST /jarvis/v1/tg/quick_send — {"name", "text"}: сбросил звонок в Telegram — «перезвоню» звонившему от его имени
 """
 from __future__ import annotations
 
@@ -194,7 +195,7 @@ _CALL_COMMAND_PROMPT = (
     "answer — ответить/взять трубку («ответь», «возьми», «алло», «javob ber», «ol»);\n"
     "decline — сбросить/отклонить («сбрось», «не бери», «отклони», «o'chir», «olma»);\n"
     "decline_message — сбросить и написать («скажи, что перезвоню», «напиши, что я занят», «keyin qo'ng'iroq qilaman de») — "
-    "в message готовый короткий текст от первого лица на языке его речи;\n"
+    "в message готовый короткий текст от первого лица на языке его речи, со ВСЕМИ его подробностями (время, причина: «через час», «на совещании»);\n"
     "none — ничего из этого (тишина, мелодия, посторонний разговор).\n"
     'Верни JSON: {{"intent": "answer|decline|decline_message|none", "message": "", "heard": "дословно"}}'
 )
@@ -288,6 +289,24 @@ async def tg_status(request: web.Request) -> web.Response:
     return web.json_response(await tg_user.status())
 
 
+async def tg_quick_send(request: web.Request) -> web.Response:
+    """Он сбросил звонок в Telegram словами «скажи, что перезвоню» — пишем звонившему от его имени.
+    Имя — ровно как в уведомлении о звонке; если чат не найден однозначно — не пишем никому."""
+    data = await _json(request)
+    name, text = str(data.get("name") or "").strip(), str(data.get("text") or "").strip()
+    if not name or not text:
+        return web.json_response({"error": "name and text required"}, status=400)
+    if not tg_user.configured():
+        return web.json_response({"error": "telegram not connected"})
+    found = await tg_user.find_chat([name])
+    if "match" not in found:
+        logger.info("tg quick send: чат «%s» не найден однозначно", name)
+        return web.json_response({"error": "chat not found", "candidates": [c["name"] for c in found.get("candidates") or []]})
+    ok = await tg_user.send(found["match"], text[:500])
+    logger.info("tg quick send → %s: %s", found["match"].get("name"), "ok" if ok else "fail")
+    return web.json_response({"ok": ok, "to": found["match"].get("name")})
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[_auth], client_max_size=MAX_BODY)
     app.router.add_get("/jarvis/v1/ping", ping)
@@ -302,6 +321,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
     app.router.add_get("/jarvis/v1/tg/status", tg_status)
+    app.router.add_post("/jarvis/v1/tg/quick_send", tg_quick_send)
     return app
 
 
