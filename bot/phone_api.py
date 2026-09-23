@@ -7,6 +7,7 @@
   GET  /jarvis/v1/ping          — жив ли сервер, подключён ли Telegram, сколько контактов
   POST /jarvis/v1/voice         — {"audio": base64 WAV | "text": str, "device": {...}} →
                                    {"transcript", "say", "actions": [...], "listen", "need_contacts"}
+  POST /jarvis/v1/warm          — услышал «Джарвис»: прогреть кэши, пока человек договаривает
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
@@ -122,6 +123,13 @@ async def voice(request: web.Request) -> web.Response:
     return web.json_response({"transcript": transcript, **out})
 
 
+async def warm(request: web.Request) -> web.Response:
+    uid = owner_id()
+    if uid is not None:
+        phone._later(phone.prefetch(uid))
+    return web.json_response({"ok": True})
+
+
 async def contacts(request: web.Request) -> web.Response:
     uid = owner_id()
     data = await _json(request)
@@ -161,6 +169,7 @@ def build_app() -> web.Application:
     app = web.Application(middlewares=[_auth], client_max_size=MAX_BODY)
     app.router.add_get("/jarvis/v1/ping", ping)
     app.router.add_post("/jarvis/v1/voice", voice)
+    app.router.add_post("/jarvis/v1/warm", warm)
     app.router.add_post("/jarvis/v1/contacts", contacts)
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)

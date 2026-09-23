@@ -368,13 +368,23 @@ def declarations() -> list[dict[str, Any]]:
 # ------------------------------------------------------------------ quick replies
 # Простое действие на телефоне («звоню», «ставлю будильник») или вопрос «отправить?» — ответ известен
 # заранее, второй запрос к модели ради одной фразы не делаем: для голоса важна каждая секунда.
+def ru_plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
 def _minutes(seconds: int, uz: bool) -> str:
     if seconds % 60:
-        return f"{seconds} soniya" if uz else f"{seconds} секунд"
+        return f"{seconds} soniya" if uz else f"{seconds} {ru_plural(seconds, 'секунду', 'секунды', 'секунд')}"
     m = seconds // 60
     if m % 60 == 0:
-        return f"{m // 60} soat" if uz else f"{m // 60} ч"
-    return f"{m} daqiqa" if uz else f"{m} минут"
+        h = m // 60
+        return f"{h} soat" if uz else f"{h} {ru_plural(h, 'час', 'часа', 'часов')}"
+    return f"{m} daqiqa" if uz else f"{m} {ru_plural(m, 'минуту', 'минуты', 'минут')}"
 
 
 def action_phrase(action: dict[str, Any], lang: str = "ru") -> str:
@@ -538,6 +548,17 @@ async def _snapshot(profile: Any) -> str:
     except Exception:
         logger.exception("phone snapshot failed")
         return "(данные временно недоступны)"
+
+
+async def prefetch(uid: int) -> None:
+    """Телефон услышал «Джарвис» — пока человек договаривает, прогреваем кэши профиля и данных для промпта."""
+    from .handlers.common import profile_by_id
+
+    try:
+        profile = await profile_by_id(uid)
+        await asyncio.gather(_snapshot(profile), extra.memory_prompt(uid), _persona_rules(uid, profile.lang))
+    except Exception:
+        logger.debug("phone prefetch failed", exc_info=True)
 
 
 async def handle(uid: int, text: str, device: dict[str, Any] | None = None, *, step_fn=None) -> dict[str, Any]:

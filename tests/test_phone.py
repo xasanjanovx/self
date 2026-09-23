@@ -250,3 +250,14 @@ def test_no_quick_reply_when_contact_is_ambiguous(uid):
     turn = phone.PhoneTurn(uid=uid)
     result = _run_quick(turn, "позвони маме", _call("phone_call", who="мама"), _say("Какой маме: Ойижон или Мама Beeline?"))
     assert turn.actions == [] and "Ойижон" in result.text
+
+
+@pytest.mark.parametrize("n, word", [(1, "минуту"), (3, "минуты"), (5, "минут"), (11, "минут"), (21, "минуту"), (24, "минуты")])
+def test_ru_plural(n, word):
+    assert phone.ru_plural(n, "минуту", "минуты", "минут") == word
+
+
+def test_action_phrases():
+    assert phone.action_phrase({"type": "timer", "seconds": 180}) == "Таймер на 3 минуты."
+    assert phone.action_phrase({"type": "timer", "seconds": 3600}) == "Таймер на 1 час."
+    assert phone.action_phrase({"type": "call", "name": "Ойижон"}) == "Звоню: Ойижон."
