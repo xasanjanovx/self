@@ -100,8 +100,11 @@ class PhoneLive(_Session):
     def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
         payload = super().setup_payload(model, rich=rich)
         if self.vad_tuned:
-            payload["setup"]["realtimeInputConfig"] = {"automaticActivityDetection": {
-                "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH", "silenceDurationMs": VAD_SILENCE_MS, "prefixPaddingMs": 200}}
+            vad: dict[str, Any] = {"endOfSpeechSensitivity": "END_SENSITIVITY_HIGH", "silenceDurationMs": VAD_SILENCE_MS, "prefixPaddingMs": 200}
+            if self.turn.device.get("duplex"):
+                # телефон шлёт микрофон и пока Джарвис говорит (эхоподавление): остаток эха не должен его перебивать
+                vad["startOfSpeechSensitivity"] = "START_SENSITIVITY_LOW"
+            payload["setup"]["realtimeInputConfig"] = {"automaticActivityDetection": vad}
         return payload
 
     async def connect(self, session):  # noqa: ANN001
@@ -350,4 +353,67 @@ async def greetings(uid: int) -> dict[str, Any]:
     return out
 
 
-__all__ = ["run", "greetings", "phone_declarations", "PhoneLive", "pcm_to_wav"]
+# ------------------------------------------------------------------ «Звонит мама» — кто звонит, голосом бота
+_LANG_NAMES = {"ru": "русском", "uz": "узбекском (латиница)", "en": "английском"}
+_ANNOUNCE_FALLBACK = {"ru": ("Звонит {name}", "Вам звонят"), "uz": ("{name} qo'ng'iroq qilyapti", "Sizga qo'ng'iroq"),
+                      "en": ("{name} is calling", "Incoming call")}
+
+
+def announce_prompt(name: str, app: str, lang: str, memory: str = "") -> str:
+    where = f" Звонок через {app}." if app and app.lower() not in {"phone", "телефон", ""} else ""
+    return (
+        f"На телефон владельца звонят. Контакт записан у него так: «{name or 'без имени'}».{where}\n"
+        f"Скажи ОДНОЙ короткой фразой на {_LANG_NAMES.get(lang, 'русском')} языке, кто звонит, — как живой помощник, который "
+        "понимает, кто это. Родственные и ласковые слова переводи и говори просто: onajonim, oyijon, ойи, онам → мама; "
+        "dadajon, otam, дада → папа; akam, ukam → брат; opam, singlim → сестра; buvijon → бабушка; bobojon → дедушка. "
+        "Лишнее из записи убирай (оператор, эмодзи, номера, «new», «work», «2»): «Мама Beeline» → мама. "
+        "Имя человека называй по-человечески: «Alisher aka» → Алишер. Номер без имени — «незнакомый номер». "
+        "Если звонок в Telegram или WhatsApp — добавь это. Верни ТОЛЬКО фразу, например: «Звонит мама», "
+        "«Алишер звонит в Telegram», «Звонит незнакомый номер»."
+        + (f"\nЧто владелец рассказывал о своих людях:\n{memory[:1500]}" if memory else "")
+    )
+
+
+def clean_announcement(text: str) -> str:
+    return str(text or "").strip().strip("«»\"'").splitlines()[0].strip() if str(text or "").strip() else ""
+
+
+async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
+    """Фраза «Звонит мама» и её голос (WAV в base64). Кэш — по имени, приложению и голосу."""
+    import hashlib
+
+    from . import agent_tools_extra as extra
+    from .tg_user import data_dir
+
+    persona = await services.persona(uid)
+    name = str(name or "").strip()[:80]
+    app = str(app or "").strip()[:30]
+    key = hashlib.sha1(f"{persona.voice}|{persona.lang}|{name}|{app}".encode()).hexdigest()[:16]
+    folder = data_dir() / "announce"
+    folder.mkdir(exist_ok=True)
+    cache_file = folder / f"{key}.json"
+    try:
+        return json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    one, anon = _ANNOUNCE_FALLBACK.get(persona.lang, _ANNOUNCE_FALLBACK["ru"])
+    text = ""
+    try:
+        memory = await extra.memory_prompt(uid)
+        text = clean_announcement(await ai.generate([{"text": announce_prompt(name, app, persona.lang, memory)}],
+                                                    temperature=0.2, json_mode=False, max_tokens=60))
+    except Exception:
+        logger.warning("announce text failed", exc_info=True)
+    text = text or (one.format(name=name) if name else anon)
+    pcm = await ai.synthesize(text, voice=persona.voice)
+    out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else ""}
+    if pcm:
+        try:
+            cache_file.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            logger.warning("announce not cached", exc_info=True)
+    logger.info("announce «%s» (%s) → «%s»%s", name, app or "phone", text, "" if pcm else " (без голоса)")
+    return out
+
+
+__all__ = ["run", "greetings", "announce", "phone_declarations", "PhoneLive", "pcm_to_wav"]

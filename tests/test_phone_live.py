@@ -136,3 +136,23 @@ def test_no_duplicate_tools_in_any_call_mode(mode):
     # Gemini Live закрывает сессию на повторном имени инструмента — звонок обрывается сразу после «алло»
     names = [d["name"] for d in live_call.tool_declarations(mode)]
     assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
+
+
+# ------------------------------------------------------------------ «Звонит мама»
+def test_announce_prompt_mentions_contact_app_and_language():
+    text = phone_live.announce_prompt("Onajonim", "Telegram", "ru", memory="Алишер — брат")
+    assert "«Onajonim»" in text and "Telegram" in text and "русском" in text and "Алишер — брат" in text
+    assert "Telegram" not in phone_live.announce_prompt("Мама", "phone", "ru").split("\n")[0]
+
+
+@pytest.mark.parametrize("raw, clean", [("«Звонит мама»", "Звонит мама"), ("Звонит мама\nещё строка", "Звонит мама"), ("  ", "")])
+def test_clean_announcement(raw, clean):
+    assert phone_live.clean_announcement(raw) == clean
+
+
+def test_duplex_lowers_start_sensitivity():
+    sess, _ = _session()
+    assert "startOfSpeechSensitivity" not in sess.setup_payload("m", rich=False)["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
+    sess.turn.device["duplex"] = True
+    vad = sess.setup_payload("m", rich=False)["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
+    assert vad["startOfSpeechSensitivity"] == "START_SENSITIVITY_LOW"

@@ -11,6 +11,7 @@
   GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
   POST /jarvis/v1/wake_check    — {"audio": WAV} → прозвучало ли «Джарвис» (защита от ложных срабатываний)
+  POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
@@ -185,6 +186,17 @@ async def wake_check(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
 
 
+async def announce(request: web.Request) -> web.Response:
+    """Входящий звонок: «Звонит мама» голосом бота (контакт «Onajonim» → «мама»)."""
+    from . import phone_live
+
+    uid = owner_id()
+    data = await _json(request)
+    if uid is None:
+        return web.json_response({"error": "owner is not configured"}, status=500)
+    return web.json_response(await phone_live.announce(uid, str(data.get("name") or ""), str(data.get("app") or "")))
+
+
 async def greetings(request: web.Request) -> web.Response:
     from . import phone_live
 
@@ -242,6 +254,7 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/live", live)
     app.router.add_get("/jarvis/v1/greetings", greetings)
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
+    app.router.add_post("/jarvis/v1/announce", announce)
     app.router.add_post("/jarvis/v1/contacts", contacts)
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
