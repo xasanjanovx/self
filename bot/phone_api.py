@@ -10,6 +10,7 @@
   POST /jarvis/v1/warm          — услышал «Джарвис»: прогреть кэши, пока человек договаривает
   GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
+  POST /jarvis/v1/wake_check    — {"audio": WAV} → прозвучало ли «Джарвис» (защита от ложных срабатываний)
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
@@ -21,6 +22,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import json
 import logging
 import os
 import re
@@ -151,6 +153,38 @@ async def live(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+_WAKE_PROMPT = (
+    "На записи человек, возможно, зовёт голосового ассистента по имени «Джарвис» (Jarvis; бывает «Эй, Джарвис»). "
+    "Язык — русский или узбекский. Расшифруй запись дословно и реши, прозвучало ли имя «Джарвис» как обращение. "
+    "Похожие слова (жара, Джордж, Дарвин, сервис, «жарить») — это НЕ имя. "
+    'Верни JSON: {"name": true/false, "text": "дословно", "after": "слова после имени (пусто, если ничего)"}'
+)
+
+
+async def wake_check(request: web.Request) -> web.Response:
+    """Телефон решил, что услышал «Джарвис», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова."""
+    data = await _json(request)
+    try:
+        audio = base64.b64decode(str(data.get("audio") or ""), validate=False)
+    except (binascii.Error, ValueError):
+        return web.json_response({"error": "bad audio"}, status=400)
+    if not audio:
+        return web.json_response({"error": "audio required"}, status=400)
+    started = time.monotonic()
+    try:
+        raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
+                                model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
+        verdict = json.loads(raw) if raw.strip().startswith("{") else {}
+    except Exception:
+        logger.warning("wake check failed", exc_info=True)
+        # проверка не удалась (сеть/лимит) — не мешаем: пусть решает телефон
+        return web.json_response({"ok": True, "unchecked": True})
+    ok = bool(verdict.get("name"))
+    after = str(verdict.get("after") or "").strip()
+    logger.info("wake check: %s за %.1f с «%s»", "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
+    return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
+
+
 async def greetings(request: web.Request) -> web.Response:
     from . import phone_live
 
@@ -207,6 +241,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/warm", warm)
     app.router.add_get("/jarvis/v1/live", live)
     app.router.add_get("/jarvis/v1/greetings", greetings)
+    app.router.add_post("/jarvis/v1/wake_check", wake_check)
     app.router.add_post("/jarvis/v1/contacts", contacts)
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)

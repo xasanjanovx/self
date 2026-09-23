@@ -51,6 +51,37 @@ def phone_declarations() -> list[dict[str, Any]]:
     return [t.declaration() for t in phone.PHONE_TOOLS.values()]
 
 
+# на заблокированном телефоне — только после разблокировки (звонки, сообщения, чужая переписка)
+NEED_UNLOCK = {"phone_call", "send_sms", "telegram_send", "confirm_send", "telegram_read", "open_app", "open_link", "navigate", "undo_last"}
+
+_SKY_ICON = (("гроз", "⛈"), ("снег", "🌨"), ("дожд", "🌧"), ("ливн", "🌧"), ("морос", "🌦"), ("туман", "🌫"), ("пасмур", "☁️"),
+             ("облач", "⛅"), ("ясн", "☀️"))
+
+
+def result_card(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
+    """Карточка результата для панели на телефоне (над субтитрами). Звонки/таймеры телефон рисует сам по действиям."""
+    if not isinstance(result, dict):
+        return None
+    if name == "weather" and isinstance(result.get("now"), dict):
+        now = result["now"]
+        sky = str(now.get("sky") or "")
+        icon = next((i for k, i in _SKY_ICON if k in sky.lower()), "🌤")
+        temp = now.get("temp")
+        feels = now.get("feels")
+        return {"icon": icon, "title": f"{round(temp)}° · {sky}" if isinstance(temp, (int, float)) else sky,
+                "subtitle": str(result.get("place") or "") + (f" · ощущается {round(feels)}°" if isinstance(feels, (int, float)) else "")}
+    if name in {"telegram_send", "send_sms"} and result.get("status") == "awaiting_confirmation":
+        return {"icon": "✉️", "title": "Отправить?", "subtitle": str(result.get("ask_exactly") or "")[:160], "accent": "confirm"}
+    if name == "confirm_send" and result.get("ok"):
+        return {"icon": "✅", "title": "Отправлено", "subtitle": str(result.get("to") or "")}
+    if name == "add_reminder" and isinstance(result.get("added"), dict):
+        r = result["added"]
+        return {"icon": "🔔", "title": "Напомню", "subtitle": " ".join(str(r.get(k) or "") for k in ("time", "text") if r.get(k)).strip()[:120]}
+    if name == "add_task" and args.get("text"):
+        return {"icon": "📝", "title": "Задача", "subtitle": str(args.get("text"))[:120]}
+    return None
+
+
 class PhoneLive(_Session):
     def __init__(self, profile, persona, *, system: str, phone_ws, device: dict[str, Any]) -> None:  # noqa: ANN001
         super().__init__(profile, persona, mode="phone", system=system)
@@ -125,6 +156,11 @@ class PhoneLive(_Session):
                     await self.to_phone({"type": "user", "text": str(data["text"]), "final": True})
                     self.user_lines.append(str(data["text"]))
                     await self.say_text(gem, str(data["text"]))
+                elif kind == "device" and isinstance(data.get("device"), dict):
+                    self.turn.device.update(data["device"])
+                elif kind == "unlocked":
+                    self.turn.device["locked"] = False
+                    await self.say_text(gem, "[Телефон разблокирован — сразу сделай то, что он просил.]")
                 elif kind == "greet":
                     await self.say_text(gem, GREET)
                 elif kind == "action_error":
@@ -184,9 +220,13 @@ class PhoneLive(_Session):
             logger.info("phone live tool %s %s", name, json.dumps(args, ensure_ascii=False)[:200])
             if name in _TOOL_STATUS:
                 await self.to_phone({"type": "status", "text": _TOOL_STATUS[name]})
-            if name == "end_call":
+            if self.turn.device.get("locked") and name in NEED_UNLOCK:
+                # заблокированный телефон: звонки, сообщения и чужая переписка — только после разблокировки
+                await self.to_phone({"type": "unlock"})
+                result: dict[str, Any] = {"error": "телефон заблокирован", "need_unlock": True}
+            elif name == "end_call":
                 await self.to_phone({"type": "end"})
-                result: dict[str, Any] = {"ok": True}
+                result = {"ok": True}
             elif name == "send_to_chat":
                 result = await _send_to_chat(self.uid, str(args.get("text") or ""))
             else:
@@ -199,6 +239,8 @@ class PhoneLive(_Session):
                     await self.to_phone({"type": "need_contacts"})
             if not (isinstance(result, dict) and result.get("error")):
                 self.result.actions.append(name)
+                if (card := result_card(name, args, result)) is not None:
+                    await self.to_phone({"type": "card", "card": card})
             responses.append({"id": cid, "name": name, "response": _jsonable(result)})
         await self.to_gemini(ws, {"toolResponse": {"functionResponses": responses}})
 

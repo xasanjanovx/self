@@ -94,3 +94,38 @@ def test_end_call_tells_phone(uid):
 def test_pcm_to_wav_header():
     wav = phone_live.pcm_to_wav(b"\x00\x00" * 10)
     assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE" and len(wav) == 44 + 20
+
+
+# ------------------------------------------------------------------ блокировка экрана, карточки, проверка имени
+def test_locked_phone_asks_to_unlock_before_calling(uid):
+    phone.save_contacts(uid, [{"n": "Ойижон", "p": ["+998901111111"]}])
+    sess, phone_ws = _session()
+    sess.turn.device["locked"] = True
+    gem = FakeWS()
+    asyncio.run(sess._run_tools(gem, [{"id": "1", "name": "phone_call", "args": {"who": "мама"}}]))
+    assert {"type": "unlock"} in phone_ws.sent
+    assert not any(isinstance(m, dict) and m.get("type") == "action" for m in phone_ws.sent)
+    assert gem.sent[-1]["toolResponse"]["functionResponses"][0]["response"]["need_unlock"]
+
+
+def test_locked_phone_still_sets_timer(uid):
+    sess, phone_ws = _session()
+    sess.turn.device["locked"] = True
+    asyncio.run(sess._run_tools(FakeWS(), [{"id": "1", "name": "set_timer", "args": {"seconds": 60}}]))
+    assert any(isinstance(m, dict) and m.get("type") == "action" for m in phone_ws.sent)
+
+
+def test_result_cards():
+    weather = {"place": "Андижан, Узбекистан", "now": {"temp": 23.4, "feels": 22.1, "sky": "Ясно"}}
+    card = phone_live.result_card("weather", {}, weather)
+    assert card == {"icon": "☀️", "title": "23° · Ясно", "subtitle": "Андижан, Узбекистан · ощущается 22°"}
+    pending = phone_live.result_card("telegram_send", {}, {"status": "awaiting_confirmation", "ask_exactly": "Отправить?"})
+    assert pending["accent"] == "confirm"
+    assert phone_live.result_card("confirm_send", {}, {"ok": True, "to": "Ойижон"})["subtitle"] == "Ойижон"
+    assert phone_live.result_card("add_task", {"text": "купить хлеб"}, {"ok": True})["subtitle"] == "купить хлеб"
+    assert phone_live.result_card("list_finance_entries", {}, {"entries": []}) is None
+
+
+def test_prompt_does_not_answer_bare_name():
+    text = live_call.system_instruction(_profile(), Persona(lang="ru"), mode="phone")
+    assert "НИЧЕГО не отвечай" in text and "need_unlock" in text
