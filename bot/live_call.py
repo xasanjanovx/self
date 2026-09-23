@@ -61,8 +61,11 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
                        wake: dict[str, Any] | None = None, topic: str = "") -> str:
     now = profile.now
     name = p.name_for(profile.first_name) or "пользователь"
+    channel = ("Он позвал тебя голосом («Джарвис») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
+               "говоришь через динамик телефона и управляешь телефоном своими инструментами. "
+               if mode == "phone" else "Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). ")
     base = (
-        f"Ты — Джарвис, личный помощник {name}. Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). "
+        f"Ты — Джарвис, личный помощник {name}. {channel}"
         "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
         f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}, Андижан, Узбекистан. Валюта — сум.\n\n"
         f"{lang_rule(p)}\n\n{human_rules(p)}\n{style_rules(p, spoken=True)}\n"
@@ -115,14 +118,40 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Хочет что-то сложное — ищи способ своими инструментами; по-настоящему невозможное — честно одной фразой и ближайшая замена.\n"
         "Когда он прощается («всё», «пока», «rahmat», «xayr», «bo'ldi») — тепло и коротко попрощайся и вызови end_call.\n"
     )
-    opening = (f"Начни разговор с темы, которую он попросил: «{topic}». Поздоровайся одной фразой и сразу к делу.\n" if topic
-               else "Поздоровайся одной короткой живой фразой (по имени, учитывая время суток) и жди.\n")
+    if mode == "phone":
+        opening = PHONE_RULES
+    elif topic:
+        opening = f"Начни разговор с темы, которую он попросил: «{topic}». Поздоровайся одной фразой и сразу к делу.\n"
+    else:
+        opening = "Поздоровайся одной короткой живой фразой (по имени, учитывая время суток) и жди.\n"
     return (base + rules + opening + "\n" + ABOUT_SELF
             + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
 
 
+PHONE_RULES = (
+    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Он уже позвал тебя — НЕ здоровайся и не представляйся, сразу слушай и выполняй. "
+    "Сказал только «Джарвис» и ждёт — откликнись одним-двумя словами («Да?», «Слушаю»). "
+    "Отвечай КОРОТКО — одна-две фразы, если не просит подробнее. Выполнил — не спрашивай «что-то ещё?», просто замолчи: "
+    "он сам скажет, если нужно. Прощается или говорит «всё», «спасибо, хватит», «bo'ldi» — коротко ответь и вызови end_call.\n"
+    "ТЕЛЕФОН: «позвони/набери маме» → phone_call (обычный звонок; начнётся, когда ты договоришь — скажи только «Звоню маме»). "
+    "SMS → send_sms. «Напиши/ответь … в телеграм» → telegram_send (не сказано куда — Telegram). "
+    "В variants всегда передавай другие написания и родственные слова (мама → ойи, онам, ona, oyijon, mama). "
+    "Сообщения уходят только после подтверждения: send_sms/telegram_send вернут ask_exactly — произнеси этот вопрос; "
+    "«да» → confirm_send, «нет» → cancel_send, правка текста → снова send с новым текстом. "
+    "Несколько кандидатов (candidates) — спроси голосом, назвав варианты. «Что мне написали», «что пишет Алишер» → telegram_read, перескажи коротко. "
+    "Будильник → set_alarm, таймер → set_timer, «напомни через…» → add_reminder. «Открой …» → open_app; фонарик, громкость, "
+    "музыка (пауза/дальше), «маршрут до …» → navigate; «домой», «назад», «заблокируй экран», «скриншот», «шторка» → device_action.\n"
+    "ВСЁ ОСТАЛЬНОЕ на экране телефона (WhatsApp, Instagram, YouTube, настройки, Wi-Fi, Bluetooth, такси, покупки, любое приложение, "
+    "«что у меня на экране») → control_phone с подробной целью: сначала скажи коротко «Сейчас сделаю», потом вызови. "
+    "control_phone вернул need_confirmation — задай этот вопрос; согласился → снова control_phone с тем же goal и confirmed=true. "
+    "Говори «звоню», «открываю», «готово» только если инструмент вернул ok. «Отмени последнее» → undo_last.\n"
+)
+
+
 def _control_tools(mode: str) -> list[dict[str, Any]]:
-    tools = [{"name": "end_call", "description": "Положить трубку — когда разговор окончен или человек попрощался.",
+    end = ("Закончить разговор (панель Джарвиса закроется) — когда он попрощался или сказал, что больше ничего не нужно."
+           if mode == "phone" else "Положить трубку — когда разговор окончен или человек попрощался.")
+    tools = [{"name": "end_call", "description": end,
               "parameters": {"type": "OBJECT", "properties": {}}}]
     if mode == "wake":
         tools += [
@@ -143,9 +172,13 @@ def tool_declarations(mode: str) -> list[dict[str, Any]]:
     from . import agent_tools
 
     decls = _control_tools(mode)
-    if mode == "assistant":
+    if mode in {"assistant", "phone"}:
         decls += [d for d in agent_tools.declarations() if d["name"] not in _SKIP_TOOLS]
         decls.append(_SEND_TO_CHAT)
+    if mode == "phone":
+        from . import phone_live
+
+        decls += phone_live.phone_declarations()
     else:
         decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake"}]
     return decls

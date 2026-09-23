@@ -8,6 +8,8 @@
   POST /jarvis/v1/voice         — {"audio": base64 WAV | "text": str, "device": {...}} →
                                    {"transcript", "say", "actions": [...], "listen", "need_contacts"}
   POST /jarvis/v1/warm          — услышал «Джарвис»: прогреть кэши, пока человек договаривает
+  GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
+  GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
   POST /jarvis/v1/tg/login      — {"phone"} → код; {"code"} → вход или password_needed; {"password"}
   POST /jarvis/v1/tg/logout
@@ -123,6 +125,39 @@ async def voice(request: web.Request) -> web.Response:
     return web.json_response({"transcript": transcript, **out})
 
 
+async def live(request: web.Request) -> web.WebSocketResponse:
+    """Живой разговор (bot/phone_live.py): телефон ⇄ Gemini Live."""
+    from . import phone_live
+
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=16 * 1024 * 1024)
+    await ws.prepare(request)
+    uid = owner_id()
+    try:
+        hello = await ws.receive_json(timeout=10)
+    except Exception:
+        await ws.close()
+        return ws
+    if uid is None or not isinstance(hello, dict):
+        await ws.close()
+        return ws
+    try:
+        await phone_live.run(uid, ws, hello)
+    except Exception:
+        logger.exception("phone live failed")
+        if not ws.closed:
+            await ws.send_json({"type": "error", "text": "Сервер споткнулся"})
+    if not ws.closed:
+        await ws.close()
+    return ws
+
+
+async def greetings(request: web.Request) -> web.Response:
+    from . import phone_live
+
+    uid = owner_id()
+    return web.json_response(await phone_live.greetings(uid) if uid else {"clips": []})
+
+
 async def warm(request: web.Request) -> web.Response:
     uid = owner_id()
     if uid is not None:
@@ -170,6 +205,8 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/ping", ping)
     app.router.add_post("/jarvis/v1/voice", voice)
     app.router.add_post("/jarvis/v1/warm", warm)
+    app.router.add_get("/jarvis/v1/live", live)
+    app.router.add_get("/jarvis/v1/greetings", greetings)
     app.router.add_post("/jarvis/v1/contacts", contacts)
     app.router.add_post("/jarvis/v1/tg/login", tg_login)
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
