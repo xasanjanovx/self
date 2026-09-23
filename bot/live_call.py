@@ -177,10 +177,10 @@ def tool_declarations(mode: str) -> list[dict[str, Any]]:
     if mode in {"assistant", "phone"}:
         decls += [d for d in agent_tools.declarations() if d["name"] not in _SKIP_TOOLS]
         decls.append(_SEND_TO_CHAT)
-    if mode == "phone":
-        from . import phone_live
+        if mode == "phone":
+            from . import phone_live
 
-        decls += phone_live.phone_declarations()
+            decls += phone_live.phone_declarations()
     else:
         decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake"}]
     return decls

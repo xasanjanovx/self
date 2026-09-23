@@ -129,3 +129,10 @@ def test_result_cards():
 def test_prompt_does_not_answer_bare_name():
     text = live_call.system_instruction(_profile(), Persona(lang="ru"), mode="phone")
     assert "НИЧЕГО не отвечай" in text and "need_unlock" in text
+
+
+@pytest.mark.parametrize("mode", ["assistant", "wake", "phone"])
+def test_no_duplicate_tools_in_any_call_mode(mode):
+    # Gemini Live закрывает сессию на повторном имени инструмента — звонок обрывается сразу после «алло»
+    names = [d["name"] for d in live_call.tool_declarations(mode)]
+    assert len(names) == len(set(names)), [n for n in names if names.count(n) > 1]
