@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _client: Any = None
 _calls: Any = None
 helper_id: int | None = None  # id аккаунта-помощника (для кнопки «открыть Джарвиса» / добавить в контакты)
+helper_username: str | None = None
 _lock = asyncio.Lock()
 _import_error: str | None = None
 
@@ -70,8 +71,9 @@ async def start() -> bool:
             except Exception:
                 logger.warning("call diagnostics not installed", exc_info=True)
             me = await _client.get_me()
-            global helper_id
+            global helper_id, helper_username
             helper_id = getattr(me, "id", None)
+            helper_username = getattr(me, "username", None)
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
             return True
         except Exception as exc:

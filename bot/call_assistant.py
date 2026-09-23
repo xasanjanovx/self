@@ -197,6 +197,9 @@ async def _notify_failure(profile: Profile, error: str) -> None:
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
     fixable = error in {"privacy", "no_answer", "peer_unknown"}
+    if fixable and caller.helper_username:
+        ru += f" Аккаунт Джарвиса: @{caller.helper_username}"
+        uz += f" Jarvis akkaunti: @{caller.helper_username}"
     if fixable:
         await helper_intro(profile)
     await show_home(profile, f"📵 {profile.tr(ru, uz)}", helper_button=fixable)
