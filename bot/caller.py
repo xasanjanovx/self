@@ -146,7 +146,7 @@ async def call(user_id: int, audio_path: str, *, ring_seconds: int = 45, play_se
     except Exception as exc:
         name = type(exc).__name__
         # частые случаи: не взяли трубку / отклонили / занято — это не ошибка, просто «не ответил»
-        if any(k in name.lower() for k in ("timeout", "discarded", "busy", "declined")):
+        if any(k in name.lower() for k in ("timeout", "timedout", "discarded", "busy", "declined")):
             return {"answered": False, "error": None}
         logger.warning("call to %s failed: %s", user_id, exc)
         return {"answered": False, "error": f"{name}: {exc}"}
@@ -294,7 +294,7 @@ def classify_error(exc: Exception) -> str | None:
     name = type(exc).__name__.lower()
     if "privacy" in name:
         return "privacy"
-    if "timeout" in name or "notanswer" in name:
+    if any(k in name for k in ("timeout", "timedout", "notanswer")):  # pytgcalls: TimedOutAnswer
         return "no_answer"
     if any(k in name for k in ("discarded", "busy", "declined")):
         return None
@@ -362,11 +362,8 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
         try:
             await _calls.play(uid, path, config=CallConfig(timeout=ring_seconds))
         except Exception as exc:
-            name = type(exc).__name__.lower()
             logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
-            if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
-                return {"answered": False, "error": None}
-            return {"answered": False, "error": f"{type(exc).__name__}: {exc}"}
+            return {"answered": False, "error": classify_error(exc)}
         # трубку взяли
         logger.info("call %s: соединение установлено, говорю приветствие", uid)
         try:
