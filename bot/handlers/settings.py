@@ -312,7 +312,7 @@ async def render_wake(target: Message | CallbackQuery, profile: Profile, *, noti
         text += f"\n\n{notice}"
     await _show(target, text, wake_settings_keyboard(
         profile.lang, enabled=s.enabled, call_enabled=s.call_enabled, talk=s.talk, voice_lang=s.voice_lang,
-        mode=s.mode, days=list(s.days_of_week), hardness=s.hardness, tasks=list(s.confirm_tasks)))
+        mode=s.mode, days=list(s.days_of_week)))
 
 
 @router.callback_query(F.data == "settings:wake")
@@ -353,8 +353,6 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
     notice = None
     if action == "toggle" and value in {"enabled", "call_enabled", "talk"}:
         fields[value] = not getattr(s, value)
-    elif action == "toggle" and value == "hardness":
-        fields["hardness"] = "normal" if s.hardness == "hard" else "hard"
     elif action == "mode" and value == "fajr":
         fields.update({"mode": "fajr", "enabled": True})
     elif action == "offset":
@@ -363,15 +361,6 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
         fields["takbir_offset_min"] = max(0, min(120, s.takbir_offset_min + int(value)))
     elif action == "days":
         fields["days_of_week"] = [1, 2, 3, 4, 5] if value == "work" else [1, 2, 3, 4, 5, 6, 7]
-    elif action == "task" and value in wake_mod.TASKS:
-        tasks = list(s.confirm_tasks)
-        if value in tasks and len(tasks) > 1:
-            tasks.remove(value)
-        elif value not in tasks:
-            tasks.append(value)
-        else:
-            notice = profile.tr("Хотя бы одно задание нужно оставить", "Kamida bitta vazifa qolishi kerak")
-        fields["confirm_tasks"] = tasks
     if fields:
         await services.save_wake_settings(profile.telegram_id, fields)
     await answer_now(callback, notice or "✅")

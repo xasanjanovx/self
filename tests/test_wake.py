@@ -1,4 +1,4 @@
-"""Подъём на фаджр: план дня, повторные звонки, задания, подтверждение."""
+"""Подъём на фаджр: план дня, повторные звонки, мотивация вместо заданий, подтверждение."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -68,45 +68,30 @@ def test_looks_awake_and_snooze():
 
 
 # ------------------------------------------------------------------ задания
-def test_make_task_is_stable_per_day_and_respects_settings():
-    s = _s(confirm_tasks=("water",))
-    task = wake.make_task(s, DAY)
-    assert task["kind"] == "water" and task["expects"] == "photo"
-    assert wake.make_task(s, DAY) == task  # тот же день → то же задание
-    hard = wake.make_task(_s(confirm_tasks=("water",), hardness="hard"), DAY)
-    assert "2 стакан" in hard["text"]
-    squats = wake.make_task(_s(confirm_tasks=("squats",)), DAY, lang="uz")
-    assert squats["expects"] == "voice" and "10" in squats["text"]
-    question = wake.make_task(_s(confirm_tasks=("question",)), DAY)
-    assert question["expects"] == "text" and question["answer"].isdigit()
-    pushups = wake.make_task(_s(confirm_tasks=("pushups",)), DAY)
-    assert pushups["expects"] == "voice" and "отжиман" in pushups["text"]
-
-
-def test_check_answer_accepts_real_proof_only():
-    water = wake.make_task(_s(confirm_tasks=("water",)), DAY)
-    assert wake.check_answer(water, has_photo=True)[0] is True
-    assert wake.check_answer(water, text="выпил")[0] is False
-    squats = wake.make_task(_s(confirm_tasks=("squats",)), DAY)
-    assert wake.check_answer(squats, voice_seconds=9)[0] is True
-    assert wake.check_answer(squats, voice_seconds=2) == (False, "too_short")
-    assert wake.check_answer(squats, text="сделал") == (False, "need_voice")
-    question = wake.make_task(_s(confirm_tasks=("question",)), DAY)
-    right = question["answer"]
-    assert wake.check_answer(question, text=f"это {right}")[0] is True
-    assert wake.check_answer(question, text="5")[0] is (right == "5")
-    assert wake.check_answer(question, text="не знаю") == (False, "need_answer")
+def test_motivation_instead_of_tasks():
+    """Никаких упражнений и заданий — только слова, чтобы встать на намаз; каждый день/попытка — другая фраза."""
+    assert not hasattr(wake, "make_task") and not hasattr(wake, "check_answer")
+    for lang in ("ru", "uz", "en"):
+        phrases = wake.MOTIVATION[lang]
+        assert len(phrases) >= 6
+        assert wake.motivation(DAY, 1, lang) in phrases
+        assert wake.motivation(DAY, 1, lang) != wake.motivation(DAY, 2, lang)
+        assert wake.motivation(DAY, 1, lang) == wake.motivation(DAY, 1, lang)  # без случайности между перезапусками
+    ru = " ".join(wake.MOTIVATION["ru"]).lower()
+    assert "мунафик" in ru and "доволен вами" in ru and "рай" in ru and "намаз лучше сна" in ru
+    for word in ("присед", "отжим", "стакан", "×"):
+        assert word not in ru
 
 
 # ------------------------------------------------------------------ тексты и статистика
-def test_texts_mention_takbir_and_task():
+def test_texts_mention_takbir_and_motivation():
     s = _s()
     plan = wake.plan_for_day(s, DAY, tz=TZ, timings=TIMINGS)
-    task = wake.make_task(s, DAY)
-    msg = wake.wake_message(name="Хасан", plan=plan, task=task, attempt=2, lang="ru")
-    assert "04:47" in msg and task["text"] in msg and "Попытка 2" in msg
-    script = wake.call_script(name="Hasan", takbir=plan.takbir, minutes_left=25, task_text=task["text"], lang="uz")
-    assert "04:47" in script and "25 daqiqa" in script and "Assalomu alaykum" in script
+    msg = wake.wake_message(name="Хасан", plan=plan, attempt=2, lang="ru")
+    assert "04:47" in msg and wake.motivation(DAY, 2, "ru") in msg and "Попытка 2" in msg
+    assert "Задание" not in msg
+    script = wake.call_script(name="Hasan", takbir=plan.takbir, minutes_left=25, motivation_text=wake.motivation(DAY, 1, "uz"), lang="uz")
+    assert "04:47" in script and "25 daqiqa" in script and "Assalomu alaykum" in script and wake.motivation(DAY, 1, "uz") in script
     done = wake.done_message(plan=plan, now=datetime(2026, 9, 23, 4, 30, tzinfo=TZ), lang="ru", streak=3)
     assert "17 мин" in done and "3" in done
 

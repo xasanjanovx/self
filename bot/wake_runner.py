@@ -26,7 +26,7 @@ from .profile import Profile
 
 logger = logging.getLogger(__name__)
 
-# состояние текущих подъёмов в памяти: uid → {"task": …, "plan": …, "attempts": int, "last": datetime}
+# состояние текущих подъёмов в памяти: uid → {"plan": …, "attempts": int, "last": datetime, "expires": datetime}
 _active: dict[int, dict[str, Any]] = {}
 # uid -> id сообщения «Пора вставать» с кнопками: держим одно на утро, после подъёма убираем
 _wake_msg: dict[int, int] = {}
@@ -42,15 +42,15 @@ async def _drop_wake_message(bot: Bot, uid: int) -> None:
             pass
 
 
-def active_task(uid: int) -> dict[str, Any] | None:
-    """Задание, которое сейчас ждёт подтверждения (для роутера сообщений)."""
+def is_waking(uid: int) -> bool:
+    """Идёт подъём (звонили, но он ещё не подтвердил) — для «ещё 10 минут» в чате."""
     state = _active.get(uid)
     if not state:
-        return None
+        return False
     if state.get("expires") and datetime.now(timezone.utc) > state["expires"]:
         _active.pop(uid, None)
-        return None
-    return state.get("task")
+        return False
+    return True
 
 
 def clear(uid: int) -> None:
@@ -115,20 +115,16 @@ async def _speech_file(text: str) -> str | None:
     return path
 
 
-async def _task_for(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan) -> dict[str, Any]:
-    return wake_mod.make_task(s, plan.day, lang=profile.lang)
-
-
 # ------------------------------------------------------------------ разговор в трубке
-async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan, task: dict[str, Any],
+async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan,
                        minutes_left: int | None) -> dict[str, Any]:
     """Звонок-разговор на Gemini Live: живой голос, будит, пока не услышит, что встал."""
     from . import live_call
 
     live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds),
-                               wake={"takbir": plan.takbir, "minutes_left": minutes_left, "task": str(task.get("text") or "")})
+                               wake={"takbir": plan.takbir, "minutes_left": minutes_left})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
-                           minutes_left=minutes_left, task_text=str(task.get("text") or ""))
+                           minutes_left=minutes_left, task_text="")
     state.confirmed = live.confirmed
     state.transcript = list(live.transcript)
     if live.snooze_minutes:
@@ -173,10 +169,8 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     uid = profile.telegram_id
     now = datetime.now(timezone.utc)
     attempts = int((log or {}).get("attempts") or 0) + 1
-    state = _active.get(uid) or {}
-    task = state.get("task") or await _task_for(profile, s, plan)
     minutes_left = int((plan.takbir_at - now.astimezone(profile.tz)).total_seconds() // 60) if plan.takbir_at else None
-    _active[uid] = {"task": task, "plan": plan, "attempts": attempts, "last": now, "expires": now + timedelta(hours=3)}
+    _active[uid] = {"plan": plan, "attempts": attempts, "last": now, "expires": now + timedelta(hours=3)}
 
     answered = False
     confirmed = False
@@ -184,7 +178,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     dialog_text = ""
     if s.call_enabled and caller.available():
         if s.talk:
-            result = await _dialog_call(profile, s, plan, task, minutes_left)
+            result = await _dialog_call(profile, s, plan, minutes_left)
             answered, call_error = bool(result.get("answered")), result.get("error")
             dstate = result.get("state")
             confirmed = bool(getattr(dstate, "confirmed", False))
@@ -192,7 +186,8 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
         else:
             script = wake_mod.call_script(
                 name=profile.first_name or ("do'st" if s.voice_lang == "uz" else "друг"),
-                takbir=plan.takbir, minutes_left=minutes_left, task_text=str(task.get("text") or ""), lang=s.voice_lang,
+                takbir=plan.takbir, minutes_left=minutes_left, lang=s.voice_lang,
+                motivation_text=wake_mod.motivation(plan.day, attempts, s.voice_lang),
             )
             path = await _speech_file(script)
             if path:
@@ -207,8 +202,8 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     if uid not in _active and not confirmed:
         # пока звонил, он написал «проснулся» (mark_awake) — никаких «Пора вставать» и повторов
         logger.info("wake %s: проснулся во время звонка — попытка закрыта", uid)
-        return {"attempts": attempts, "answered": answered, "confirmed": True, "task": task, "call_error": call_error}
-    text = wake_mod.wake_message(name=profile.first_name or "", plan=plan, task=task, attempt=attempts, lang=profile.lang)
+        return {"attempts": attempts, "answered": answered, "confirmed": True, "call_error": call_error}
+    text = wake_mod.wake_message(name=profile.first_name or "", plan=plan, attempt=attempts, lang=profile.lang)
     try:
         await _drop_wake_message(bot, uid)  # прошлая попытка — не копим «Пора вставать» в чате
         sent = await bot.send_message(uid, text, reply_markup=wake_keyboard(profile.lang), disable_notification=False)
@@ -217,7 +212,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
         logger.exception("wake message failed for %s", uid)
 
     fields: dict[str, Any] = {"attempts": attempts, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None,
-                              "takbir_at": plan.takbir, "task_kind": task.get("kind"), "task_text": task.get("text")}
+                              "takbir_at": plan.takbir}
     if attempts == 1:
         fields["first_call_at"] = now.isoformat()
     if dialog_text:
@@ -227,7 +222,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
         logger.info("wake call error for %s: %s", uid, call_error)
     if confirmed:
         await mark_awake(bot, profile, source="call")  # подтвердил голосом — больше не звоним
-    return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "task": task, "call_error": call_error}
+    return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "call_error": call_error}
 
 
 # ------------------------------------------------------------------ подтверждение подъёма
@@ -247,8 +242,6 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
             logger.debug("hang up on awake failed", exc_info=True)
     fields: dict[str, Any] = {"woke_at": now.isoformat(), "woke_source": source, "before_takbir": before,
                               "takbir_at": plan.takbir, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None}
-    if state and state.get("task"):
-        fields.update({"task_kind": state["task"].get("kind"), "task_text": state["task"].get("text")})
     await services.save_wake_log(uid, plan.day, fields)
     history = await services.wake_history(uid, days=60)
     rows = [r for r in history if str(r.get("day"))[:10] != plan.day.isoformat()]
@@ -274,12 +267,6 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
         except Exception:
             logger.debug("morning brief after wake failed", exc_info=True)
     return {"before_takbir": before, "streak": streak, "plan": plan}
-
-
-async def task_done(bot: Bot, profile: Profile, *, ok: bool) -> None:
-    if ok:
-        await services.save_wake_log(profile.telegram_id, profile.today, {"task_done_at": datetime.now(timezone.utc).isoformat()})
-        _active.pop(profile.telegram_id, None)
 
 
 async def snooze(profile: Profile, minutes: int) -> datetime:
@@ -313,5 +300,5 @@ async def morning_extra(profile: Profile) -> str:
     return "🕌 " + prayer.summary(rows, profile.lang, takbir=plan.takbir)
 
 
-__all__ = ["run_attempt", "mark_awake", "task_done", "snooze", "snoozed_until", "skip_today", "plan_for",
-           "active_task", "clear", "wake_keyboard", "morning_extra"]
+__all__ = ["run_attempt", "mark_awake", "snooze", "snoozed_until", "skip_today", "plan_for",
+           "is_waking", "clear", "wake_keyboard", "morning_extra"]

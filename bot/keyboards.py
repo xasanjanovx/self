@@ -329,8 +329,9 @@ def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: 
 
 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
-                           mode: str, days: list[int], hardness: str, tasks: list[str]) -> InlineKeyboardMarkup:
-    """Экран «Подъём и звонки»: всё, что чаще всего меняют, — кнопками."""
+                           mode: str, days: list[int]) -> InlineKeyboardMarkup:
+    """Экран «Будильник»: всё, что чаще всего меняют, — кнопками. Заданий и упражнений нет —
+    Джарвис будит мотивирующими словами и сам по голосу убеждается, что встал."""
     uz = lang == "uz"
     weekdays = {1, 2, 3, 4, 5}
     only_weekdays = set(days) == weekdays
@@ -355,21 +356,7 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
             _btn(("📅 Har kuni" if uz else "📅 Каждый день") + ("" if only_weekdays else " ✓"), "wakeset:days:all", style=None if only_weekdays else "primary"),
             _btn(("📅 Ish kunlari" if uz else "📅 Будни") + (" ✓" if only_weekdays else ""), "wakeset:days:work", style="primary" if only_weekdays else None),
         ],
-        [_btn(("🔥 Qattiqroq ✓" if hardness == "hard" else "🔥 Qattiqroq") if uz else ("🔥 Жёстче ✓" if hardness == "hard" else "🔥 Жёстче"),
-              "wakeset:toggle:hardness", style="danger" if hardness == "hard" else None)],
     ]
-    labels_ru = {"water": "💧 Вода", "squats": "🏋️ Приседания", "pushups": "💪 Отжимания", "question": "🧮 Вопрос"}
-    labels_uz = {"water": "💧 Suv", "squats": "🏋️ Cho'kkalash", "pushups": "💪 Otjimaniye", "question": "🧮 Savol"}
-    labels = labels_uz if uz else labels_ru
-    task_row = []
-    for key in ("water", "squats", "pushups", "question"):
-        on = key in tasks
-        task_row.append(_btn(labels[key] + (" ✓" if on else ""), f"wakeset:task:{key}", style="success" if on else None))
-        if len(task_row) == 2:
-            rows.append(task_row)
-            task_row = []
-    if task_row:
-        rows.append(task_row)
     rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

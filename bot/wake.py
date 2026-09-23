@@ -3,25 +3,55 @@
 Здесь только чистая логика и тексты (без БД, Telegram и звонков) — её легко тестировать:
   plan_for_day()   — будим ли сегодня и во сколько (фаджр − offset или фиксированное время);
   should_call()    — пора ли звонить прямо сейчас и какая это попытка;
-  make_task()      — задание дня: вода (фото пустого стакана), приседания/отжимания
-                     (голосом), вопрос (счёт в уме); набор задан в настройках;
-  check_answer()   — принят ли ответ на задание;
+  motivation()     — слова, чтобы встать на намаз («намаз лучше сна», «вы же не мунафик»,
+                     «пусть Аллах будет доволен вами»…) — вместо заданий и упражнений;
   looks_awake()    — «проснулся / uyg'ondim / встал» в свободном тексте;
   snooze_minutes() — «ещё 10 минут» из фразы.
 Звонок делает bot/caller.py, расписание — bot/workers.py.
 """
 from __future__ import annotations
 
-import random
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-TASKS = ("water", "squats", "pushups", "question")
-DEFAULT_TASKS = ("water", "squats", "pushups", "question")
 CONFIRM_MINUTES = 3  # столько ждём подтверждения после звонка, потом звоним снова
-MIN_VOICE_SECONDS = 5
+
+# Мотивация встать на фаджр — вместо упражнений и заданий (по просьбе владельца). Только известное
+# и достоверное: «намаз лучше сна» (из азана фаджра), хадисы о фаджре (Бухари, Муслим), пожелания.
+MOTIVATION: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "Пора вставать — намаз лучше сна!",
+        "Вставайте, вы же не мунафик: для лицемеров нет намаза тяжелее фаджра.",
+        "Пусть Аллах будет доволен вами!",
+        "Пусть вам будет рай!",
+        "Кто совершил утренний намаз — тот под защитой Аллаха.",
+        "Два ракаата перед фаджром лучше этого мира и всего, что в нём.",
+        "Шайтан завязал три узла — встаньте, помяните Аллаха, и они развяжутся.",
+        "Ангелы собираются на фаджре — пусть запишут вас среди молящихся.",
+    ),
+    "uz": (
+        "Turish vaqti — namoz uyqudan yaxshiroq!",
+        "Turing, siz munofiq emassiz-ku: munofiqlarga bomdoddan og'irroq namoz yo'q.",
+        "Alloh sizdan rozi bo'lsin!",
+        "Jannat sizga nasib qilsin!",
+        "Bomdodni o'qigan kishi Allohning himoyasida bo'ladi.",
+        "Bomdodning ikki rakat sunnati dunyo va undagi narsalardan yaxshiroq.",
+        "Shayton uch tugun bog'lagan — turing, Allohni zikr qiling, tugunlar yechiladi.",
+        "Farishtalar bomdodda yig'iladi — sizni namozxonlar qatorida yozishsin.",
+    ),
+    "en": (
+        "Time to get up — prayer is better than sleep!",
+        "Get up, you're not a munafiq: no prayer is heavier for the hypocrites than Fajr.",
+        "May Allah be pleased with you!",
+        "May Paradise be yours!",
+        "Whoever prays Fajr is under Allah's protection.",
+        "The two rak'ahs before Fajr are better than this world and everything in it.",
+        "Shaytan tied three knots — get up, remember Allah, and they come undone.",
+        "The angels gather at Fajr — may they write you among those who pray.",
+    ),
+}
 
 _AWAKE_WORDS = (
     "проснулся", "проснулась", "встал", "встала", "я встал", "не сплю", "уже встал", "просыпаюсь", "подъем", "подъём",
@@ -29,7 +59,6 @@ _AWAKE_WORDS = (
     "awake", "im up", "i'm up",
 )
 _SNOOZE_RE = re.compile(r"(?:ещ[её]|yana|через|keyin)\s*(\d{1,2})\s*(?:мин|min|daqiqa)?", re.IGNORECASE)
-_SQUAT_WORDS = ("присед", "отжим", "cho'kkalash", "chokkalash", "otjimanie", "qaddi")
 
 
 @dataclass
@@ -43,8 +72,6 @@ class WakeSettings:
     call_enabled: bool = True
     max_attempts: int = 150  # фактически «пока не встанет»: окно 2 часа (~65 с на попытку) закончится раньше
     retry_seconds: int = 45
-    confirm_tasks: tuple[str, ...] = DEFAULT_TASKS
-    hardness: str = "normal"
     voice_lang: str = "uz"   # на каком языке Джарвис говорит в трубке
     talk: bool = True        # живой диалог (слушает ответы) или просто говорит и кладёт трубку
     skip_until: date | None = None
@@ -60,14 +87,13 @@ class WakeSettings:
                 return date.fromisoformat(str(value)[:10])
             except (TypeError, ValueError):
                 return None
-        tasks = tuple(t for t in (row.get("confirm_tasks") or DEFAULT_TASKS) if t in TASKS) or DEFAULT_TASKS
         days = tuple(int(d) for d in (row.get("days_of_week") or (1, 2, 3, 4, 5, 6, 7)))
         return cls(
             enabled=bool(row.get("enabled", True)), mode=str(row.get("mode") or "fajr"), fixed_time=row.get("fixed_time"),
             offset_min=int(row.get("offset_min") or 25), takbir_offset_min=int(row.get("takbir_offset_min") or 20),
             days_of_week=days or (1, 2, 3, 4, 5, 6, 7), call_enabled=bool(row.get("call_enabled", True)),
             max_attempts=max(int(row.get("max_attempts") or 0), 150), retry_seconds=int(row.get("retry_seconds") or 45),
-            confirm_tasks=tasks, hardness=str(row.get("hardness") or "normal"), skip_until=_d(row.get("skip_until")),
+            skip_until=_d(row.get("skip_until")),
             voice_lang=("ru" if str(row.get("voice_lang") or "uz") == "ru" else "uz"), talk=bool(row.get("talk", True)),
             latitude=float(row.get("latitude") or 40.7821), longitude=float(row.get("longitude") or 72.3442),
             calc_method=int(row.get("calc_method") or 3),
@@ -167,96 +193,47 @@ def snooze_minutes(text: str) -> int | None:
 
 
 # ------------------------------------------------------------------ задания
-def _question(rnd: random.Random, hard: bool) -> tuple[str, str]:
-    if hard:
-        a, b = rnd.randint(12, 29), rnd.randint(12, 19)
-        return f"{a} × {b}", str(a * b)
-    a, b = rnd.randint(6, 12), rnd.randint(6, 12)
-    return f"{a} × {b}", str(a * b)
-
-
-def make_task(s: WakeSettings, day: date, *, lang: str = "ru") -> dict[str, Any]:
-    """Задание дня: один и тот же день → одно и то же задание (не зависит от перезапусков)."""
-    allowed = [t for t in s.confirm_tasks if t in TASKS] or list(DEFAULT_TASKS)
-    rnd = random.Random(day.toordinal())
-    kind = allowed[rnd.randrange(len(allowed))]
-    hard = s.hardness == "hard"
-    uz = lang == "uz"
-    if kind == "water":
-        reps = "2" if hard else "1"
-        text = (f"{reps} stakan suv iching va bo'sh stakanni suratga olib yuboring 💧" if uz
-                else f"Выпей {reps} стакан{'а' if hard else ''} воды и пришли фото пустого стакана 💧")
-        return {"kind": kind, "text": text, "answer": None, "expects": "photo"}
-    if kind in {"squats", "pushups"}:
-        count = (20 if kind == "squats" else 15) if hard else (10 if kind == "squats" else 7)
-        if kind == "squats":
-            text = (f"{count} marta cho'kkalab turing va ovozli xabarda sanab yuboring 🏋️" if uz
-                    else f"{count} приседаний — считай вслух и пришли голосовое 🏋️")
-        else:
-            text = (f"{count} marta otjimaniye qiling va ovozli xabarda sanab yuboring 💪" if uz
-                    else f"{count} отжиманий — считай вслух и пришли голосовое 💪")
-        return {"kind": kind, "text": text, "answer": str(count), "expects": "voice"}
-    question, answer = _question(rnd, hard)
-    text = (f"Javob bering: {question} = ?" if uz else f"Ответь: {question} = ?")
-    return {"kind": kind, "text": text, "answer": answer, "expects": "text"}
-
-
-def check_answer(task: dict[str, Any], *, text: str | None = None, has_photo: bool = False, voice_seconds: int = 0,
-                 transcript: str | None = None) -> tuple[bool, str]:
-    """(принято ли, короткий комментарий). Мы не придираемся: важно, что человек встал."""
-    expects = str(task.get("expects") or "text")
-    body = f"{text or ''} {transcript or ''}".strip()
-    if expects == "photo":
-        if has_photo:
-            return True, "ok"
-        if looks_awake(body) and len(body) > 0:
-            return False, "need_photo"
-        return False, "need_photo"
-    if expects == "voice":
-        if voice_seconds >= MIN_VOICE_SECONDS:
-            return True, "ok"
-        if voice_seconds > 0:
-            return False, "too_short"
-        return False, "need_voice"
-    answer = str(task.get("answer") or "").strip()
-    digits = re.findall(r"-?\d+", body)
-    if answer and digits and any(d == answer for d in digits):
-        return True, "ok"
-    if answer and digits:
-        return False, "wrong"
-    return False, "need_answer"
+def motivation(day: date, attempt: int = 1, lang: str = "ru") -> str:
+    """Фраза дня для подъёма: каждый день и каждая попытка — другая, но без случайности между перезапусками."""
+    phrases = MOTIVATION.get(lang, MOTIVATION["ru"])
+    return phrases[(day.toordinal() + attempt - 1) % len(phrases)]
 
 
 # ------------------------------------------------------------------ тексты
-def call_script(*, name: str, takbir: str | None, minutes_left: int | None, task_text: str,
+def call_script(*, name: str, takbir: str | None, minutes_left: int | None, motivation_text: str = "",
                 next_thing: str = "", lang: str = "uz") -> str:
-    """Что «Джарвис» говорит в трубку — коротко, на узбекском по умолчанию."""
+    """Что «Джарвис» говорит в трубку в режиме «просто говорит» (без разговора)."""
     if lang == "uz":
-        parts = [f"Assalomu alaykum, {name}." ]
+        parts = [f"Assalomu alaykum, {name}."]
         if takbir and minutes_left is not None:
             parts.append(f"Bomdod takbiri {takbir} da, {minutes_left} daqiqa qoldi.")
         elif takbir:
             parts.append(f"Bomdod takbiri {takbir} da.")
-        parts.append("Turing, iltimos.")
-        if task_text:
-            parts.append(f"Vazifa: {task_text}")
+        parts.append(motivation_text or "Turing, iltimos.")
         if next_thing:
             parts.append(next_thing)
         parts.append("Turganingizni tasdiqlang.")
         return " ".join(parts)
+    if lang == "en":
+        parts = [f"Assalamu alaikum, {name}."]
+        if takbir and minutes_left is not None:
+            parts.append(f"Fajr takbir is at {takbir}, {minutes_left} minutes left.")
+        parts.append(motivation_text or "Please get up.")
+        if next_thing:
+            parts.append(next_thing)
+        parts.append("Confirm that you're up.")
+        return " ".join(parts)
     parts = [f"Ассалому алайкум, {name}."]
     if takbir and minutes_left is not None:
         parts.append(f"Такбир фаджра в {takbir}, осталось {minutes_left} минут.")
-    parts.append("Вставай.")
-    if task_text:
-        parts.append(f"Задание: {task_text}")
+    parts.append(motivation_text or "Вставайте.")
     if next_thing:
         parts.append(next_thing)
-    parts.append("Подтверди, что встал.")
+    parts.append("Подтвердите, что встали.")
     return " ".join(parts)
 
 
-def wake_message(*, name: str, plan: DayPlan, task: dict[str, Any], attempt: int, lang: str = "ru") -> str:
+def wake_message(*, name: str, plan: DayPlan, attempt: int, lang: str = "ru") -> str:
     uz = lang == "uz"
     head = "⏰ <b>" + ("Turish vaqti" if uz else "Подъём") + "</b>"
     lines = [head]
@@ -266,7 +243,7 @@ def wake_message(*, name: str, plan: DayPlan, task: dict[str, Any], attempt: int
             left = f" ({int((plan.takbir_at - plan.wake_at).total_seconds() // 60)} " + ("daqiqa qoldi" if uz else "мин до него") + ")"
         lines.append(("Bomdod takbiri" if uz else "Такбир фаджра") + f": <b>{plan.takbir}</b>{left}")
     lines.append("")
-    lines.append(("Vazifa" if uz else "Задание") + f": {task.get('text')}")
+    lines.append(f"🤲 <i>{motivation(plan.day, attempt, 'uz' if uz else 'ru')}</i>")
     if attempt > 1:
         lines.append("")
         lines.append(("Urinish" if uz else "Попытка") + f" {attempt}")
@@ -314,6 +291,6 @@ def streak_days(rows: list[dict[str, Any]], today: date) -> int:
 
 
 __all__ = [
-    "WakeSettings", "DayPlan", "TASKS", "CONFIRM_MINUTES", "plan_for_day", "should_call", "make_task", "check_answer",
+    "WakeSettings", "DayPlan", "MOTIVATION", "CONFIRM_MINUTES", "plan_for_day", "should_call", "motivation",
     "looks_awake", "snooze_minutes", "call_script", "wake_message", "done_message", "stats_line", "streak_days",
 ]

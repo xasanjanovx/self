@@ -27,10 +27,13 @@ def test_style_rules_follow_settings():
 
 
 def test_wake_instruction_has_takbir_task_and_confirm_rule():
-    text = live_call.system_instruction(_profile(), persona.Persona(), mode="wake",
-                                        wake={"takbir": "05:07", "minutes_left": 25, "task": "выпей стакан воды"})
-    assert "05:07" in text and "25 минут" in text and "стакан воды" in text
+    text = live_call.system_instruction(_profile(), persona.Persona(honorific="shef"), mode="wake",
+                                        wake={"takbir": "05:07", "minutes_left": 25})
+    assert "05:07" in text and "25 минут" in text
     assert "confirm_awake" in text and "ещё НЕ проснулся" in text and "1–2 минуты" in text
+    # мотивация вместо заданий + проверка по голосу с обращением из настроек
+    assert "мунафик" in text and "Никаких упражнений" in text
+    assert "убедиться, что вы уже встали с кровати, Шеф" in text
     assert "ДАННЫЕ" not in text  # подъёму данные не нужны
 
 

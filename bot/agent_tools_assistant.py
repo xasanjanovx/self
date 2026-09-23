@@ -457,9 +457,6 @@ async def _list_deadlines(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
 
 
 # ------------------------------------------------------------------ подъём на фаджр
-WAKE_TASKS = ARR({"type": "STRING", "enum": list(wake_mod.TASKS)}, "какие задания на подтверждение подъёма разрешены")
-
-
 @tool("get_wake", "Настройки подъёма и план на завтра: во сколько звонить, такбир фаджра, времена намазов, статистика подъёмов за 2 недели. "
       "Вопросы «во сколько ты меня разбудишь?», «когда такбир?», «когда намаз?» — сюда.")
 async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
@@ -476,7 +473,7 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {
         "settings": {"enabled": s.enabled, "mode": s.mode, "fixed_time": s.fixed_time, "offset_min": s.offset_min,
                      "takbir_offset_min": s.takbir_offset_min, "days_of_week": list(s.days_of_week), "call_enabled": s.call_enabled,
-                     "voice_lang": s.voice_lang, "talk": s.talk, "tasks": list(s.confirm_tasks), "hardness": s.hardness, "skip_until": s.skip_until.isoformat() if s.skip_until else None},
+                     "voice_lang": s.voice_lang, "talk": s.talk, "skip_until": s.skip_until.isoformat() if s.skip_until else None},
         "today": {"active": plan.active, "reason": plan.reason, "wake_at": plan.wake_at.strftime("%H:%M") if plan.wake_at else None,
                   "fajr_azan": plan.fajr, "takbir": plan.takbir},
         "tomorrow": {"active": plan_tomorrow.active, "wake_at": plan_tomorrow.wake_at.strftime("%H:%M") if plan_tomorrow.wake_at else None,
@@ -484,20 +481,19 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         "prayer_times_today": rows,
         "caller_ready": caller.available(),
         "history": [{"day": str(r.get("day"))[:10], "woke_at": r.get("woke_at"), "before_takbir": r.get("before_takbir"),
-                     "attempts": r.get("attempts"), "task": r.get("task_kind")} for r in history],
+                     "attempts": r.get("attempts")} for r in history],
     }
 
 
 @tool("set_wake", "Изменить подъём словами: «буди за 30 минут до такбира» (offset_min), «такбир в 5:20» (takbir_time — пересчитает поправку), "
       "«буди в 6:30» (mode=fixed + fixed_time), «буди по будням» (days=[1,2,3,4,5]), «выключи будильник» (enabled=false), "
-      "«не звони, пиши» (call_enabled=false), «не буди до понедельника» (skip_until), «жёстче» (hardness=hard), какие задания оставить (tasks).",
+      "«не звони, пиши» (call_enabled=false), «не буди до понедельника» (skip_until). Заданий и упражнений при подъёме нет — будит словами.",
       {"enabled": P("BOOLEAN", "включить/выключить подъём"), "mode": P("STRING", "fajr — до такбира; fixed — фиксированное время", enum=["fajr", "fixed"]),
        "fixed_time": P("STRING", "HH:MM для mode=fixed"), "offset_min": P("NUMBER", "за сколько минут до такбира звонить"),
        "takbir_time": P("STRING", "во сколько такбир (HH:MM) — пересчитает поправку к азану"),
        "takbir_offset_min": P("NUMBER", "минут между азаном фаджра и такбиром"),
        "days": ARR({"type": "NUMBER"}, "дни недели 1=пн … 7=вс"), "call_enabled": P("BOOLEAN", "звонить или только писать"),
-       "tasks": WAKE_TASKS, "hardness": P("STRING", "normal | hard", enum=["normal", "hard"]),
-       "voice_lang": P("STRING", "на каком языке Джарвис говорит в трубке: uz | ru", enum=["uz", "ru"]),
+       "voice_lang": P("STRING", "на каком языке Джарвис говорит в трубке: uz | ru | en", enum=["uz", "ru", "en"]),
        "talk": P("BOOLEAN", "живой разговор в трубке (true) или просто сказать и положить трубку (false)"),
        "skip_until": DATE, "skip_days": P("NUMBER", "не будить столько дней подряд, начиная с сегодня")})
 async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
@@ -532,13 +528,7 @@ async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         days = sorted({int(_num(d) or 0) for d in (a.get("days") or []) if _num(d) and 1 <= int(_num(d)) <= 7})
         if days:
             fields["days_of_week"] = days
-    if a.get("tasks"):
-        tasks = [t for t in (_str(x) for x in (a.get("tasks") or [])) if t in wake_mod.TASKS]
-        if tasks:
-            fields["confirm_tasks"] = tasks
-    if (hard := _str(a.get("hardness"))) in {"normal", "hard"}:
-        fields["hardness"] = hard
-    if (vl := _str(a.get("voice_lang"))) in {"uz", "ru"}:
+    if (vl := _str(a.get("voice_lang"))) in {"uz", "ru", "en"}:
         fields["voice_lang"] = vl
     if (talk := _bool(a.get("talk"))) is not None:
         fields["talk"] = talk

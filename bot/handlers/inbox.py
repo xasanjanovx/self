@@ -76,11 +76,8 @@ async def route_text(
         await send_main_menu(message, profile, force_new=True)
         return True
     voice = transcript is not None
-    # подъём: «проснулся / ещё 10 минут» и ответ на задание — раньше всех остальных правил
+    # подъём: «проснулся / ещё 10 минут» — раньше всех остальных правил
     if await wake_h.handle_awake_text(message, profile, text):
-        await safe_delete(message)
-        return True
-    if await wake_h.handle_task_reply(message, profile, text=text, transcript=transcript):
         await safe_delete(message)
         return True
     if cache.get(profile.telegram_id, ("agent_ask",)):
@@ -108,14 +105,12 @@ async def route_text(
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:
-    """Фото: подтверждение подъёма (пустой стакан) → вакансия по подписи → договорённость с Джарвисом
+    """Фото: вакансия по подписи → договорённость с Джарвисом
     (expect_photo) → еда или «другое».
 
     Раньше любое фото считалось едой: пообещал Джарвис «пришли фото челленджа — отмечу», а фото ушло
     в калории. Теперь Джарвис видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
     caption = message_text(message)
-    if await wake_h.handle_task_reply(message, profile, text=caption, has_photo=True):
-        return
     if caption and vac.looks_like_vacancy(caption):
         await vacancy_h.process_vacancy(message, state, profile, caption)
         return
@@ -165,10 +160,6 @@ async def fallback(message: Message, state: FSMContext) -> None:
         except Exception:
             logger.exception("transcribe failed")
             transcript = ""
-        seconds = int(getattr(message.voice or message.audio, "duration", 0) or 0)
-        if await wake_h.handle_task_reply(message, profile, transcript=transcript, voice_seconds=seconds):
-            await safe_delete(message)
-            return
         if transcript and await route_text(message, state, profile, transcript, transcript=transcript):
             return
         await safe_delete(message)
