@@ -566,7 +566,21 @@ async def _mark_awake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {"awake": True, "before_takbir": result["before_takbir"], "streak_days": result["streak"], "takbir": result["plan"].takbir}
 
 
+@tool("test_wake_call", "Проверить будильник прямо сейчас: звонок ровно как утром (режим подъёма: мотивация, проверка по голосу, что встал). "
+      "«давай проверим будильник», «протестируй подъём», «позвони как будильник», «budilnikni tekshir». В журнал подъёмов не пишется. "
+      "Звонок идёт фоном: ответь одной строкой, что звонишь в режиме будильника.", {})
+async def _test_wake_call(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import call_assistant
+
+    if not caller.available():
+        return {"error": "звонки не настроены: в .env нужны TG_CALLER_API_ID / TG_CALLER_API_HASH / TG_CALLER_SESSION"}
+    if call_assistant.wake_test_in_background(ctx.profile) is None:
+        return {"error": "уже идёт звонок"}
+    return {"calling": True, "mode": "wake_test", "note": "звонок будильника начнётся через пару секунд"}
+
+
 @tool("call_me", "Позвонить пользователю в Telegram прямо сейчас и поговорить голосом (он просит «позвони», «набери меня», «qo'ng'iroq qil»). "
+      "Если просит проверить будильник/подъём — не это, а test_wake_call. "
       "В разговоре у тебя те же инструменты: можно ответить на вопросы по данным и записать траты/еду/задачи с голоса. "
       "topic — с чего начать («расскажи, сколько я потратил», «обсудим цели»); без topic просто поздороваешься и будешь слушать. "
       "Звонок идёт фоном: ответь пользователю одной строкой, что звонишь.",

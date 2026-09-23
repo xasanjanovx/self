@@ -332,6 +332,18 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
     profile = await get_profile(callback.from_user)
     parts = callback.data.split(":")
     action, value = parts[1], (parts[2] if len(parts) > 2 else "")
+    if action == "testwake":  # звонок ровно как утром, без записи в журнал подъёмов
+        if not caller.available():
+            await answer_now(callback, profile.tr("Звонки не настроены", "Qo'ng'iroq sozlanmagan"), alert=True)
+            return
+        if call_assistant.wake_test_in_background(profile) is None:
+            await answer_now(callback, profile.tr("Уже звоню", "Allaqachon qo'ng'iroq qilyapman"))
+            return
+        await answer_now(callback, profile.tr("Звоню как будильник ⏰", "Budilnik kabi qo'ng'iroq qilyapman ⏰"))
+        from .menu import render_dashboard
+
+        await render_dashboard(callback, state, profile, notice=profile.tr("🧪 Звоню как будильник — возьми трубку", "🧪 Budilnik kabi qo'ng'iroq — trubkani oling"))
+        return
     if action == "calltest":
         if not caller.available():
             await answer_now(callback, profile.tr("Звонки не настроены", "Qo'ng'iroq sozlanmagan"), alert=True)

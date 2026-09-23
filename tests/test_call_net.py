@@ -58,3 +58,14 @@ def test_signaling_for_calls_without_stats_passes_through():
     proxy = call_net._BindingProxy(real)
     asyncio.run(proxy.send_signaling_data(1, b"ok"))
     assert real.delivered == [b"ok"]
+
+
+def test_wake_test_call_is_available_in_chat_not_inside_calls():
+    from bot import agent_tools, live_call
+    from bot.keyboards import wake_settings_keyboard
+
+    assert "test_wake_call" in {d["name"] for d in agent_tools.declarations()}
+    assert "test_wake_call" not in {d["name"] for d in live_call.tool_declarations("assistant")}
+    kb = wake_settings_keyboard("ru", enabled=True, call_enabled=True, talk=True, voice_lang="uz", mode="fajr", days=[1, 2, 3, 4, 5, 6, 7])
+    data = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "wakeset:testwake" in data and not any("task" in d or "hardness" in d for d in data if d)

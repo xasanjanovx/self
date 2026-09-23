@@ -39,7 +39,7 @@ DRAIN_SECONDS = 8.0          # после «до связи» даём дого�
 SILENCE_NUDGE_SECONDS = 7.0  # подъём: столько тишины — и Джарвис снова зовёт по имени
 
 # инструменты чата, которые в голосе не нужны или мешают
-_SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me"}
+_SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me", "test_wake_call"}
 
 _WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 

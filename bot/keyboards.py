@@ -356,6 +356,7 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
             _btn(("📅 Har kuni" if uz else "📅 Каждый день") + ("" if only_weekdays else " ✓"), "wakeset:days:all", style=None if only_weekdays else "primary"),
             _btn(("📅 Ish kunlari" if uz else "📅 Будни") + (" ✓" if only_weekdays else ""), "wakeset:days:work", style="primary" if only_weekdays else None),
         ],
+        [_btn("🧪 " + ("Budilnikni hozir sinash" if uz else "Проверить будильник сейчас"), "wakeset:testwake", style="success")],
     ]
     rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

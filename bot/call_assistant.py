@@ -249,4 +249,39 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
     return asyncio.create_task(runner(), name=f"call-{uid}")
 
 
-__all__ = ["call_now", "call_in_background", "is_goodbye", "voice_reply", "greeting", "farewell", "MAX_TURNS"]
+def wake_test_in_background(profile: Profile) -> asyncio.Task | None:
+    """«Проверить будильник»: звонок ровно как утром (режим подъёма, мотивация, проверка по голосу),
+    но без записи в журнал подъёмов и без перезвонов."""
+    uid = profile.telegram_id
+    if uid in _running:
+        return None
+
+    async def runner() -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from . import live_call, wake_runner
+
+        _running.add(uid)
+        try:
+            s, plan = await wake_runner.plan_for(profile)
+            if not plan.takbir_at or plan.takbir_at < datetime.now(timezone.utc):
+                _, plan = await wake_runner.plan_for(profile, profile.today + timedelta(days=1))
+            minutes_left = int((plan.takbir_at - datetime.now(timezone.utc)).total_seconds() // 60) if plan.takbir_at else None
+            result = await live_call.run(profile, mode="wake", ring_seconds=45,
+                                         wake={"takbir": plan.takbir, "minutes_left": minutes_left})
+            if not result.answered:
+                await _notify_failure(profile, str(result.error or ""))
+                return
+            verdict = (profile.tr("✅ подъём засчитан бы", "✅ turish qabul qilinardi") if result.confirmed
+                       else profile.tr("⏰ подъём не засчитан — утром перезвонила бы", "⏰ turish qabul qilinmadi — ertalab qayta qo'ng'iroq qilardim"))
+            await show_home(profile, "🧪 " + profile.tr("Проверка будильника: ", "Budilnik sinovi: ") + verdict)
+        except Exception:
+            logger.exception("wake test call failed")
+            await _notify_failure(profile, "internal error")
+        finally:
+            _running.discard(uid)
+
+    return asyncio.create_task(runner(), name=f"wake-test-{uid}")
+
+
+__all__ = ["call_now", "call_in_background", "wake_test_in_background", "is_goodbye", "voice_reply", "greeting", "farewell", "MAX_TURNS"]
