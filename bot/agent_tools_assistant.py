@@ -580,14 +580,14 @@ async def _mark_awake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
       "В разговоре у тебя те же инструменты: можно ответить на вопросы по данным и записать траты/еду/задачи с голоса. "
       "topic — с чего начать («расскажи, сколько я потратил», «обсудим цели»); без topic просто поздороваешься и будешь слушать. "
       "Звонок идёт фоном: ответь пользователю одной строкой, что звонишь.",
-      {"topic": P("STRING", "о чём начать разговор"), "lang": P("STRING", "язык разговора: uz | ru", enum=["uz", "ru"])})
+      {"topic": P("STRING", "о чём начать разговор"), "lang": P("STRING", "язык разговора: uz | ru | en", enum=["uz", "ru", "en"])})
 async def _call_me(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     from . import call_assistant
 
     if not caller.available():
         return {"error": "звонки не настроены: в .env нужны TG_CALLER_API_ID / TG_CALLER_API_HASH / TG_CALLER_SESSION"}
     lang = _str(a.get("lang"))
-    call_assistant.call_in_background(ctx.profile, topic=_str(a.get("topic")) or "", lang=lang if lang in {"uz", "ru"} else None)
+    call_assistant.call_in_background(ctx.profile, topic=_str(a.get("topic")) or "", lang=lang if lang in {"uz", "ru", "en"} else None)
     return {"calling": True, "topic": _str(a.get("topic")), "note": "звонок начнётся через пару секунд"}
 
 

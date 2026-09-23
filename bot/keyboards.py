@@ -237,15 +237,39 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
     )
 
 
-def settings_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+def settings_keyboard(lang: str = "ru", *, owner: bool = False) -> InlineKeyboardMarkup:
     """Главный экран настроек — только разделы бота. Всё про Джарвиса (голос, будильник, звонки) —
-    отдельно, в кнопке «Джарвис» главного меню."""
+    отдельно, в кнопке «Джарвис» главного меню. «Пользователи» — только владельцу."""
     uz = lang == "uz"
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [_btn("🔔 " + ("Bildirishnomalar" if uz else "Уведомления"), "settings:notify", style="primary"),
          _btn("🗒 " + ("Eslatmalar" if uz else "Напоминания"), "settings:reminders", style="primary")],
         [_btn(t(lang, "menu_language"), "menu:language", icon=_pe.ID_LANGUAGE)],
-        [_back(lang)],
+    ]
+    if owner:
+        rows[1].append(_btn("👥 " + ("Foydalanuvchilar" if uz else "Пользователи"), "members:open", style="primary"))
+    rows.append([_back(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def members_keyboard(lang: str, members: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    uz = lang == "uz"
+    rows = [[_btn("➕ " + ("Taklif qilish" if uz else "Пригласить"), "members:invite", style="success")]]
+    rows += [[_btn(f"🗑 {name}"[:40], f"members:del:{uid}")] for uid, name in members[:20]]
+    rows.append([_back(lang, "menu:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def invite_keyboard(lang: str, link: str) -> InlineKeyboardMarkup:
+    from urllib.parse import quote
+
+    uz = lang == "uz"
+    share = "https://t.me/share/url?url=" + quote(link, safe="") + "&text=" + quote(
+        "Shaxsiy yordamchi Jarvis — kirish uchun bosing" if uz else "Личный помощник Джарвис — нажми, чтобы войти")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("📤 " + ("Yuborish" if uz else "Отправить"), url=share, style="success")],
+        [_btn("📋 " + ("Havolani nusxalash" if uz else "Скопировать ссылку"), copy_text=link)],
+        [_back(lang, "members:open")],
     ])
 
 
@@ -370,7 +394,8 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
     if voice_row:
         rows.append(voice_row)
     rows.append([_btn("🔊 " + ("Ovozni eshitish" if uz else "Послушать голос"), "jarvis:sample")])
-    rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru")])
+    rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru"),
+                 pick("🇬🇧 English", "jarvis:lang:en", call_lang == "en")])
     rows.append([pick("Sen (ты)" if uz else "На «ты»", "jarvis:address:sen", address == "sen"),
                  pick("Siz (вы)" if uz else "На «вы»", "jarvis:address:siz", address == "siz")])
     rows.append([pick(HONORIFICS[k][1] if uz else HONORIFICS[k][0], f"jarvis:honorific:{k}", honorific == k) for k in ("shef", "ser", "boss")])
@@ -392,7 +417,9 @@ def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 def language_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(t(lang, "lang_ru"), "lang:set:ru"), _btn(t(lang, "lang_uz"), "lang:set:uz")],
+            [_btn("🇺🇿 O'zbekcha" + (" ✓" if lang == "uz" else ""), "lang:set:uz"),
+             _btn("🇷🇺 Русский" + (" ✓" if lang == "ru" else ""), "lang:set:ru"),
+             _btn("🇬🇧 English" + (" ✓" if lang == "en" else ""), "lang:set:en")],
             [_back(lang, "menu:settings")],
         ]
     )

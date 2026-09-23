@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 def script_prompt(brief_text: str, profile: Profile, p: Persona) -> str:
     plain = re.sub(r"<[^>]+>", "", brief_text)
-    lang = "узбекском (литературный, живой)" if p.lang == "uz" else "русском"
+    lang = {"uz": "узбекском (литературный, живой)", "en": "английском"}.get(p.lang, "русском")
     address = "на «вы» (siz)" if p.address == "siz" else "на «ты» (sen)"
+    if p.lang == "en":
+        address = "по-дружески"
     return (
         f"Ты — Джарвис, личный помощник {p.name_for(profile.first_name) or ''}. Перескажи утреннюю сводку ГОЛОСОМ на {lang} языке, "
         f"обращаясь {address}. Голос женский — о себе в женском роде. {honorific_rule(p)}\n"

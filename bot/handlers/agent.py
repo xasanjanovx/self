@@ -26,6 +26,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import agent_tools as tools
+from .. import i18n
 from ..about import ABOUT_SELF
 from .. import agent_tools_extra as extra
 from .. import cache
@@ -84,10 +85,14 @@ def looks_like_command(text: str) -> bool:
 _WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
+REPLY_LANGS = {"uz": "узбекский (латиница)", "ru": "русский", "en": "английский (English)"}
+
+
+def system_prompt(profile: Profile, snapshot: str, memory: str = "", reply_lang: str | None = None) -> str:
     now = profile.now
     name = profile.first_name or "пользователя"
-    lang = "узбекский (латиница)" if profile.lang == "uz" else "русский"
+    # язык ответа — язык Джарвиса из его настроек (интерфейс бота может быть на другом языке)
+    lang = REPLY_LANGS.get(reply_lang or profile.lang, "русский")
     return (
         f"Ты — Джарвис, личный ассистент {name} внутри Telegram-бота Self (финансы, питание, задачи, цели, напоминания, вакансии). "
         "Ты умный, точный и немногословный; понимаешь с полуслова, действуешь, а не переспрашиваешь. "
@@ -97,8 +102,9 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "") -> str:
         "Пользователь часто диктует голосом: опечатки, склейки слов, имена и бренды в другой транскрипции (Узум = Uzum, Хамкор = Hamkorbank) — "
         "восстанавливай смысл по контексту и данным, а не отвечай «не понял».\n"
         f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
-        f"ЯЗЫК ОТВЕТА: всегда {lang} (выбран в настройках) — даже если он пишет на другом языке или смешивает языки; "
-        "другой язык — только если он прямо попросил («ответь по-русски», «ruscha yoz»).\n\n"
+        f"ЯЗЫК ОТВЕТА: всегда {lang} (выбран в настройках Джарвиса) — даже если он пишет или говорит на другом языке "
+        "(узбекский, русский, английский, таджикский, казахский, турецкий…) или смешивает языки: понимай любой, отвечай только на этом. "
+        "Другой язык — только если он прямо попросил в этом сообщении («ответь по-русски», «ruscha yoz», «in English»).\n\n"
         "ЧТО ТЫ УМЕЕШЬ (инструменты): смотреть и менять операции (расходы/доходы/переводы/долги), счета, лимиты, регулярные платежи, "
         "напоминания, дневник питания, план КБЖУ, настройки сводок и отчётов; заметки («запомни»), задачи, цели любого вида (накопления, лимиты трат, вес, привычки, свободные), взвешивания, сроки возврата долгов; привычки пользователя по его данным; "
         "подъём на фаджр со звонком-разговором в Telegram, времена намаза (Андижан); "
@@ -293,6 +299,7 @@ async def run_agent(
     run_tool: RunFn | None = None,
     max_steps: int = MAX_STEPS,
     image: tuple[bytes, str] | None = None,
+    reply_lang: str | None = None,
 ) -> AgentResult:
     """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст.
     `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…)."""
@@ -305,7 +312,7 @@ async def run_agent(
 
         parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     contents = list(history) + [{"role": "user", "parts": parts}]
-    system = system_prompt(profile, snapshot, memory)
+    system = system_prompt(profile, snapshot, memory, reply_lang=reply_lang)
     decls = tools.declarations()
     final = ""
     steps = 0
@@ -369,16 +376,19 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
         logger.exception("agent snapshot failed")
         snapshot = "(данные временно недоступны)"
     memory = await extra.memory_prompt(uid)
+    reply_lang = profile.lang
     try:
         from .. import persona as persona_mod
 
-        rules = "ХАРАКТЕР (настройки пользователя): " + persona_mod.style_rules(await services.persona(uid))
+        persona = await services.persona(uid)
+        reply_lang = persona.lang
+        rules = "ХАРАКТЕР (настройки пользователя): " + persona_mod.style_rules(persona)
         memory = f"{memory}\n\n{rules}" if memory else rules
     except Exception:
         logger.debug("persona rules failed", exc_info=True)
     try:
         result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory,
-                                 image=(photo[0], photo[1]) if photo else None)
+                                 image=(photo[0], photo[1]) if photo else None, reply_lang=reply_lang)
     except Exception:
         logger.exception("agent failed")
         undo.end_turn(uid)
@@ -400,7 +410,7 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
 
     if own_message:
         await safe_delete(message)
-    reply = render_reply(result.text)
+    reply = i18n.keep(render_reply(result.text))
     if ctx.ask:
         options = list(ctx.ask.get("options") or [])
         cache.put(uid, ("agent_ask",), options, ASK_TTL)

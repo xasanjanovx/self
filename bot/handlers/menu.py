@@ -266,9 +266,10 @@ async def cb_menu_language(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("lang:set:"))
 async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
-    lang = callback.data.split(":")[-1]
-    lang = "uz" if lang == "uz" else "ru"
-    await answer_now(callback, "O'zbekcha ✅" if lang == "uz" else "Русский ✅")
+    from .. import i18n
+
+    lang = i18n.norm(callback.data.split(":")[-1])
+    await answer_now(callback, i18n.LANG_NAMES[lang] + " ✅")
     await db.update_user_language(callback.from_user.id, lang)
     set_profile_lang(callback.from_user.id, lang)
     profile = await get_profile(callback.from_user)

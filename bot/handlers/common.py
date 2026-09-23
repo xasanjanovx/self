@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
 
 from .. import cache
+from .. import i18n
 from .. import screen as screen_mod
 from ..context import ai, db, settings
 from ..profile import Profile, h
@@ -21,10 +22,11 @@ PROFILE_TTL = 6 * 3600
 
 
 def _shape(user_row: dict[str, Any], tg_user: User | None = None) -> Profile:
-    lang = str(user_row.get("language") or settings.default_language).strip().lower()
+    lang = i18n.norm(str(user_row.get("language") or settings.default_language).strip().lower())
+    i18n.remember(int(user_row["telegram_id"]), lang)  # PremiumBot переводит интерфейс для en
     return Profile(
         telegram_id=int(user_row["telegram_id"]),
-        lang="uz" if lang == "uz" else "ru",
+        lang=lang,
         tz_name=str(user_row.get("timezone") or settings.app_timezone),
         currency=str(user_row.get("currency") or settings.default_currency),
         first_name=str(user_row.get("first_name") or (tg_user.first_name if tg_user else "") or "").strip(),
@@ -66,8 +68,10 @@ async def profile_by_id(telegram_id: int) -> Profile:
 
 def set_profile_lang(telegram_id: int, lang: str) -> None:
     cached = cache.get(telegram_id, ("profile",))
+    lang = i18n.norm(lang)
+    i18n.remember(telegram_id, lang)
     if isinstance(cached, Profile):
-        cached.lang = "uz" if lang == "uz" else "ru"
+        cached.lang = lang
 
 
 # ------------------------------------------------------------------ screen

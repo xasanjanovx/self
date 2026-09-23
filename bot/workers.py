@@ -9,6 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import LinkPreviewOptions
 
+from . import access
 from . import cache
 from . import services
 from .context import db, settings
@@ -53,7 +54,7 @@ async def report_worker(bot: Bot) -> None:
             users = await db.list_users()
             for user in users:
                 telegram_id = int(user["telegram_id"])
-                if not settings.is_allowed(telegram_id):
+                if not access.is_allowed(telegram_id):
                     continue
                 profile = await profile_by_id(telegram_id)
                 local_now = now_utc.astimezone(profile.tz)
@@ -132,10 +133,7 @@ async def _brief_tick(bot: Bot) -> None:
     if not db.available("user_settings"):
         return
     now_utc = datetime.now(timezone.utc)
-    if settings.allowed_telegram_ids:
-        user_ids = sorted(settings.allowed_telegram_ids)
-    else:
-        user_ids = [int(u["telegram_id"]) for u in await db.list_users()]
+    user_ids = access.user_ids() or [int(u["telegram_id"]) for u in await db.list_users()]
     for telegram_id in user_ids:
         profile = await profile_by_id(telegram_id)
         local_now = now_utc.astimezone(profile.tz)
@@ -206,7 +204,7 @@ async def _reminder_tick(bot: Bot) -> None:
         return
     for row in rows:
         telegram_id = int(row.get("telegram_id") or 0)
-        if not settings.is_allowed(telegram_id):
+        if not access.is_allowed(telegram_id):
             continue
         profile = await profile_by_id(telegram_id)
         local_now = now_utc.astimezone(profile.tz)
@@ -260,7 +258,7 @@ async def _task_tick(bot: Bot) -> None:
     for row in rows:
         by_user.setdefault(int(row.get("telegram_id") or 0), []).append(row)
     for telegram_id, tasks in by_user.items():
-        if not settings.is_allowed(telegram_id):
+        if not access.is_allowed(telegram_id):
             continue
         profile = await profile_by_id(telegram_id)
         now = datetime.now(timezone.utc).astimezone(profile.tz)
@@ -284,7 +282,7 @@ async def _proactive_tick(bot: Bot) -> None:
 
     if not db.available("alerts_log") or not db.available("user_settings"):
         return
-    user_ids = sorted(settings.allowed_telegram_ids) or [int(u["telegram_id"]) for u in await db.list_users()]
+    user_ids = access.user_ids() or [int(u["telegram_id"]) for u in await db.list_users()]
     for telegram_id in user_ids:
         profile = await profile_by_id(telegram_id)
         us = await services.user_settings(telegram_id)
@@ -376,7 +374,7 @@ async def _wake_tick(bot: Bot) -> None:
 
     if not db.available("wake_settings") or not db.available("wake_log"):
         return
-    user_ids = sorted(settings.allowed_telegram_ids) or [int(u["telegram_id"]) for u in await db.list_users()]
+    user_ids = access.user_ids() or [int(u["telegram_id"]) for u in await db.list_users()]
     now_utc = datetime.now(timezone.utc)
     for telegram_id in user_ids:
         try:

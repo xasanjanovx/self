@@ -27,15 +27,39 @@ class AccessMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        from . import access
+
         user = getattr(event, "from_user", None)
         uid = user.id if user else None
-        if self.settings.is_allowed(uid):
+        await access.refresh()
+        if access.is_allowed(uid):
+            if isinstance(event, CallbackQuery) and uid is not None:
+                from . import i18n
+
+                i18n.note_callback(event.id, uid)  # чтобы перевести всплывашку ответа на кнопку
             return await handler(event, data)
+
+        # ссылка-приглашение: /start inv_<code>
+        code = access.invite_code(event.text) if isinstance(event, Message) else None
+        if code and user is not None:
+            status = await access.redeem(code, telegram_id=user.id, first_name=user.first_name, username=user.username)
+            if status == "ok":
+                lang = await _setup_new_member(user)
+                result = await handler(event, data)  # /start → главное меню уже на его языке
+                await _welcome(event, lang)
+                return result
+            texts = {"expired": "⌛ Taklif muddati o'tgan. / Приглашение истекло. / The invite has expired.",
+                     "used": "🔒 Bu taklif ishlatilgan. / Приглашение уже использовано. / This invite was already used."}
+            try:
+                await event.answer(texts.get(status, "⛔ Taklif topilmadi. / Приглашение не найдено. / Invite not found."))
+            except Exception:
+                pass
+            return None
 
         now = time.monotonic()
         if uid is not None and now - self._notified.get(uid, 0.0) > 3600:
             self._notified[uid] = now
-            text = "⛔ Bu shaxsiy bot. / Это личный бот."
+            text = "⛔ Bu shaxsiy bot. / Это личный бот. / This is a private bot."
             try:
                 if isinstance(event, Message):
                     await event.answer(text)
@@ -50,6 +74,59 @@ class AccessMiddleware(BaseMiddleware):
                 pass
         logger.info("Access denied for user %s", uid)
         return None
+
+
+def lang_from_telegram(code: str | None) -> str:
+    """Язык нового человека по его Telegram: ru/uz как есть, остальным — английский."""
+    code = str(code or "").lower()
+    if code.startswith("uz"):
+        return "uz"
+    if code.startswith(("ru", "be", "uk", "kk", "ky", "tg")):  # в СНГ русский понятнее английского
+        return "ru"
+    return "en"
+
+
+async def _setup_new_member(user) -> str:  # noqa: ANN001
+    """Первый вход по приглашению: профиль, язык бота и Джарвиса — по языку его Telegram."""
+    from . import cache, services
+    from .context import db, settings
+
+    lang = lang_from_telegram(getattr(user, "language_code", None))
+    try:
+        await db.upsert_user(user.id, username=user.username, first_name=user.first_name, language=lang,
+                             timezone_name=settings.app_timezone, currency=settings.default_currency)
+        await db.update_user_language(user.id, lang)
+        if db.available("assistant_settings"):
+            await services.save_persona(user.id, {"lang": lang})
+        cache.invalidate(user.id, "profile")
+    except Exception:
+        logger.exception("new member setup failed for %s", user.id)
+    return lang
+
+
+WELCOME = {
+    "ru": ("👋 <b>Добро пожаловать!</b>\n\nЭто личный помощник с ИИ «Джарвис». Просто пиши или говори голосом, как человеку:\n"
+           "• «такси 25 000», «обед 40к» — расходы\n• фото еды — калории\n• «напомни завтра в 9 позвонить маме»\n"
+           "• «накопить 5 млн к декабрю» — цели\n• 🤖 Джарвис — звонок, будильник, голос\n\n"
+           "Все твои данные видишь только ты."),
+    "uz": ("👋 <b>Xush kelibsiz!</b>\n\nBu sun'iy intellektli shaxsiy yordamchi — «Jarvis». Odamga yozgandek yozing yoki ovozli gapiring:\n"
+           "• «taksi 25 000», «tushlik 40k» — xarajatlar\n• ovqat rasmi — kaloriya\n• «ertaga 9 da onamga qo'ng'iroq qilishni eslat»\n"
+           "• «dekabrgacha 5 mln yig'ish» — maqsadlar\n• 🤖 Jarvis — qo'ng'iroq, budilnik, ovoz\n\n"
+           "Ma'lumotlaringizni faqat siz ko'rasiz."),
+    "en": ("👋 <b>Welcome!</b>\n\nThis is your personal AI assistant, Jarvis. Just write or speak to it like to a person:\n"
+           "• “taxi 25 000”, “lunch 40k” — expenses\n• a food photo — calories\n• “remind me tomorrow at 9 to call mom”\n"
+           "• “save 5 mln by December” — goals\n• 🤖 Jarvis — calls, alarm, voice\n\n"
+           "Only you can see your data."),
+}
+
+
+async def _welcome(message: Message, lang: str) -> None:
+    from . import screen as screen_mod
+
+    try:
+        await screen_mod.send_ephemeral(message.bot, message.chat.id, WELCOME.get(lang, WELCOME["en"]), keep_previous=True, ttl=6 * 3600)
+    except Exception:
+        logger.debug("welcome failed", exc_info=True)
 
 
 class DedupeMiddleware(BaseMiddleware):

@@ -94,7 +94,7 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
 
     await state.set_state(BotStates.waiting_vacancy_input)
     await state.update_data(vacancy_post=post, vacancy_contact_url=contact_url, vacancy_photo_id=photo_id, vacancy_prompt=data.image_prompt)
-    kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel))
+    kb = vacancy_result_keyboard(lang, contact_url, can_publish=_channel_for(profile.telegram_id) is not None)
     await show_panel(message, state, post, kb)
     if data.image_prompt:
         # полный промпт — отдельным блоком: в Telegram нажатие на блок копирует его целиком
@@ -132,6 +132,13 @@ async def msg_input(message: Message, state: FSMContext) -> None:
     await process_vacancy(message, state, profile, raw_text)
 
 
+def _channel_for(uid: int):  # noqa: ANN202
+    """Канал вакансий — только у владельца; приглашённые получают чистую копию себе."""
+    from .. import access
+
+    return settings.vacancy_channel if settings.vacancy_channel and access.is_owner(uid) else None
+
+
 @router.callback_query(F.data == "vacancy:publish")
 async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
     profile = await get_profile(callback.from_user)
@@ -143,7 +150,8 @@ async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
         await answer_now(callback, profile.tr("Нет данных для публикации", "E'lon uchun ma'lumot yo'q"), alert=True)
         return
     markup = vacancy_channel_keyboard(profile.lang, contact_url)
-    target_chat = settings.vacancy_channel or callback.message.chat.id
+    channel = _channel_for(profile.telegram_id)
+    target_chat = channel or callback.message.chat.id
     photo_skipped = False
     try:
         if photo_id and len(post) <= 1024:
@@ -155,7 +163,7 @@ async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
         logger.exception("Vacancy publish failed")
         await answer_now(callback, f"{profile.tr('Ошибка', 'Xato')}: {str(exc)[:150]}", alert=True)
         return
-    if settings.vacancy_channel:
+    if channel:
         note = profile.tr("Опубликовано в канал ✅", "Kanalga joylandi ✅")
     else:
         note = profile.tr("Чистая копия отправлена — перешли её в канал.", "Toza nusxa yuborildi — kanalga forward qiling.")

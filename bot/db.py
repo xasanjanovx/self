@@ -89,7 +89,7 @@ class Database:
             "user_settings", "budgets", "recurring_payments",
             "notes", "tasks", "savings_goals", "debt_deadlines", "alerts_log",
             "user_memory", "agent_log", "weight_logs", "goal_checkins", "wake_settings", "wake_log", "assistant_settings",
-            "ephemeral_messages",
+            "ephemeral_messages", "bot_members", "bot_invites", "ui_translations",
         )
 
         async def probe(name: str) -> str | None:
@@ -159,7 +159,7 @@ class Database:
 
     async def update_user_language(self, telegram_id: int, language: str) -> None:
         lang = (language or "ru").strip().lower()
-        if lang not in {"ru", "uz"}:
+        if lang not in {"ru", "uz", "en"}:
             lang = "ru"
         await self._table("users").update({"language": lang}).eq("telegram_id", telegram_id).execute()
 
@@ -638,6 +638,44 @@ class Database:
     async def save_assistant_settings(self, telegram_id: int, fields: dict[str, Any]) -> None:
         payload = {"telegram_id": telegram_id, **fields, "updated_at": datetime.now(timezone.utc).isoformat()}
         await self._table("assistant_settings").upsert(payload, on_conflict="telegram_id").execute()
+
+    # ---------------------------------------------------------- 011: приглашённые пользователи
+    async def list_members(self) -> list[dict[str, Any]]:
+        res = await self._table("bot_members").select("*").order("created_at").execute()
+        return res.data or []
+
+    async def add_member(self, telegram_id: int, *, first_name: str | None, username: str | None, invited_by: int | None) -> None:
+        await self._table("bot_members").upsert(
+            {"telegram_id": telegram_id, "first_name": first_name, "username": username, "invited_by": invited_by}, on_conflict="telegram_id"
+        ).execute()
+
+    async def remove_member(self, telegram_id: int) -> None:
+        await self._table("bot_members").delete().eq("telegram_id", telegram_id).execute()
+
+    async def create_invite(self, code: str, *, created_by: int, expires_at: datetime) -> None:
+        await self._table("bot_invites").insert({"code": code, "created_by": created_by, "expires_at": expires_at.isoformat()}).execute()
+
+    async def get_invite(self, code: str) -> dict[str, Any]:
+        res = await self._table("bot_invites").select("*").eq("code", code).limit(1).execute()
+        rows = res.data or []
+        return rows[0] if rows else {}
+
+    async def use_invite(self, code: str, telegram_id: int) -> bool:
+        """Погасить приглашение атомарно: только если ещё не использовано."""
+        res = await self._table("bot_invites").update({"used_by": telegram_id, "used_at": datetime.now(timezone.utc).isoformat()}) \
+            .eq("code", code).is_("used_by", "null").execute()
+        return bool(res.data)
+
+    # ---------------------------------------------------------- 011: переводы интерфейса
+    async def get_translations(self, hashes: list[str], lang: str) -> dict[str, str]:
+        if not hashes:
+            return {}
+        res = await self._table("ui_translations").select("src_hash,dst").eq("lang", lang).in_("src_hash", hashes).execute()
+        return {r["src_hash"]: r["dst"] for r in (res.data or [])}
+
+    async def save_translations(self, rows: list[dict[str, Any]]) -> None:
+        if rows:
+            await self._table("ui_translations").upsert(rows, on_conflict="src_hash").execute()
 
     # ---------------------------------------------------------- 010: временные сообщения чата
     async def add_ephemeral(self, chat_id: int, message_id: int, delete_at: datetime) -> None:

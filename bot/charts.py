@@ -93,7 +93,7 @@ def finance_daily_chart(
     expense_vals = [float(expense[d.isoformat()]) for d in dates]
 
     if not title:
-        title = "Доходы и расходы" if lang != "uz" else "Daromad va xarajatlar"
+        title = {"uz": "Daromad va xarajatlar", "en": "Income and expenses"}.get(lang, "Доходы и расходы")
 
     fig, ax = _setup_fig(figsize=(max(7, days * 0.32), 3.4))
     x = np.arange(days)
@@ -155,11 +155,11 @@ def calorie_trend_chart(
     ax.fill_between(dates, values, color=_COLOR_PRIMARY, alpha=0.12, zorder=2)
     if target and target > 0:
         ax.axhline(target, color="#f39c12", linestyle="--", linewidth=1.2,
-                   label=("Цель" if lang != "uz" else "Maqsad"))
+                   label={"uz": "Maqsad", "en": "Goal"}.get(lang, "Цель"))
         ax.legend(loc="upper right", frameon=False, fontsize=9)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, days // 7)))
-    ax.set_title(("Калории по дням" if lang != "uz" else "Kunlik kaloriya"), fontsize=11, pad=10)
+    ax.set_title({"uz": "Kunlik kaloriya", "en": "Calories per day"}.get(lang, "Калории по дням"), fontsize=11, pad=10)
     fig.tight_layout()
     return _fig_to_bytes(fig)
 
@@ -196,7 +196,7 @@ def expense_categories_chart(
                 f"  {int(val):,} ({val / total * 100:.0f}%)".replace(",", " "),
                 va="center", ha="left", fontsize=8, color=_COLOR_TEXT)
     ax.set_xlim(0, max(values) * 1.35)
-    title = title or ("Расходы по категориям" if lang != "uz" else "Xarajatlar toifalar bo'yicha")
+    title = title or {"uz": "Xarajatlar toifalar bo'yicha", "en": "Expenses by category"}.get(lang, "Расходы по категориям")
     ax.set_title(f"{title} ({currency})", fontsize=11, pad=10, color=_COLOR_TEXT)
     fig.tight_layout()
     return _fig_to_bytes(fig)

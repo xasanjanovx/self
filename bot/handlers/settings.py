@@ -16,6 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 from .. import cache
+from .. import i18n
 from .. import emoji as pe
 from .. import services
 from .. import ui
@@ -101,10 +102,12 @@ async def render_settings(target: Message | CallbackQuery, profile: Profile) -> 
         f"🔔 <b>{'Bildirishnomalar' if uz else 'Уведомления'}</b> — {'ertalab' if uz else 'утро'} {_morning_label(us, uz)} · "
         f"{'kechqurun' if uz else 'вечер'} {_evening_label(us, uz)} · {report}",
         f"🗒 <b>{'Eslatmalar' if uz else 'Напоминания'}</b> — {len(rems) if rems else ('yo`q' if uz else 'нет')}",
-        f"🌐 <b>{'Til' if uz else 'Язык'}</b> — {'O`zbekcha' if uz else 'Русский'}",
+        f"🌐 <b>{'Til' if uz else 'Язык'}</b> — {i18n.LANG_NAMES[profile.lang]}",
     ]
     text = ui.join(ui.title(pe.SETTINGS, "Sozlamalar" if uz else "Настройки"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
-    await _show(target, text, settings_keyboard(profile.lang))
+    from .. import access
+
+    await _show(target, text, settings_keyboard(profile.lang, owner=access.is_owner(uid)))
 
 
 @router.callback_query(F.data == "menu:settings")
@@ -407,7 +410,8 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     length = {"short": ("коротко", "qisqa"), "normal": ("обычно", "o'rtacha"), "detailed": ("подробно", "batafsil")}[p.verbosity]
     lines = [
         f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b>",
-        f"🗣 {'Qo`ng`iroq tili' if uz else 'Язык звонков'}: <b>{'o`zbekcha' if p.lang == 'uz' else 'русский'}</b>",
+        f"🗣 {'Jarvis tili' if uz else 'Язык Джарвиса'}: <b>{i18n.LANG_NAMES[p.lang]}</b> "
+        f"<i>({'chat, qo`ng`iroq, ovoz — qaysi tilda gapirsangiz ham' if uz else 'чат, звонки, голос — на каком бы языке ты ни говорил'})</i>",
         f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}</b>"
         f" · <b>{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}</b>",
         f"🎭 {'Ohang' if uz else 'Тон'}: <b>{tone[1] if uz else tone[0]}</b> · {'javoblar' if uz else 'ответы'}: <b>{length[1] if uz else length[0]}</b>",
@@ -462,7 +466,7 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
     fields: dict[str, Any] = {}
     if action == "voice" and value in persona_mod.VOICES:
         fields["voice"] = value
-    elif action == "lang" and value in {"uz", "ru"}:
+    elif action == "lang" and value in i18n.LANGS:
         fields["lang"] = value
     elif action == "address" and value in {"sen", "siz"}:
         fields["address"] = value
@@ -489,6 +493,7 @@ async def _send_voice_sample(callback: CallbackQuery, profile: Profile) -> None:
     p = await services.persona(profile.telegram_id)
     name = p.name_for(profile.first_name)
     phrase = (f"Assalomu alaykum, {name}. Men Jarvisman, yordam berishga tayyorman." if p.lang == "uz"
+              else f"Hello, {name}. I'm Jarvis, ready to help." if p.lang == "en"
               else f"Ассалому алайкум, {name}. Я Джарвис, готова помочь.")
     try:
         pcm = await ai.synthesize(phrase, voice=p.voice)
@@ -559,7 +564,7 @@ async def render_jarvis_hub(target: Message | CallbackQuery, profile: Profile, *
     important = await _important_now(profile)
     facts = extra.parse_facts((mem or {}).get("facts") or "")
     char_lines = [
-        f"🔊 {voice_uz if uz else voice_ru} · {'o`zbekcha' if p.lang == 'uz' else 'русский'} · "
+        f"🔊 {voice_uz if uz else voice_ru} · {i18n.LANG_NAMES[p.lang]} · "
         f"{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')} · "
         f"{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}",
         f"📞 {'Muhim bo`lsa qo`ng`iroq' if uz else 'Звонок о важном'}: <b>{on if p.alert_calls else off}</b> · "

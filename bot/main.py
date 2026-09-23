@@ -8,10 +8,12 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.methods import EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto, TelegramMethod
+from aiogram.methods import (AnswerCallbackQuery, EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto,
+                             SendVoice, TelegramMethod)
 from aiogram.types import BotCommand
 
 from . import emoji as pe
+from . import i18n
 from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
@@ -22,14 +24,47 @@ logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
 
 
+async def _localize(method: TelegramMethod[Any]) -> None:
+    """Английский интерфейс: текст/подпись/кнопки → английский (bot/i18n.py). Для остальных языков
+    только убираем служебные маркеры KEEP."""
+    from aiogram.types import InlineKeyboardMarkup
+
+    if isinstance(method, AnswerCallbackQuery):
+        uid = i18n.callback_user(method.callback_query_id)
+        if uid and i18n.lang_of(uid) == "en" and i18n.needs(method.text):
+            method.text = await i18n.translate(method.text)
+        return
+    field = "text" if isinstance(method, (SendMessage, EditMessageText)) else (
+        "caption" if isinstance(method, (SendPhoto, SendDocument, SendVoice, EditMessageCaption)) else None)
+    value = getattr(method, field, None) if field else None
+    lang = i18n.lang_of(getattr(method, "chat_id", None))
+    if lang != "en":
+        if field and value:
+            setattr(method, field, i18n.strip_keep(value))
+        return
+    markup = getattr(method, "reply_markup", None)
+    buttons = [b for row in markup.inline_keyboard for b in row] if isinstance(markup, InlineKeyboardMarkup) else []
+    texts = [value] + [b.text for b in buttons]
+    out = await i18n.translate_many(texts)
+    if field and value:
+        setattr(method, field, out[0])
+    for button, text in zip(buttons, out[1:]):
+        if text and text != button.text:
+            button.text = text[:64]
+
+
 class PremiumBot(Bot):
-    """Подменяет обычные эмодзи на премиум во всех исходящих текстах/подписях."""
+    """Переводит интерфейс для английского и подменяет обычные эмодзи на премиум во всех исходящих текстах."""
 
     async def __call__(self, method: TelegramMethod[Any], request_timeout: int | None = None) -> Any:
         try:
+            await _localize(method)
+        except Exception:
+            logger.warning("localize failed", exc_info=True)
+        try:
             if isinstance(method, (SendMessage, EditMessageText)) and method.text:
                 method.text = pe.premiumize(method.text)
-            elif isinstance(method, (SendPhoto, SendDocument, EditMessageCaption)) and method.caption:
+            elif isinstance(method, (SendPhoto, SendDocument, SendVoice, EditMessageCaption)) and method.caption:
                 method.caption = pe.premiumize(method.caption)
         except Exception:
             logger.debug("premiumize failed", exc_info=True)
@@ -47,6 +82,9 @@ async def on_startup(bot: Bot) -> None:
     screen_mod.configure_persistence(load=db.get_screen_message_id, save=db.set_screen_message_id)
     if db.available("ephemeral_messages"):
         screen_mod.configure_trash(db)
+    from . import access
+
+    await access.refresh(force=True)
     try:
         await ai.ensure_models()
     except Exception:
@@ -60,6 +98,11 @@ async def on_startup(bot: Bot) -> None:
                 BotCommand(command="help", description="Помощь / Yordam"),
             ]
         )
+        await bot.set_my_commands(
+            [BotCommand(command="menu", description="Main menu"), BotCommand(command="vacancy", description="Format a job post"),
+             BotCommand(command="dashboard", description="Analytics"), BotCommand(command="help", description="Help")],
+            language_code="en",
+        )
     except Exception:
         logger.warning("set_my_commands failed", exc_info=True)
     background_tasks.append(asyncio.create_task(report_worker(bot), name="report-worker"))
@@ -67,7 +110,7 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(reminder_worker(bot), name="reminder-worker"))
     background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
     background_tasks.append(asyncio.create_task(wake_worker(bot), name="wake-worker"))
-    logger.info("Bot started. Allowed users: %s", sorted(settings.allowed_telegram_ids) or "everyone")
+    logger.info("Bot started. Owner: %s, members: %s", sorted(settings.allowed_telegram_ids) or "everyone", len(access.user_ids()) - len(settings.allowed_telegram_ids))
 
 
 async def on_shutdown() -> None:

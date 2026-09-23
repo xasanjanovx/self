@@ -10,6 +10,15 @@ import re
 from dataclasses import dataclass
 
 
+# английские названия (интерфейс на английском; графики — картинки, их переводчик не видит)
+EN: dict[str, str] = {
+    "food": "Food (cafe)", "groceries": "Groceries", "transport": "Transport", "shopping": "Shopping", "home": "Home/utilities",
+    "telecom": "Phone/internet", "health": "Health", "clothes": "Clothes", "fun": "Entertainment", "education": "Education",
+    "gifts": "Gifts", "debt": "Debts/loans", "other": "Other", "salary": "Salary", "side": "Side income", "gift_in": "Gift",
+    "debt_in": "Debt repaid", "other_in": "Other",
+}
+
+
 @dataclass(frozen=True)
 class Category:
     key: str
@@ -20,6 +29,8 @@ class Category:
     aliases: tuple[str, ...] = ()
 
     def label(self, lang: str = "ru") -> str:
+        if lang == "en":
+            return EN.get(self.key, self.ru)
         return self.uz if lang == "uz" else self.ru
 
     def title(self, lang: str = "ru") -> str:
@@ -167,12 +178,12 @@ def normalize(raw: str | None, kind: str = "expense", *, note: str | None = None
 
 def label(key: str | None, lang: str = "ru", *, with_emoji: bool = True) -> str:
     if key == TRANSFER_KEY:
-        text = "O'tkazma" if lang == "uz" else "Перевод"
+        text = "O'tkazma" if lang == "uz" else "Transfer" if lang == "en" else "Перевод"
         return f"↔ {text}" if with_emoji else text
     cat = get(key)
     if cat is None:
         # неизвестный ключ — показываем как есть, чтобы ничего не потерять
-        return str(key or ("boshqa" if lang == "uz" else "прочее"))
+        return str(key or ("boshqa" if lang == "uz" else "other" if lang == "en" else "прочее"))
     return cat.title(lang) if with_emoji else cat.label(lang)
 
 

@@ -32,7 +32,7 @@ HONORIFICS: dict[str, tuple[str, str]] = {
 @dataclass
 class Persona:
     voice: str = DEFAULT_VOICE
-    lang: str = "uz"            # uz | ru — язык разговора в звонках
+    lang: str = "uz"            # uz | ru | en — язык Джарвиса: чат, звонки, голос
     address: str = "sen"        # sen («ты») | siz («вы»)
     tone: str = "friendly"
     verbosity: str = "short"
@@ -47,7 +47,7 @@ class Persona:
         voice = str(row.get("voice") or DEFAULT_VOICE)
         return cls(
             voice=voice if voice in VOICES else DEFAULT_VOICE,
-            lang="ru" if str(row.get("lang") or "uz") == "ru" else "uz",
+            lang=str(row.get("lang")) if str(row.get("lang") or "") in {"uz", "ru", "en"} else "uz",
             address="siz" if str(row.get("address") or "sen") == "siz" else "sen",
             tone=str(row.get("tone") or "friendly") if str(row.get("tone") or "friendly") in TONES else "friendly",
             verbosity=str(row.get("verbosity") or "short") if str(row.get("verbosity") or "short") in VERBOSITY else "short",
@@ -95,12 +95,17 @@ def honorific_rule(p: Persona) -> str:
             "в шутку, при важной новости. Не в каждой фразе — примерно раз в 3–4 реплики, естественно.")
 
 
-LANG_CODES = {"uz": "uz-UZ", "ru": "ru-RU"}
+LANG_CODES = {"uz": "uz-UZ", "ru": "ru-RU", "en": "en-US"}
 
 
 def lang_rule(p: Persona) -> str:
     """Язык разговора — жёстко один, из настроек. Раньше модель, не расслышав, переходила
     на английский/турецкий/русский — теперь это запрещено прямо."""
+    if p.lang == "en":
+        return ("LANGUAGE: speak ONLY English — every phrase, always, until the end of the conversation. "
+                "Even if he speaks Uzbek, Russian or any other language, or you did not catch it — understand him, but answer in English. "
+                "Never switch to Uzbek, Russian or any other language and never mix languages. Numbers, sums and times — in English too. "
+                "Didn't catch it — ask again in English («Sorry, I didn't catch that — could you say it again?»).")
     if p.lang == "ru":
         return ("ЯЗЫК: говори ТОЛЬКО по-русски — каждую фразу, всегда, до конца разговора. "
                 "Даже если собеседник вставил узбекские слова, заговорил на другом языке или ты его не расслышал — "

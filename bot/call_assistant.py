@@ -230,7 +230,7 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
 
         _running.add(uid)
         try:
-            if lang in {"uz", "ru"}:
+            if lang in {"uz", "ru", "en"}:
                 await services.save_persona(uid, {"lang": lang})
             result = await live_call.run(profile, mode="assistant", topic=topic)
             await services.log_agent(uid, text=f"call: {topic or 'разговор'}", kind="call",
