@@ -11,6 +11,7 @@ send_sms / telegram_send кладут их в ожидание, confirm_send о�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -364,6 +365,78 @@ def declarations() -> list[dict[str, Any]]:
     return bot_tools + [t.declaration() for t in PHONE_TOOLS.values()]
 
 
+# ------------------------------------------------------------------ quick replies
+# Простое действие на телефоне («звоню», «ставлю будильник») или вопрос «отправить?» — ответ известен
+# заранее, второй запрос к модели ради одной фразы не делаем: для голоса важна каждая секунда.
+def _minutes(seconds: int, uz: bool) -> str:
+    if seconds % 60:
+        return f"{seconds} soniya" if uz else f"{seconds} секунд"
+    m = seconds // 60
+    if m % 60 == 0:
+        return f"{m // 60} soat" if uz else f"{m // 60} ч"
+    return f"{m} daqiqa" if uz else f"{m} минут"
+
+
+def action_phrase(action: dict[str, Any], lang: str = "ru") -> str:
+    uz = lang == "uz"
+    kind = action.get("type")
+    if kind == "call":
+        return f"{action.get('name')}ga qo'ng'iroq qilyapman." if uz else f"Звоню: {action.get('name')}."
+    if kind == "alarm":
+        hm = f"{int(action.get('hour', 0)):02d}:{int(action.get('minute', 0)):02d}"
+        return f"Budilnik {hm} ga qo'yildi." if uz else f"Ставлю будильник на {hm}."
+    if kind == "timer":
+        return f"Taymer: {_minutes(int(action.get('seconds') or 0), True)}." if uz else f"Таймер на {_minutes(int(action.get('seconds') or 0), False)}."
+    if kind == "open_app":
+        return f"{action.get('name')} ochyapman." if uz else f"Открываю {action.get('name')}."
+    if kind == "flashlight":
+        return ("Chiroq yoqildi." if action.get("on") else "Chiroq o'chirildi.") if uz else ("Фонарик включён." if action.get("on") else "Выключаю фонарик.")
+    if kind == "navigate":
+        return f"{action.get('destination')} gacha yo'l." if uz else f"Строю маршрут: {action.get('destination')}."
+    if kind == "media":
+        ru = {"play": "Включаю.", "pause": "Пауза.", "next": "Следующий.", "previous": "Предыдущий."}
+        return "Bo'ldi." if uz else ru.get(str(action.get("command")), "Готово.")
+    if kind == "url":
+        return "Ochyapman." if uz else "Открываю."
+    return "Bo'ldi." if uz else "Готово."
+
+
+def quick_reply(turn: PhoneTurn, contents: list[dict[str, Any]], lang: str) -> str | None:
+    """Если последний ход модели — только телефонные действия (успешно) или одна отправка «на подтверждение»,
+    вернуть готовую фразу; иначе None — пусть отвечает модель."""
+    if not contents or contents[-1].get("role") != "user":
+        return None
+    responses = [p.get("functionResponse") for p in contents[-1].get("parts") or [] if isinstance(p, dict)]
+    if not responses or not all(isinstance(r, dict) for r in responses):
+        return None
+    names_ = [r.get("name") for r in responses]
+    results = [r.get("response") or {} for r in responses]
+    if len(responses) == 1 and names_[0] in {"telegram_send", "send_sms"} and results[0].get("ask_exactly"):
+        return str(results[0]["ask_exactly"])
+    if len(responses) == 1 and names_[0] == "confirm_send" and results[0].get("ok"):
+        return "Yuborildi." if lang == "uz" else "Отправил."
+    if not all(n in QUICK_TOOLS and r.get("ok") for n, r in zip(names_, results)):
+        return None
+    done = turn.actions[-len(responses):]
+    return " ".join(action_phrase(a, lang) for a in done) or None
+
+
+QUICK_TOOLS = {"phone_call", "set_alarm", "set_timer", "open_app", "flashlight", "set_volume", "media", "open_link", "navigate", "device_action"}
+
+
+def make_step(turn: PhoneTurn, lang: str, step_fn=None):
+    async def step(contents: list[dict[str, Any]], **kwargs: Any):
+        from .ai import AgentStep
+        from .context import ai
+
+        text = quick_reply(turn, contents, lang)
+        if text:
+            return AgentStep(parts=[{"text": text}], text=text, calls=[], finish="STOP")
+        return await (step_fn or ai.agent_step)(contents, **kwargs)
+
+    return step
+
+
 def make_runner(turn: PhoneTurn):
     async def run(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         t = PHONE_TOOLS.get(name)
@@ -438,7 +511,36 @@ def _speech_langs(device: dict[str, Any]) -> set[str]:
 
 
 # ------------------------------------------------------------------ entry point
-async def handle(uid: int, text: str, device: dict[str, Any] | None = None) -> dict[str, Any]:
+_background: set[asyncio.Task[Any]] = set()
+
+
+def _later(coro) -> None:
+    """Журнал и память — после ответа: пользователь ждёт голос, а не запись в БД."""
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _persona_rules(uid: int, fallback_lang: str) -> tuple[str, str]:
+    try:
+        from . import persona as persona_mod
+
+        persona = await services.persona(uid)
+        return persona.lang, "ХАРАКТЕР (настройки пользователя): " + persona_mod.style_rules(persona)
+    except Exception:
+        logger.debug("persona rules failed", exc_info=True)
+        return fallback_lang, ""
+
+
+async def _snapshot(profile: Any) -> str:
+    try:
+        return await tools.snapshot(profile)
+    except Exception:
+        logger.exception("phone snapshot failed")
+        return "(данные временно недоступны)"
+
+
+async def handle(uid: int, text: str, device: dict[str, Any] | None = None, *, step_fn=None) -> dict[str, Any]:
     """Одна реплика с телефона → {"say", "actions", "listen", "need_contacts"}."""
     from .handlers.agent import run_agent
     from .handlers.common import profile_by_id
@@ -451,7 +553,7 @@ async def handle(uid: int, text: str, device: dict[str, Any] | None = None) -> d
         say = f"Отправил, {pending['name']}." if result.get("ok") and pending["kind"] == "tg" else (
             "Отправляю." if result.get("ok") else result.get("error", "Не получилось."))
         _append_history(uid, text, say)
-        await services.log_agent(uid, text=text, kind="phone", tools="confirm_send", reply=say, ok=bool(result.get("ok")))
+        _later(services.log_agent(uid, text=text, kind="phone", tools="confirm_send", reply=say, ok=bool(result.get("ok"))))
         return {"say": say, "actions": turn.actions, "listen": False}
     if pending and is_no(text):
         set_pending(uid, None)
@@ -459,22 +561,9 @@ async def handle(uid: int, text: str, device: dict[str, Any] | None = None) -> d
         return {"say": "Хорошо, не отправляю.", "actions": [], "listen": False}
 
     profile = await profile_by_id(uid)
-    try:
-        snapshot = await tools.snapshot(profile)
-    except Exception:
-        logger.exception("phone snapshot failed")
-        snapshot = "(данные временно недоступны)"
-    memory = await extra.memory_prompt(uid)
-    reply_lang = profile.lang
-    try:
-        from . import persona as persona_mod
-
-        persona = await services.persona(uid)
-        reply_lang = persona.lang
-        rules = "ХАРАКТЕР (настройки пользователя): " + persona_mod.style_rules(persona)
+    snapshot, memory, (reply_lang, rules) = await asyncio.gather(_snapshot(profile), extra.memory_prompt(uid), _persona_rules(uid, profile.lang))
+    if rules:
         memory = f"{memory}\n\n{rules}" if memory else rules
-    except Exception:
-        logger.debug("persona rules failed", exc_info=True)
     langs = _speech_langs(turn.device)
     if langs and reply_lang not in langs:
         reply_lang = "ru" if "ru" in langs else next(iter(langs))  # голос телефона не умеет этот язык
@@ -482,7 +571,8 @@ async def handle(uid: int, text: str, device: dict[str, Any] | None = None) -> d
     undo.begin_turn(uid)
     try:
         result = await run_agent(profile, text, load_history(uid), snapshot=snapshot, memory=memory, reply_lang=reply_lang,
-                                 run_tool=make_runner(turn), decls=declarations(), system_extra=system_extra(turn, pending))
+                                 step_fn=make_step(turn, reply_lang, step_fn), run_tool=make_runner(turn), decls=declarations(),
+                                 system_extra=system_extra(turn, pending))
     finally:
         mutated = undo.end_turn(uid)
     save_history(uid, result.contents)
@@ -495,8 +585,8 @@ async def handle(uid: int, text: str, device: dict[str, Any] | None = None) -> d
         turn.listen = True
     logger.info("phone: %.1fs tools=%s mutated=%s actions=%s listen=%s", time.monotonic() - started, ctx.calls, mutated,
                 [a["type"] for a in turn.actions], turn.listen)
-    await services.log_agent(uid, text=text, kind="phone", tools=",".join(ctx.calls), reply=say, ok=bool(ctx.calls or say))
-    await extra.remember_exchange(uid, text, say, when=profile.now.strftime("%d.%m %H:%M"))
+    _later(services.log_agent(uid, text=text, kind="phone", tools=",".join(ctx.calls), reply=say, ok=bool(ctx.calls or say)))
+    _later(extra.remember_exchange(uid, text, say, when=profile.now.strftime("%d.%m %H:%M")))
     return {"say": say, "actions": turn.actions, "listen": turn.listen, "need_contacts": turn.need_contacts}
 
 

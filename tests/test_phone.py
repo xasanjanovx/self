@@ -209,3 +209,44 @@ def test_sms_confirm_returns_sms_action(uid, monkeypatch):
     phone.set_pending(uid, {"kind": "sms", "number": "+998906666666", "name": "Азиз", "text": "Перезвоню"})
     out = asyncio.run(phone.handle(uid, "ha", {}))
     assert out["actions"] == [{"type": "sms", "number": "+998906666666", "text": "Перезвоню", "name": "Азиз"}]
+
+
+# ------------------------------------------------------------------ quick replies (без второго запроса к модели)
+def _run_quick(turn, text, *steps):
+    return asyncio.run(agent.run_agent(_profile(), text, [], snapshot="", step_fn=phone.make_step(turn, "ru", _scripted(*steps)),
+                                       run_tool=phone.make_runner(turn), decls=phone.declarations(),
+                                       system_extra=phone.system_extra(turn, None)))
+
+
+def test_quick_reply_for_call_skips_second_model_step(uid):
+    phone.save_contacts(uid, [{"n": c["name"], "p": c["phones"]} for c in CONTACTS])
+    turn = phone.PhoneTurn(uid=uid)
+    result = _run_quick(turn, "позвони маме", _call("phone_call", who="мама"))  # второго шага в сценарии нет
+    assert result.text == "Звоню: Ойижон." and turn.actions[0]["type"] == "call"
+
+
+def test_quick_reply_for_alarm_and_timer(uid):
+    turn = phone.PhoneTurn(uid=uid)
+    result = _run_quick(turn, "будильник на 7 и таймер 10 минут",
+                        AgentStep(parts=[], text="", calls=[("set_alarm", {"time": "07:00"}), ("set_timer", {"seconds": 600})], finish="STOP"))
+    assert result.text == "Ставлю будильник на 07:00. Таймер на 10 минут."
+
+
+def test_quick_reply_for_pending_message_is_the_confirmation_question(uid, monkeypatch):
+    chat = {"id": 9, "name": "Азиз", "username": "", "kind": "user", "unread": 0, "muted": False}
+
+    async def fake_dialogs(*, fresh=False):
+        return [chat]
+
+    monkeypatch.setattr(tg_user, "configured", lambda: True)
+    monkeypatch.setattr(tg_user, "dialogs", fake_dialogs)
+    turn = phone.PhoneTurn(uid=uid)
+    result = _run_quick(turn, "напиши Азизу ок", _call("telegram_send", who="Азиз", text="Ок"))
+    assert result.text == "Отправить в Telegram — Азиз: «Ок»?" and turn.listen
+
+
+def test_no_quick_reply_when_contact_is_ambiguous(uid):
+    phone.save_contacts(uid, [{"n": "Ойижон", "p": ["1"]}, {"n": "Мама Beeline", "p": ["2"]}])
+    turn = phone.PhoneTurn(uid=uid)
+    result = _run_quick(turn, "позвони маме", _call("phone_call", who="мама"), _say("Какой маме: Ойижон или Мама Beeline?"))
+    assert turn.actions == [] and "Ойижон" in result.text
