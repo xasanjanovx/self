@@ -449,13 +449,15 @@ class AIService:
 
     # ------------------------------------------------------------- voice
     async def transcribe_voice(self, file_path: str | Path) -> str:
-        audio_b64 = base64.b64encode(Path(file_path).read_bytes()).decode()
-        prompt = (
+        return await self.transcribe_audio(Path(file_path).read_bytes(), "audio/ogg")
+
+    async def transcribe_audio(self, data: bytes, mime_type: str, *, prompt: str | None = None) -> str:
+        prompt = prompt or (
             "Расшифруй аудио дословно. Язык — русский или узбекский (латиница). "
             "Верни только текст без комментариев."
         )
         text = await self.generate(
-            [{"text": prompt}, {"inline_data": {"mime_type": "audio/ogg", "data": audio_b64}}],
+            [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(data).decode()}}],
             model=self.transcribe_model,
             temperature=0.0,
             json_mode=False,

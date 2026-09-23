@@ -302,9 +302,12 @@ async def run_agent(
     max_steps: int = MAX_STEPS,
     image: tuple[bytes, str] | None = None,
     reply_lang: str | None = None,
+    decls: list[dict[str, Any]] | None = None,
+    system_extra: str = "",
 ) -> AgentResult:
     """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст.
-    `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…)."""
+    `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…).
+    `decls` / `system_extra` — другой набор инструментов и дополнение к промпту (голосовой режим, bot/phone.py)."""
     step_fn = step_fn or ai.agent_step
     run_tool = run_tool or tools.run
     ctx = tools.ToolContext(profile=profile, text=text)
@@ -314,8 +317,8 @@ async def run_agent(
 
         parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     contents = list(history) + [{"role": "user", "parts": parts}]
-    system = system_prompt(profile, snapshot, memory, reply_lang=reply_lang)
-    decls = tools.declarations()
+    system = system_prompt(profile, snapshot, memory, reply_lang=reply_lang) + system_extra
+    decls = decls if decls is not None else tools.declarations()
     final = ""
     steps = 0
     for steps in range(1, max_steps + 1):

@@ -110,6 +110,12 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(reminder_worker(bot), name="reminder-worker"))
     background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
     background_tasks.append(asyncio.create_task(wake_worker(bot), name="wake-worker"))
+    try:
+        from . import phone_api
+
+        await phone_api.start()  # голосовой Джарвис на телефоне (нужен JARVIS_TOKEN)
+    except Exception:
+        logger.exception("phone api failed to start")
     logger.info("Bot started. Owner: %s, members: %s", sorted(settings.allowed_telegram_ids) or "everyone", len(access.user_ids()) - len(settings.allowed_telegram_ids))
 
 
@@ -122,9 +128,13 @@ async def on_shutdown() -> None:
         except (asyncio.CancelledError, Exception):
             pass
     background_tasks.clear()
-    from . import caller
+    from . import caller, phone_api
 
     await caller.stop()
+    try:
+        await phone_api.stop()
+    except Exception:
+        logger.warning("phone api stop failed", exc_info=True)
     await ai.close()
 
 
