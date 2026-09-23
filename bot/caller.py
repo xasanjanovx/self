@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,12 @@ async def start() -> bool:
             logging.getLogger("pytgcalls").setLevel(logging.INFO)
             _calls = PyTgCalls(_client)
             await _calls.start()
+            try:
+                from . import call_net
+
+                call_net.instrument(_calls)  # ранние signaling-пакеты не теряются + лог соединения
+            except Exception:
+                logger.warning("call diagnostics not installed", exc_info=True)
             me = await _client.get_me()
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), getattr(me, "id", None))
             return True
@@ -198,8 +205,9 @@ FRAME_MS = 10
 LIVE_RATE = 24000                      # Gemini Live отдаёт 24 кГц моно; в звонок шлём так же
 FRAME_BYTES = LIVE_RATE // 1000 * FRAME_MS * 2   # 10 мс s16le моно = 480 байт
 MEDIA_RETRIES = 3          # перезвонов, если трубку взяли, а медиа не соединилось (TelegramServerError)
-MEDIA_RETRY_DELAY = 5.0    # через столько секунд телефон уже свободен (через 2 с было «занято»)
+MEDIA_RETRY_DELAY = 8.0    # через 2 и 5 с телефон ещё «занят» прошлым звонком — ждём дольше
 BUSY_RETRY_DELAY = 4.0
+RETRY_WINDOW = 45.0        # все перезвоны после обрыва — в пределах этого окна
 
 
 async def open_stream_call(user_id: int, *, username: str | None = None, ring_seconds: int = 45) -> dict[str, Any]:
@@ -224,13 +232,20 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
         logger.info("call %s: закрываю висящий прошлый звонок", uid)
         await hang_up(uid)
         await asyncio.sleep(1.5)
+    from . import call_net
+
     queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
-    ended = asyncio.Event()
     _incoming[uid] = queue
-    _ended[uid] = ended
     last_exc: Exception | None = None
-    media_failed = False
-    for attempt in range(1, MEDIA_RETRIES + 2):
+    media_fails = 0
+    deadline = time.monotonic() + RETRY_WINDOW
+    attempt = 0
+    while True:
+        attempt += 1
+        # у каждой попытки своё событие «трубку положили»: запоздалое «занято» от прошлой попытки
+        # раньше висело в общем событии, и новый, уже принятый звонок бот сразу же клал сам
+        _ended[uid] = asyncio.Event()
+        stats = call_net.begin(uid)
         logger.info("call %s: набираю (поток, попытка %s, гудки до %s с)", uid, attempt, ring_seconds)
         try:
             await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
@@ -239,18 +254,15 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
         except Exception as exc:
             last_exc = exc
             name = type(exc).__name__.lower()
-            logger.info("call %s: не состоялся — %s: %s", uid, type(exc).__name__, str(exc)[:200])
-            if attempt > MEDIA_RETRIES:
-                break
-            # трубку взяли, но медиа не соединилось (ntgcalls#70: либо за ~1 с, либо никогда) —
-            # помогает перезвон через несколько секунд. Сразу нельзя: телефон ещё «занят» прошлым звонком.
-            if "telegramserver" in name:
-                media_failed = True
-                ended.clear()
+            logger.info("call %s: не состоялся — %s: %s · %s", uid, type(exc).__name__, str(exc)[:200], stats.summary())
+            call_net.end(uid)
+            # трубку взяли, но медиа не соединилось (ntgcalls#70) — перезваниваем. Сразу нельзя:
+            # телефон ещё несколько секунд «занят» прошлым звонком.
+            if "telegramserver" in name and media_fails < MEDIA_RETRIES and time.monotonic() < deadline:
+                media_fails += 1
                 await asyncio.sleep(MEDIA_RETRY_DELAY)
                 continue
-            if "busy" in name and media_failed:
-                ended.clear()
+            if "busy" in name and media_fails and time.monotonic() < deadline:
                 await asyncio.sleep(BUSY_RETRY_DELAY)
                 continue
             break
@@ -261,6 +273,10 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
         if any(k in name for k in ("timeout", "discarded", "busy", "declined", "notanswer")):
             return {"answered": False, "error": None}
         return {"answered": False, "error": f"{type(last_exc).__name__}: {last_exc}"}
+    # свежее событие после ответа: всё, что пришло про прошлые попытки, больше не считается
+    ended = asyncio.Event()
+    _ended[uid] = ended
+    logger.info("call %s: соединение через %s · %s", uid, stats.at(), stats.summary())
     logger.info("call %s: трубку взяли", uid)
     try:
         await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
@@ -287,9 +303,12 @@ async def send_audio(user_id: int, pcm: bytes) -> bool:
 
 
 async def hang_up(user_id: int) -> None:
+    from . import call_net
+
     uid = int(user_id)
     _incoming.pop(uid, None)
     _ended.pop(uid, None)
+    call_net.end(uid)
     try:
         await _calls.leave_call(uid)
     except Exception:
