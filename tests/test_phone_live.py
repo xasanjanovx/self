@@ -97,14 +97,22 @@ def test_pcm_to_wav_header():
 
 
 # ------------------------------------------------------------------ блокировка экрана, карточки, проверка имени
-def test_locked_phone_asks_to_unlock_before_calling(uid):
+def test_locked_phone_calls_right_away(uid):
+    """Он выбрал «всё без разблокировки»: звонок с заблокированного телефона — сразу."""
     phone.save_contacts(uid, [{"n": "Ойижон", "p": ["+998901111111"]}])
     sess, phone_ws = _session()
     sess.turn.device["locked"] = True
+    asyncio.run(sess._run_tools(FakeWS(), [{"id": "1", "name": "phone_call", "args": {"who": "мама"}}]))
+    assert {"type": "unlock"} not in phone_ws.sent
+    assert any(isinstance(m, dict) and m.get("type") == "action" for m in phone_ws.sent)
+
+
+def test_locked_phone_asks_to_unlock_before_opening_apps(uid):
+    sess, phone_ws = _session()
+    sess.turn.device["locked"] = True
     gem = FakeWS()
-    asyncio.run(sess._run_tools(gem, [{"id": "1", "name": "phone_call", "args": {"who": "мама"}}]))
+    asyncio.run(sess._run_tools(gem, [{"id": "1", "name": "open_app", "args": {"name": "YouTube"}}]))
     assert {"type": "unlock"} in phone_ws.sent
-    assert not any(isinstance(m, dict) and m.get("type") == "action" for m in phone_ws.sent)
     assert gem.sent[-1]["toolResponse"]["functionResponses"][0]["response"]["need_unlock"]
 
 

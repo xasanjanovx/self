@@ -73,30 +73,29 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Если перебили — сразу остановись и слушай.\n"
     )
     if mode == "wake":
-        from .wake import MOTIVATION
-
         w = wake or {}
-        title = {"shef": "Шеф", "ser": "Сэр", "boss": "Босс", "mix": "Шеф / Сэр / Босс"}.get(p.honorific, name)
-        phrases = " · ".join(f"«{x}»" for x in MOTIVATION.get(p.lang, MOTIVATION["ru"]))
+        title = {"shef": "Шеф", "ser": "Сэр", "boss": "Босс", "mix": "Шеф"}.get(p.honorific, name)
+        quiz = w.get("quiz") or ""
+        today = w.get("today") or ""
         return base + (
-            "\nЗАДАЧА ЗВОНКА: поднять его на утренний намаз (бомдод/фаджр). "
-            f"Такбир в {w.get('takbir') or 'скоро'}, до него {w.get('minutes_left', '')} минут.\n"
-            "Говори СРАЗУ, без пауз, бодрым тёплым голосом — первая фраза в первую же секунду.\n"
-            "1) Поздоровайся («Ассалому алайкум»), обратись к нему, скажи, сколько осталось до такбира.\n"
-            "2) БУДИ МОТИВАЦИЕЙ, А НЕ ЗАДАНИЯМИ. Никаких упражнений, приседаний, стаканов воды, примеров и счёта. "
-            "Главное — тёплые слова веры, которые поднимают на намаз. Используй и чередуй (своими словами, на языке разговора, "
-            f"по одной-две за реплику, не повторяясь): {phrases}. "
-            "Можно по-доброму подшутить («Что, пора вставать? Вы же не мунафик!») и пожелать добра. "
-            "Аяты не читай и проповедей не устраивай — коротко, живо, с любовью.\n"
-            "3) Можно простые вопросы, чтобы он отвечал голосом: «Встали?», «Уже на ногах?», «Где вы сейчас?», «Идёте на омовение?».\n"
-            "4) УБЕДИСЬ ПО ГОЛОСУ, ЧТО ОН РЕАЛЬНО ВСТАЛ. Первое «встал», «uyg'ondim», «угу», «да-да» сонным голосом — ещё НЕ проснулся: "
-            "так отвечают сквозь сон и засыпают обратно. Если голос сонный, невнятный, односложный или с долгими паузами — "
-            f"скажи прямо: «Я должна убедиться, что вы уже встали с кровати, {title}» — и попроси бодро, полной фразой сказать, "
-            "что он уже на ногах и что делает. Не верь на слово, пока голос не станет бодрым и связным (обычно через 1–2 минуты).\n"
-            "5) Когда он отвечает бодро и связно, уже встал — вызови confirm_awake, пожелай «Пусть Аллах примет ваш намаз» / "
-            "«Пусть Аллах будет доволен вами», скажи время такбира, тепло попрощайся и вызови end_call.\n"
-            "6) Замолчал больше чем на 5–7 секунд — сразу громче и бодрее позови его и скажи мотивирующую фразу. "
-            "Просит отложить — не больше 5 минут, и только если настаивает — snooze(minutes)."
+            "\nЗАДАЧА ЗВОНКА — УТРЕННИЙ ПОДЪЁМ. Ты живой умный помощник, а не будильник-автомат: слушай, что он говорит, "
+            "и отвечай по существу. Никаких проповедей и повторов одного и того же.\n"
+            f"Сейчас {now:%H:%M}. Такбир фаджра в {w.get('takbir') or 'скоро'}"
+            + (f", до него {w.get('minutes_left')} мин." if w.get("minutes_left") is not None else ".") + "\n"
+            + (f"ЕГО ДЕНЬ: {today}\n" if today else "")
+            + "ХОД РАЗГОВОРА:\n"
+            f"1) Сразу, в первую же секунду, бодро и тепло: «Доброе утро, {title}!» — и один живой вопрос («Как спалось?», «Проснулись?»). "
+            "Можно одной фразой что-то полезное про его день (погода — инструмент weather, дела — из «ЕГО ДЕНЬ»).\n"
+            "2) Как только он ответил связно (сказал, что проснулся/встал, или просто нормально заговорил) — ВЕРЬ ему и больше "
+            "НЕ повторяй «вставайте». Сразу задай ВОПРОС ДНЯ (ниже) — один, коротко, как викторину.\n"
+            "3) Он ответил: верно — коротко похвали; неверно или не знает — не спорь, спокойно скажи правильный ответ. "
+            "Если ответ — дуа или аят, произнеси арабский текст ТОЧНО как написан ниже, слово в слово, а потом коротко смысл. "
+            "Сразу после этого вызови confirm_awake (он проснулся — это главное, правильность ответа не важна).\n"
+            f"4) В самом конце — одной фразой про намаз: сколько до такбира и «Пусть Аллах примет ваш намаз». Тепло попрощайся и вызови end_call.\n"
+            "Молчит больше 7 секунд в начале — позови его по имени погромче одной фразой («Шеф, вы меня слышите?»), без нотаций. "
+            "Сонное мычание вместо ответа — мягко попроси сказать пару слов нормально. Просит отложить — не больше 5 минут, "
+            "только если настаивает: snooze(minutes). Сам говорит «встал, отключайся» и уже ответил на вопрос — confirm_awake и end_call.\n"
+            + (f"\n{quiz}\n" if quiz else "")
         )
     rules = (
         "\nТЫ — ПОЛНОЦЕННЫЙ ПОМОЩНИК, А НЕ ТОЛЬКО ФИНАНСОВЫЙ. Отвечай на ЛЮБЫЕ вопросы, как умный знающий человек: "
@@ -107,9 +106,11 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         f"ОБЯЗАТЕЛЬНО проверь поиском — сейчас {now.year} год. "
         "ЗАПРЕЩЕНО отвечать «не могу», «у меня нет информации», «я только финансовый помощник»: если точных данных нет — "
         "найди, прикинь, оцени или скажи, как узнать. Вопросы про тебя самого (что умеешь, как устроен, сколько стоишь) — из блока «О СЕБЕ».\n"
-        "ДЕЙСТВИЯ: у тебя те же инструменты, что в чате: операции, долги, счета, цели, задачи, заметки, питание, напоминания, будильник, память. "
-        "Просьбы выполняй сразу, без «точно?» («добавь цель…», «удали вчерашнее такси», «запиши обед сорок тысяч», «напомни завтра в девять», "
-        "«я съел плов» — сам оцени калории и запиши через add_calorie_logs; трату — add_finance_entries). "
+        "ДЕЙСТВИЯ: частое — своими инструментами (трата — add_finance_entries, еда — add_calorie_logs со своей оценкой калорий, "
+        "напоминание, задача, заметка, «сколько потратил» — get_finance_stats, погода, поиск, курс). ВСЁ ОСТАЛЬНОЕ с его данными "
+        "(исправить/удалить/найти старые записи, массовые правки, цели, долги, бюджеты, регулярные платежи, вес, настройки, отчёты, анализ, будильник) — "
+        "bot_task: передай просьбу полностью своими словами с числами и датами и перескажи ответ. "
+        "Просьбы выполняй сразу, без «точно?» («добавь цель…», «удали вчерашнее такси», «запиши обед сорок тысяч», «напомни завтра в девять»). "
         "После действия одной живой фразой скажи, что сделано. Вопросы по его данным — сначала инструмент, потом ответ цифрами. "
         "Узнал о нём что-то важное и надолго (люди, планы, предпочтения) — сохрани remember_about_me, не говоря об этом. "
         "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила.\n"
@@ -141,7 +142,12 @@ PHONE_RULES = (
     "В variants всегда передавай другие написания и родственные слова (мама → ойи, онам, ona, oyijon, mama). "
     "Сообщения уходят только после подтверждения: send_sms/telegram_send вернут ask_exactly — произнеси этот вопрос; "
     "«да» → confirm_send, «нет» → cancel_send, правка текста → снова send с новым текстом. "
-    "Несколько кандидатов (candidates) — спроси голосом, назвав варианты. «Что мне написали», «что пишет Алишер» → telegram_read, перескажи коротко. "
+    "Кому звонить/писать, НЕ переспрашивай: инструмент сам выбирает лучшее совпадение (и запоминает) — просто назови, кому звонишь. "
+    "Ошиблась человеком — он скажет, тогда remember_contact («мама — это ONAJONIM») и звони снова. "
+    "«Что мне написали», «что пишет Алишер» → telegram_read, перескажи коротко; «найди в телеграме…» → telegram_search. "
+    "WhatsApp → whatsapp_send (откроется чат с готовым текстом — «Отправить» нажимает он). "
+    "Музыка/видео → play_media («поставь…», «включи…»), «найди на ютубе» → youtube_search. Такси → taxi (Яндекс Go с маршрутом, «Заказать» жмёт он). "
+    "«Посмотри на экран», «переведи, что на экране» → screen_look; «покажи/удали последнее фото» → gallery; раздел настроек → settings_panel. "
     "Будильник → set_alarm, таймер → set_timer, «напомни через…» → add_reminder. «Открой …» → open_app; фонарик, громкость, "
     "музыка (пауза/дальше), «маршрут до …» → navigate; «домой», «назад», «заблокируй экран», «скриншот», «шторка» → device_action.\n"
     "ЗВОНКИ: «кто звонил?», «пропущенные?» → recent_calls; «перезвони» → call_back; переадресация на номер или выключить → call_forwarding.\n"
@@ -151,8 +157,8 @@ PHONE_RULES = (
     "КАМЕРА: «посмотри», «что это?», «что у меня в руках», «прочитай/переведи надпись», «отсканируй документ» → look. "
     "Кадры придут в разговор через секунду — говори, что видишь, коротко и по делу. Документ — перепиши и, если просит, send_to_chat. "
     "Сказал «хватит», «закрой камеру» или тема сменилась — look(on=false).\n"
-    "Нажимать и печатать внутри других приложений (WhatsApp, Instagram, настройки) ты не умеешь — скажи честно одной фразой "
-    "и предложи ближайшее: открыть нужное приложение (open_app) или сделать это своими инструментами. "
+    "Нажимать и печатать внутри других приложений (Instagram, кнопки в настройках) ты не умеешь — скажи честно одной фразой "
+    "и предложи ближайшее: открыть нужное приложение или раздел, посмотреть экран вместе (screen_look) или сделать своими инструментами. "
     "Говори «звоню», «открываю», «готово» только если инструмент вернул ok. «Отмени последнее» → undo_last.\n"
 )
 
@@ -172,6 +178,39 @@ def _control_tools(mode: str) -> list[dict[str, Any]]:
     return tools
 
 
+# В голосе — только частые инструменты: описания всех 60+ инструментов оплачиваются в КАЖДОЙ реплике Gemini Live
+# (было ~13 тыс. токенов на реплику). Остальное делает «помощник из чата» — дешёвая текстовая модель со всеми инструментами.
+VOICE_CORE = {"add_finance_entries", "get_finance_stats", "add_reminder", "add_task", "complete_tasks", "add_calorie_logs", "add_note",
+              "weather", "web_search", "currency_rates", "calculate", "prayer_times", "get_wake", "remember_about_me",
+              "ai_status", "set_ai_balance", "expect_photo"}
+_DELEGATE = {"name": "bot_task",
+             "description": "Помощник из чата со ВСЕМИ инструментами бота: любая работа с его данными, для которой у тебя нет своего инструмента — "
+                            "исправить, удалить, найти, перенести записи (операции, задачи, заметки, еда, вес), массовые правки, цели, долги, бюджеты, "
+                            "регулярные платежи, настройки, будильник, отчёты и анализ. Вернёт готовый ответ — перескажи его коротко.",
+             "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "просьба целиком, своими словами, со всеми числами, датами и именами"}},
+                            "required": ["request"]}}
+_DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_me", "test_wake_call"}
+
+
+async def delegate(profile: Profile, request: str) -> dict[str, Any]:
+    """bot_task: просьбу из голоса выполняет агент чата (flash-lite, все инструменты); шаги отката — в тот же ход разговора."""
+    from . import agent_tools
+    from . import agent_tools_extra as extra
+    from .handlers.agent import run_agent
+
+    request = request.strip()
+    if not request:
+        return {"error": "пустая просьба"}
+    try:
+        snapshot, memory = await asyncio.gather(agent_tools.snapshot(profile), extra.memory_prompt(profile.telegram_id))
+    except Exception:
+        snapshot, memory = "", ""
+    hint = "[голосовая просьба через Джарвиса: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
+    decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
+    res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
+    return {"ok": True, "reply": res.text, "done": res.ctx.calls}
+
+
 _SEND_TO_CHAT = {"name": "send_to_chat",
                  "description": "Отправить ему в Telegram-чат текст (список, рецепт, план, ссылку, адрес, черновик сообщения) — когда просит «скинь/отправь в чат» или это удобнее прочитать, чем слушать.",
                  "parameters": {"type": "OBJECT", "properties": {"text": {"type": "STRING", "description": "готовый текст сообщения, можно с переносами строк"}}, "required": ["text"]}}
@@ -182,14 +221,15 @@ def tool_declarations(mode: str) -> list[dict[str, Any]]:
 
     decls = _control_tools(mode)
     if mode in {"assistant", "phone"}:
-        decls += [d for d in agent_tools.declarations() if d["name"] not in _SKIP_TOOLS]
+        decls += [d for d in agent_tools.declarations() if d["name"] in VOICE_CORE]
+        decls.append(_DELEGATE)
         decls.append(_SEND_TO_CHAT)
         if mode == "phone":
             from . import phone_live
 
             decls += phone_live.phone_declarations()
     else:
-        decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake"}]
+        decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake", "weather"}]
     return decls
 
 
@@ -215,6 +255,7 @@ class _Session:
         self._send_lock = asyncio.Lock()       # в один websocket пишут микрофон, инструменты и «толкач» — по очереди
         self.pre_answer = False                # идут гудки: модель уже готовит приветствие, закрытие сессии — не конец разговора
         self.greeting = ""                     # что модель сказала, пока шли гудки (для переподключения)
+        self.heard_user = False                # он уже что-то сказал (подъём: не толкать каждые 7 секунд)
 
     async def send(self, ws, payload: dict[str, Any]) -> bool:  # noqa: ANN001
         try:
@@ -326,6 +367,8 @@ class _Session:
             if (t := (sc.get("inputTranscription") or {}).get("text")):
                 self.last_activity = asyncio.get_running_loop().time()
                 self._in_text.append(t)
+                if t.strip():
+                    self.heard_user = True
             if (t := (sc.get("outputTranscription") or {}).get("text")):
                 self._out_text.append(t)
                 if self.pre_answer:
@@ -376,11 +419,14 @@ class _Session:
             await asyncio.sleep(1.0)
             if self.out or self.hangup_after_speech or self.result.confirmed:
                 continue
-            if loop.time() - self.last_activity < SILENCE_NUDGE_SECONDS:
+            # уже разговаривали — не дёргаем через 7 с (он мог просто думать над вопросом): ждём дольше
+            limit = SILENCE_NUDGE_SECONDS * (3 if self.heard_user else 1)
+            if loop.time() - self.last_activity < limit:
                 continue
             self.last_activity = loop.time()
-            logger.info("live: тишина %s с — бужу снова", SILENCE_NUDGE_SECONDS)
-            nudge = "[Он молчит уже несколько секунд — возможно, снова засыпает. Громко и бодро позови его, скажи мотивирующую фразу про фаджр и спроси, встал ли он.]"
+            logger.info("live: тишина %.0f с — зову снова", limit)
+            nudge = ("[Он молчит. Позови его по имени бодро ОДНОЙ короткой фразой и спроси, слышит ли он. Без нотаций и мотивации.]"
+                     if not self.heard_user else "[Он давно молчит. Коротко спроси, всё ли в порядке и слышит ли он тебя.]")
             if not await self.send(ws, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": nudge}]}], "turnComplete": True}}):
                 return
 
@@ -405,6 +451,9 @@ class _Session:
                 self.result.snooze_minutes = max(1, min(10, int(args.get("minutes") or 5)))
                 self.hangup_after_speech = True
                 result = {"ok": True, "minutes": self.result.snooze_minutes}
+            elif name == "bot_task":
+                result = await delegate(self.profile, str(args.get("request") or ""))
+                self.result.actions.extend(result.get("done") or [])
             else:
                 result = await agent_tools.run(str(name), args, self.ctx)
                 if not result.get("error"):
@@ -586,7 +635,7 @@ async def _converse(sess: "_Session", http, call: dict[str, Any], early: asyncio
 
 
 async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wake: dict[str, Any] | None = None,
-              ring_seconds: int = 45) -> LiveResult:
+              ring_seconds: int = 45, lang: str | None = None) -> LiveResult:
     """Позвонить и провести разговор целиком. Возвращает итог (что сказано, что сделано).
 
     Всё, что можно, — параллельно с гудками: набор номера стартует сразу, промпт собирается и
@@ -598,6 +647,10 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
     uid = profile.telegram_id
     dial = asyncio.create_task(caller.open_stream_call(uid, username=profile.username, ring_seconds=ring_seconds), name="live-dial")
     persona, snapshot, memory = await _prompt_parts(profile, mode)
+    if lang:
+        from dataclasses import replace
+
+        persona = replace(persona, lang=lang)
     system = system_instruction(profile, persona, mode=mode, snapshot=snapshot, memory=memory, wake=wake, topic=topic)
     if mode == "assistant":
         system += billing.voice_note()

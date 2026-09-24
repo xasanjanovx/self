@@ -82,9 +82,68 @@ def load_contacts(uid: int) -> list[dict[str, Any]]:
     return _contacts[uid]
 
 
-def find_contact(uid: int, who: Any, variants: Any) -> dict[str, Any]:
+def find_contact(uid: int, who: Any, variants: Any, device: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Лучший контакт сразу, без «кому именно?»: выученное имя («мама» → ONAJONIM), потом похожесть
+    с поправкой на то, кому он чаще звонит."""
     queries = [who] + [v for v in (variants or []) if isinstance(v, str)]
-    return names.resolve(queries, load_contacts(uid))
+    contacts = load_contacts(uid)
+    return names.pick(queries, contacts, boosts=call_boosts(contacts, device or {}), alias=alias_for(uid, "phone", queries))
+
+
+# ------------------------------------------------------------------ как он называет людей («мама» → ONAJONIM)
+def _aliases_file(uid: int):
+    return tg_user.data_dir() / f"aliases_{uid}.json"
+
+
+def aliases(uid: int) -> dict[str, dict[str, str]]:
+    try:
+        data = json.loads(_aliases_file(uid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {"phone": dict(data.get("phone") or {}), "tg": dict(data.get("tg") or {})}
+
+
+def alias_for(uid: int, kind: str, queries: list[Any]) -> str | None:
+    known = aliases(uid).get(kind) or {}
+    for q in queries:
+        hit = known.get(names.norm(q))
+        if hit:
+            return hit
+    return None
+
+
+def learn_alias(uid: int, kind: str, who: Any, name: str) -> None:
+    """Запомнить, кого он имел в виду, — в следующий раз сразу этот человек."""
+    key = names.norm(who)
+    if not key or not name or names.as_phone_number(who) or key == names.norm(name):
+        return
+    data = aliases(uid)
+    if data[kind].get(key) == name:
+        return
+    data[kind][key] = name
+    try:
+        _aliases_file(uid).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        logger.warning("aliases not saved", exc_info=True)
+
+
+def _digits(number: Any) -> str:
+    return re.sub(r"\D", "", str(number or ""))[-9:]
+
+
+def call_boosts(contacts: list[dict[str, Any]], device: dict[str, Any]) -> dict[str, float]:
+    """Кому он звонит чаще (журнал с телефона) — тот и «мама», если похожих несколько."""
+    counts: dict[str, int] = {}
+    for c in device.get("calls") or []:
+        d = _digits(c.get("number")) if isinstance(c, dict) else ""
+        if d:
+            counts[d] = counts.get(d, 0) + 1
+    out: dict[str, float] = {}
+    for contact in contacts:
+        n = max((counts.get(_digits(p), 0) for p in contact.get("phones") or []), default=0)
+        if n:
+            out[names.norm(contact.get("name"))] = 0.03 * min(n, 3)
+    return out
 
 
 # ------------------------------------------------------------------ pending messages
@@ -106,11 +165,13 @@ async def execute_pending(turn: PhoneTurn, p: dict[str, Any]) -> dict[str, Any]:
     set_pending(turn.uid, None)
     if p["kind"] == "sms":
         turn.actions.append({"type": "sms", "number": p["number"], "text": p["text"], "name": p["name"]})
+        learn_alias(turn.uid, "phone", p.get("who"), p["name"])
         return {"ok": True, "sent": "sms", "to": p["name"]}
     chats = await tg_user.dialogs()
     chat = next((c for c in chats if c["id"] == p["chat_id"]), None) or {"id": p["chat_id"], "name": p["name"]}
     if not await tg_user.send(chat, p["text"]):
         return {"error": "Telegram не подключён или сессия слетела — переподключи в приложении"}
+    learn_alias(turn.uid, "tg", p.get("who"), p["name"])
     return {"ok": True, "sent": "telegram", "to": p["name"]}
 
 
@@ -171,12 +232,11 @@ async def _phone_call(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
     if not load_contacts(turn.uid):
         turn.need_contacts = True
         return {"error": "Контакты с телефона ещё не загружены — попроси повторить через пару секунд"}
-    found = find_contact(turn.uid, a.get("who"), a.get("variants"))
+    found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
     if "match" in found:
         c = found["match"]
+        learn_alias(turn.uid, "phone", a.get("who"), c["name"])
         return _action(turn, "call", number=c["phones"][0], name=c["name"])
-    if "candidates" in found:
-        return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси голосом, кому именно (ask_user с этими именами)"}
     return {"error": f"В контактах нет «{a.get('who')}»", "hint": "скажи, что не нашёл, и попроси назвать, как записан контакт"}
 
 
@@ -192,13 +252,11 @@ async def _send_sms(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dic
         if not load_contacts(turn.uid):
             turn.need_contacts = True
             return {"error": "Контакты с телефона ещё не загружены"}
-        found = find_contact(turn.uid, a.get("who"), a.get("variants"))
-        if "candidates" in found:
-            return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси, кому именно"}
+        found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
         if "match" not in found:
             return {"error": f"В контактах нет «{a.get('who')}»"}
         number, name = found["match"]["phones"][0], found["match"]["name"]
-    pending = {"kind": "sms", "number": number, "name": name, "text": text}
+    pending = {"kind": "sms", "number": number, "name": name, "text": text, "who": a.get("who")}
     set_pending(turn.uid, pending)
     turn.listen = True
     return {"status": "awaiting_confirmation", "ask_exactly": pending_question(pending)}
@@ -214,13 +272,12 @@ async def _telegram_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
         return {"error": "нет текста — спроси, что написать"}
     if not tg_user.configured():
         return {"error": "Telegram не подключён: в приложении Джарвис → раздел Telegram → «Подключить»"}
-    found = await tg_user.find_chat([a.get("who")] + [v for v in (a.get("variants") or []) if isinstance(v, str)])
-    if "candidates" in found:
-        return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси, кому именно"}
+    queries = [a.get("who")] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
+    found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
     if "match" not in found:
         return {"error": f"Не нашёл чат «{a.get('who')}» среди последних переписок"}
     chat = found["match"]
-    pending = {"kind": "tg", "chat_id": chat["id"], "name": chat["name"], "text": text}
+    pending = {"kind": "tg", "chat_id": chat["id"], "name": chat["name"], "text": text, "who": a.get("who")}
     set_pending(turn.uid, pending)
     turn.listen = True
     return {"status": "awaiting_confirmation", "ask_exactly": pending_question(pending)}
@@ -250,9 +307,8 @@ async def _telegram_read(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
     if not who:
         chats = await tg_user.unread()
         return {"unread_chats": chats} if chats else {"unread_chats": [], "note": "непрочитанных нет"}
-    found = await tg_user.find_chat([who] + [v for v in (a.get("variants") or []) if isinstance(v, str)])
-    if "candidates" in found:
-        return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси, чью переписку прочитать"}
+    queries = [who] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
+    found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
     if "match" not in found:
         return {"error": f"Не нашёл чат «{who}»"}
     limit = max(1, min(int(a.get("limit") or 5), 15))
@@ -414,9 +470,7 @@ async def _call_forwarding(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any])
         if not load_contacts(turn.uid):
             turn.need_contacts = True
             return {"error": "Контакты с телефона ещё не загружены"}
-        found = find_contact(turn.uid, a.get("to"), a.get("variants"))
-        if "candidates" in found:
-            return {"candidates": [c["name"] for c in found["candidates"]], "hint": "спроси, на кого переадресовать"}
+        found = find_contact(turn.uid, a.get("to"), a.get("variants"), turn.device)
         if "match" not in found:
             return {"error": f"В контактах нет «{a.get('to')}»"}
         number, name = found["match"]["phones"][0], found["match"]["name"]
@@ -457,17 +511,144 @@ async def _ringer(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[
     return _action(turn, "ringer", mode=mode)
 
 
-_PANELS = ["wifi", "bluetooth", "internet", "volume", "nfc", "hotspot", "airplane", "battery", "display", "location", "settings"]
+_PANELS = ["wifi", "bluetooth", "internet", "volume", "nfc", "hotspot", "airplane", "battery", "display", "location", "sound",
+           "notifications", "apps", "app_info", "storage", "security", "language", "date", "accessibility", "developer", "about", "settings"]
 
 
-@ptool("settings_panel", "Открыть переключатель системы: wifi, bluetooth, internet (моб. данные), volume, nfc, hotspot, airplane, "
-       "battery, display, location, settings. Сам Android не даёт приложениям включать Wi-Fi/Bluetooth — открываем панель, он нажимает один раз.",
-       {"panel": P("STRING", " | ".join(_PANELS), enum=_PANELS)}, ("panel",))
+@ptool("settings_panel", "Открыть нужный раздел настроек телефона: wifi, bluetooth, internet (моб. данные), volume, nfc, hotspot, airplane, "
+       "battery, display, location, sound, notifications, apps (все приложения), app_info (страница одного приложения — app), storage (память), "
+       "security, language, date, accessibility, developer, about (о телефоне), settings. Wi-Fi/Bluetooth Android не даёт включать самим — "
+       "открываем, он нажимает один раз.",
+       {"panel": P("STRING", " | ".join(_PANELS), enum=_PANELS), "app": P("STRING", "для app_info: название приложения")}, ("panel",))
 async def _panel(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     panel = _str(a.get("panel"))
     if panel not in _PANELS:
         return {"error": "неизвестная панель"}
-    return _action(turn, "panel", panel=panel)
+    return _action(turn, "panel", panel=panel, app=_str(a.get("app")))
+
+
+# ------------------------------------------------------------------ WhatsApp, экран, галерея
+@ptool("whatsapp_send", "Написать человеку в WhatsApp: откроется его чат с уже набранным текстом — «Отправить» он нажмёт сам "
+       "(Android не даёт приложениям отправлять за него). Скажи: «Открыла WhatsApp, текст набран — нажмите отправить».",
+       {"who": WHO, "variants": VARIANTS, "text": P("STRING", "текст сообщения от первого лица владельца")}, ("who", "text"))
+async def _whatsapp(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    text = _str(a.get("text"))
+    if not text:
+        return {"error": "нет текста — спроси, что написать"}
+    number = names.as_phone_number(a.get("who"))
+    name = number
+    if not number:
+        if not load_contacts(turn.uid):
+            turn.need_contacts = True
+            return {"error": "Контакты с телефона ещё не загружены"}
+        found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
+        if "match" not in found:
+            return {"error": f"В контактах нет «{a.get('who')}»"}
+        number, name = found["match"]["phones"][0], found["match"]["name"]
+        learn_alias(turn.uid, "phone", a.get("who"), name)
+    return _action(turn, "whatsapp", number=number, text=text, name=name)
+
+
+@ptool("screen_look", "Посмотреть на экран телефона вместе с ним (как в Gemini): «посмотри на экран», «что тут написано», «переведи это», "
+       "«объясни, что на экране». Android спросит разрешение на показ экрана — он нажмёт «Начать». Кадры экрана придут тебе в разговор; "
+       "нажимать внутри приложений ты не можешь. Выключить — on=false.",
+       {"on": P("BOOLEAN", "true — начать (по умолчанию), false — перестать смотреть")})
+async def _screen_look(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    on = _bool(a.get("on"))
+    res = _action(turn, "screen", on=on is not False)
+    if on is not False:
+        res["note"] = "телефон попросит разрешение показать экран; кадры придут через пару секунд — пока скажи коротко «Смотрю»"
+    return res
+
+
+@ptool("gallery", "Галерея: show_last — посмотреть последние фото (придут тебе в разговор, опиши их); delete_last — удалить последние фото "
+       "(в «Недавно удалённые», можно вернуть 30 дней). Перед удалением одной фразой скажи, что удаляешь.",
+       {"op": P("STRING", "show_last | delete_last", enum=["show_last", "delete_last"]), "count": P("INTEGER", "сколько последних фото, 1–10")}, ("op",))
+async def _gallery(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    op = _str(a.get("op"))
+    if op not in {"show_last", "delete_last"}:
+        return {"error": "op: show_last | delete_last"}
+    count = max(1, min(10, int(a.get("count") or 1)))
+    return _action(turn, "gallery", op=op, count=count)
+
+
+# ------------------------------------------------------------------ музыка, YouTube, поиск в Telegram, такси
+@ptool("youtube_search", "Найти видео на YouTube («найди на ютубе…», «есть видео про…»): вернёт названия, каналы, длительность и id. "
+       "Открыть/включить найденное — play_media с video_id.", {"query": P("STRING", "что искать")}, ("query",))
+async def _youtube_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import media
+
+    query = _str(a.get("query"))
+    if not query:
+        return {"error": "что искать?"}
+    found = await media.youtube_search(query, 5)
+    return {"videos": found} if found else {"error": "YouTube не ответил — попробуй другие слова"}
+
+
+@ptool("play_media", "Включить музыку или видео: «поставь Шахзоду», «включи нашиды», «включи видео про…». Музыка — в YouTube Music, "
+       "видео — в YouTube. video_id — если уже нашла через youtube_search.",
+       {"query": P("STRING", "что включить: песня / исполнитель / тема"), "kind": P("STRING", "music | video", enum=["music", "video"]),
+        "video_id": P("STRING", "id видео с YouTube (необязательно)")}, ("query",))
+async def _play_media(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import media
+
+    query = _str(a.get("query")) or ""
+    kind = _str(a.get("kind")) or "music"
+    vid, title = _str(a.get("video_id")), None
+    if not vid:
+        found = await media.youtube_search(query + (" music" if kind == "music" else ""), 1)
+        if found:
+            vid, title = found[0]["id"], found[0]["title"]
+    res = _action(turn, "play", query=query, kind=kind, video_id=vid, title=title)
+    if title:
+        res["title"] = title
+    return res
+
+
+@ptool("telegram_search", "Найти в его Telegram по словам — во всех чатах, группах и каналах («найди в телеграме, где писали про квартиру»).",
+       {"query": P("STRING", "слова для поиска"), "limit": P("INTEGER", "сколько сообщений, по умолчанию 6")}, ("query",))
+async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    if not tg_user.configured():
+        return {"error": "Telegram не подключён: в приложении Джарвис → раздел Telegram → «Подключить»"}
+    query = _str(a.get("query"))
+    if not query:
+        return {"error": "что искать?"}
+    found = await tg_user.search(query, max(1, min(15, int(a.get("limit") or 6))))
+    return {"messages": found} if found else {"messages": [], "note": "ничего не нашлось"}
+
+
+@ptool("taxi", "Такси через Яндекс Go: «вызови такси до Чорсу», «сколько до вокзала на такси». Откроется Яндекс Go с готовым маршрутом "
+       "от того места, где он сейчас, — цену и время подачи видно сразу, «Заказать» он нажимает сам.",
+       {"to": P("STRING", "куда ехать: адрес или место"), "tariff": P("STRING", "econom | comfort | business", enum=["econom", "comfort", "business"])},
+       ("to",))
+async def _taxi(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import media
+
+    to = _str(a.get("to"))
+    if not to:
+        return {"error": "куда ехать?"}
+    loc = turn.device.get("location") if isinstance(turn.device.get("location"), dict) else None
+    near = (float(loc["lat"]), float(loc["lon"])) if loc and loc.get("lat") is not None else None
+    place = await media.geocode(to, near)
+    if not place:
+        res = _action(turn, "taxi", to_name=to)
+        res["note"] = "адрес не нашла на карте — Яндекс Go откроется, куда ехать он введёт сам"
+        return res
+    return _action(turn, "taxi", lat=place["lat"], lon=place["lon"], to_name=place["name"], tariff=_str(a.get("tariff")) or "econom")
+
+
+@ptool("remember_contact", "Запомнить, кого он так называет: «запомни, брат — это Aziz», «мама — это ONAJONIM», «работа — Mashhur bek aka». "
+       "Дальше звонки и сообщения по этому слову пойдут сразу этому человеку.",
+       {"who": P("STRING", "как он называет («брат», «работа»)"), "contact": P("STRING", "как записан в контактах или Telegram")}, ("who", "contact"))
+async def _remember_contact(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    who, contact = _str(a.get("who")), _str(a.get("contact"))
+    if not who or not contact:
+        return {"error": "нужно: как называет и кто это"}
+    found = names.pick([contact], load_contacts(turn.uid))
+    name = found["match"]["name"] if "match" in found else contact
+    learn_alias(turn.uid, "phone", who, name)
+    learn_alias(turn.uid, "tg", who, contact)
+    return {"ok": True, "who": who, "contact": name}
 
 
 # ------------------------------------------------------------------ камера

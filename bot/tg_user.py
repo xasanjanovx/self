@@ -248,13 +248,14 @@ def public(chat: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in chat.items() if not k.startswith("_")}
 
 
-async def find_chat(queries: list[str]) -> dict[str, Any]:
-    """{"match": чат} | {"candidates": [чаты]} | {} — как names.resolve."""
+async def find_chat(queries: list[str], alias: str | None = None) -> dict[str, Any]:
+    """{"match": чат} | {} — лучший чат сразу, без «кому именно?»: сначала люди, недавние переписки чуть выше."""
     chats = await dialogs()
     people = [c for c in chats if c["kind"] == "user"]
-    found = names.resolve(queries, people, name_keys=("name", "username"))
+    recent = {names.norm(c.get("name")): 0.03 for c in chats[:10]}
+    found = names.pick(queries, people, name_keys=("name", "username"), boosts=recent, alias=alias)
     if not found:
-        found = names.resolve(queries, chats, name_keys=("name", "username"))
+        found = names.pick(queries, chats, name_keys=("name", "username"), boosts=recent, alias=alias)
     return found
 
 
@@ -285,6 +286,20 @@ async def recent(chat: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
     me_id = getattr(_me, "id", None)
     out = [_msg_view(m, me_id=me_id, chat_name=chat["name"]) async for m in c.iter_messages(chat.get("_peer") or chat["id"], limit=limit)]
     return list(reversed(out))
+
+
+async def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Поиск по всем его чатам, группам и каналам (как строка поиска в Telegram): свежие совпадения первыми."""
+    c = await client()
+    if c is None:
+        return []
+    me_id = getattr(_me, "id", None)
+    out = []
+    async for m in c.iter_messages(None, search=query, limit=limit):
+        chat = getattr(m, "chat", None)
+        name = getattr(chat, "title", None) or " ".join(x for x in (getattr(chat, "first_name", None), getattr(chat, "last_name", None)) if x) or "чат"
+        out.append(_msg_view(m, me_id=me_id, chat_name=name))
+    return out
 
 
 async def unread(limit_chats: int = 8, per_chat: int = 3) -> list[dict[str, Any]]:

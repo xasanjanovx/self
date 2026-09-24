@@ -293,9 +293,8 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
 
         _running.add(uid)
         try:
-            if lang in {"uz", "ru", "en"}:
-                await services.save_persona(uid, {"lang": lang})
-            result = await live_call.run(profile, mode="assistant", topic=topic)
+            # язык — только на этот звонок: раз попросил по-узбекски — не переключать Джарвиса навсегда
+            result = await live_call.run(profile, mode="assistant", topic=topic, lang=lang if lang in {"uz", "ru", "en"} else None)
             await services.log_agent(uid, text=f"call: {topic or 'разговор'}", kind="call",
                                      tools=",".join(result.actions), reply=" | ".join(result.transcript)[:900], ok=result.answered)
             if not result.answered:

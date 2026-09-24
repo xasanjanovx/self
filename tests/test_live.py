@@ -29,11 +29,10 @@ def test_style_rules_follow_settings():
 def test_wake_instruction_has_takbir_task_and_confirm_rule():
     text = live_call.system_instruction(_profile(), persona.Persona(honorific="shef"), mode="wake",
                                         wake={"takbir": "05:07", "minutes_left": 25})
-    assert "05:07" in text and "25 минут" in text
-    assert "confirm_awake" in text and "ещё НЕ проснулся" in text and "1–2 минуты" in text
-    # мотивация вместо заданий + проверка по голосу с обращением из настроек
-    assert "мунафик" in text and "Никаких упражнений" in text
-    assert "убедиться, что вы уже встали с кровати, Шеф" in text
+    assert "05:07" in text and "25 мин" in text
+    # живой помощник: верит, когда он связно ответил, один вопрос дня, про намаз — в конце
+    assert "confirm_awake" in text and "ВЕРЬ ему" in text and "ВОПРОС ДНЯ" in text and "В самом конце" in text
+    assert "Доброе утро, Шеф" in text and "мунафик" not in text
     assert "ДАННЫЕ" not in text  # подъёму данные не нужны
 
 
@@ -50,7 +49,9 @@ def test_tool_declarations_per_mode():
     assert {"end_call", "confirm_awake", "snooze", "prayer_times"} <= wake_names
     assert "add_finance_entries" not in wake_names  # при подъёме операций не пишем
     assistant_names = {d["name"] for d in live_call.tool_declarations("assistant")}
-    assert {"end_call", "add_goal", "delete_finance_entries", "add_calorie_logs", "list_goals"} <= assistant_names
+    assert {"end_call", "bot_task", "add_finance_entries", "add_calorie_logs", "send_to_chat"} <= assistant_names
+    # экономно: редкое (цели, правки старых записей) — через bot_task, а не описаниями в каждой реплике
+    assert not {"add_goal", "delete_finance_entries", "list_goals", "set_wake"} & assistant_names
     # в голосе нет чатовых инструментов: парсеры с экранами, кнопки, звонок самому себе
     assert not {"hand_off", "open_screen", "ask_user", "call_me"} & assistant_names
     assert "confirm_awake" not in assistant_names

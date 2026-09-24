@@ -68,7 +68,23 @@ def wake_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 
 async def _settings(uid: int) -> wake_mod.WakeSettings:
-    return wake_mod.WakeSettings.from_row(await services.wake_settings(uid))
+    from dataclasses import replace
+
+    s = wake_mod.WakeSettings.from_row(await services.wake_settings(uid))
+    # язык звонка — тот же, что у Джарвиса в настройках (раньше отдельное поле будильника, по умолчанию узбекский)
+    persona = await services.persona(uid)
+    return replace(s, voice_lang="uz" if persona.lang == "uz" else "ru")
+
+
+async def _today_line(profile: Profile) -> str:
+    """Коротко о его дне для утреннего звонка: дела с датой на сегодня."""
+    try:
+        tasks = await services.tasks(profile.telegram_id)
+        today = profile.today.isoformat()
+        due = [str(t.get("text") or "")[:60] for t in tasks if str(t.get("due_date") or "")[:10] == today]
+        return ("дела на сегодня: " + "; ".join(due[:4])) if due else ""
+    except Exception:
+        return ""
 
 
 async def plan_for(profile: Profile, day: date | None = None) -> tuple[wake_mod.WakeSettings, wake_mod.DayPlan]:
@@ -121,8 +137,12 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     """Звонок-разговор на Gemini Live: живой голос, будит, пока не услышит, что встал."""
     from . import live_call
 
+    from . import islam_quiz
+
+    quiz = islam_quiz.for_day(profile.telegram_id, plan.day)
     live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds),
-                               wake={"takbir": plan.takbir, "minutes_left": minutes_left})
+                               wake={"takbir": plan.takbir, "minutes_left": minutes_left,
+                                     "quiz": islam_quiz.prompt_block(quiz), "today": await _today_line(profile)})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
                            minutes_left=minutes_left, task_text="")
     state.confirmed = live.confirmed
@@ -130,7 +150,7 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     if live.snooze_minutes:
         await snooze(profile, live.snooze_minutes)
     if live.model:  # до Gemini Live достучались — итог звонка берём оттуда, даже если трубку не взяли
-        return {"answered": live.answered, "error": live.error, "state": state}
+        return {"answered": live.answered, "error": live.error, "state": state, "quiz": quiz}
     # Gemini Live недоступен — запасной путь: старый пошаговый разговор
     logger.warning("wake: live недоступен (%s), пошаговый режим", live.error)
     greeting_pcm = await _say(cd.greeting(state))
@@ -176,6 +196,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     confirmed = False
     call_error: str | None = None
     dialog_text = ""
+    result: dict[str, Any] = {}
     if s.call_enabled and caller.available():
         if s.talk:
             result = await _dialog_call(profile, s, plan, minutes_left)
@@ -226,7 +247,22 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             await call_assistant.helper_intro(profile)  # один раз: чат с Джарвисом → «Добавить в контакты»
     if confirmed:
         await mark_awake(bot, profile, source="call")  # подтвердил голосом — больше не звоним
+        quiz = (result or {}).get("quiz") if s.talk else None
+        if quiz is not None:
+            await _send_quiz_card(bot, profile, quiz)
     return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "call_error": call_error}
+
+
+async def _send_quiz_card(bot: Bot, profile: Profile, quiz: Any) -> None:
+    """Вопрос дня с ответом и точным арабским — в чат (исчезнет при нажатии любой кнопки, как всё присланное)."""
+    from . import islam_quiz
+    from . import screen as screen_mod
+
+    try:
+        sent = await bot.send_message(profile.telegram_id, islam_quiz.card(quiz, profile.lang))
+        screen_mod.track_sent(profile.telegram_id, sent.message_id)
+    except Exception:
+        logger.debug("quiz card failed", exc_info=True)
 
 
 # ------------------------------------------------------------------ подтверждение подъёма

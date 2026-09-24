@@ -377,6 +377,8 @@ async def _wake_tick(bot: Bot) -> None:
     user_ids = access.user_ids() or [int(u["telegram_id"]) for u in await db.list_users()]
     now_utc = datetime.now(timezone.utc)
     for telegram_id in user_ids:
+        if telegram_id in _wake_calls:
+            continue  # звонок этому человеку ещё идёт
         try:
             profile = await profile_by_id(telegram_id)
             s, plan = await wake_runner.plan_for(profile)
@@ -393,9 +395,22 @@ async def _wake_tick(bot: Bot) -> None:
             ok, reason = wake_mod.should_call(plan, {**(log or {}), "last_attempt_at": state_last}, now_utc, s)
             if not ok:
                 continue
-            await wake_runner.run_attempt(bot, profile, s, plan, log)
+            # у каждого свой звонок фоном: пока идёт разговор с одним, другого будим вовремя
+            task = asyncio.create_task(wake_runner.run_attempt(bot, profile, s, plan, log), name=f"wake-{telegram_id}")
+            _wake_calls[telegram_id] = task
+            task.add_done_callback(lambda t, uid=telegram_id: _wake_done(uid, t))
         except Exception:
             logger.exception("wake tick failed for %s", telegram_id)
+
+
+_wake_calls: dict[int, asyncio.Task] = {}
+
+
+def _wake_done(uid: int, task: asyncio.Task) -> None:
+    if _wake_calls.get(uid) is task:
+        _wake_calls.pop(uid, None)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("wake attempt failed for %s", uid, exc_info=task.exception())
 
 
 async def wake_worker(bot: Bot) -> None:

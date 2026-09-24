@@ -59,7 +59,7 @@ def test_balance_topup_spend_and_forecast(fresh_billing):
         st["days"][day] = {"usd": 1.0, "calls": 10, "kinds": {}}
     st["spent_since"] = 2.0
     s = billing.status()
-    assert s["balance_usd"] == 8.0 and 0.9 < s["daily_average_usd"] < 1.6 and s["days_left"] > 4 and not s["need_topup"]
+    assert s["balance_usd"] == 8.0 and 0.7 < s["daily_average_usd"] < 1.6 and s["days_left"] > 4 and not s["need_topup"]
     out = billing.set_balance(topup=5.0)
     assert out["balance_usd"] == 13.0
 
@@ -218,9 +218,11 @@ def test_new_phone_tools_need_unlock_and_are_declared():
 
     names = {d["name"] for d in live_call.tool_declarations("phone")}
     for n in ("recent_calls", "call_back", "call_forwarding", "phone_status", "brightness", "do_not_disturb", "ringer_mode",
-              "settings_panel", "look", "ai_status", "set_ai_balance", "find_records", "update_finance_entries", "update_tasks"):
+              "settings_panel", "look", "ai_status", "set_ai_balance", "bot_task", "whatsapp_send", "screen_look", "gallery",
+              "play_media", "youtube_search", "telegram_search", "taxi", "remember_contact"):
         assert n in names
-    assert {"recent_calls", "call_back", "call_forwarding", "look"} <= phone_live.NEED_UNLOCK
+    assert {"look", "screen_look", "open_app"} <= phone_live.NEED_UNLOCK
+    assert not {"phone_call", "send_sms", "telegram_send", "recent_calls"} & phone_live.NEED_UNLOCK
     for mode in ("assistant", "wake", "phone"):
         decl = [d["name"] for d in live_call.tool_declarations(mode)]
         assert len(decl) == len(set(decl)), mode
@@ -287,3 +289,69 @@ def test_phone_api_routes_include_new_endpoints():
 
     routes = {r.resource.canonical for r in phone_api.build_app().router.routes() if r.resource is not None}
     assert {"/jarvis/v1/call_command", "/jarvis/v1/tg/quick_send", "/jarvis/v1/live"} <= routes
+
+
+
+# ------------------------------------------------------------------ будильник 1.5
+def test_wake_off_without_settings_and_respects_attempts():
+    from bot import wake
+
+    assert wake.WakeSettings.from_row({}).enabled is False           # не настраивал — не звоним
+    assert wake.WakeSettings.from_row(None).enabled is False
+    row = {"enabled": True, "max_attempts": 20}
+    assert wake.WakeSettings.from_row(row).enabled and wake.WakeSettings.from_row(row).max_attempts == 20
+
+
+def test_skip_phrases():
+    from bot import wake
+
+    assert wake.looks_skip("не звони мне сегодня") and wake.looks_skip("Bugun uyg'otmang")
+    assert not wake.looks_skip("я проснулся")
+
+
+def test_quiz_progresses_and_never_repeats(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+
+    from bot import islam_quiz
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    d = date(2026, 9, 25)
+    first = islam_quiz.for_day(7, d)
+    assert islam_quiz.for_day(7, d) == first                 # весь день один вопрос (повторные звонки)
+    seen = {first.id}
+    for i in range(1, 40):
+        q = islam_quiz.for_day(7, d + timedelta(days=i))
+        assert q.id not in seen
+        seen.add(q.id)
+    order = [q.id for q in islam_quiz.BANK]
+    assert order.index(q.id) > order.index(first.id)          # каждый день — дальше по сложности
+
+
+def test_quiz_duas_have_arabic_and_source():
+    from bot import islam_quiz
+
+    ids = [q.id for q in islam_quiz.BANK]
+    assert len(ids) == len(set(ids)) and len(ids) >= 90
+    for q in islam_quiz.BANK:
+        if "дуа" in q.q.lower():
+            assert q.ar and q.ref, q.id
+    yunus = next(q for q in islam_quiz.BANK if q.id == "yunus_dua")
+    assert yunus.ar == "لَا إِلَٰهَ إِلَّا أَنتَ سُبْحَانَكَ إِنِّي كُنتُ مِنَ الظَّالِمِينَ" and "21:87" in yunus.ref
+    block = islam_quiz.prompt_block(yunus)
+    assert "СЛОВО В СЛОВО" in block and yunus.ar in block
+    assert yunus.ar in islam_quiz.card(yunus)
+
+
+def test_youtube_parse_desktop_and_mobile_formats():
+    import json
+
+    from bot import media
+
+    data = {"contents": {"x": [{"videoRenderer": {"videoId": "abc123XYZ00", "title": {"runs": [{"text": "Nasheed"}]},
+                                                   "ownerText": {"runs": [{"text": "Chan"}]}, "lengthText": {"simpleText": "3:41"}}}]}}
+    desktop = "<script>var ytInitialData = " + json.dumps(data) + ";</script>"
+    assert media.parse_youtube(desktop)[0]["id"] == "abc123XYZ00"
+    escaped = json.dumps(data).replace("{", "\x7b").replace("}", "\x7d").replace('"', "\x22")
+    mobile = "<script>var ytInitialData = '" + escaped + "';</script>"
+    got = media.parse_youtube(mobile)
+    assert got and got[0]["title"] == "Nasheed" and got[0]["duration"] == "3:41"

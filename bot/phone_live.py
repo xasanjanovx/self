@@ -52,9 +52,10 @@ def phone_declarations() -> list[dict[str, Any]]:
     return [t.declaration() for t in phone.PHONE_TOOLS.values()]
 
 
-# на заблокированном телефоне — только после разблокировки (звонки, сообщения, чужая переписка)
-NEED_UNLOCK = {"phone_call", "send_sms", "telegram_send", "confirm_send", "telegram_read", "open_app", "open_link", "navigate", "undo_last",
-               "recent_calls", "call_back", "call_forwarding", "settings_panel", "look"}
+# Он выбрал «всё без разблокировки»: звонки, SMS, Telegram, журнал — сразу. Разблокировка нужна только там, где
+# открывается другое приложение или экран (Android сам не покажет его поверх блокировки).
+NEED_UNLOCK = {"open_app", "open_link", "navigate", "settings_panel", "look", "screen_look", "whatsapp_send", "play_media", "taxi",
+               "call_forwarding", "gallery"}
 
 _SKY_ICON = (("гроз", "⛈"), ("снег", "🌨"), ("дожд", "🌧"), ("ливн", "🌧"), ("морос", "🌦"), ("туман", "🌫"), ("пасмур", "☁️"),
              ("облач", "⛅"), ("ясн", "☀️"))
@@ -246,6 +247,9 @@ class PhoneLive(_Session):
                 result = {"ok": True}
             elif name == "send_to_chat":
                 result = await _send_to_chat(self.uid, str(args.get("text") or ""))
+            elif name == "bot_task":
+                await self.to_phone({"type": "status", "text": "Делаю…"})
+                result = await live_call.delegate(self.profile, str(args.get("request") or ""))
             else:
                 before = len(self.turn.actions)
                 result = await self.runner(name, args, self.ctx)

@@ -245,11 +245,27 @@ def test_quick_reply_for_pending_message_is_the_confirmation_question(uid, monke
     assert result.text == "Отправить в Telegram — Азиз: «Ок»?" and turn.listen
 
 
-def test_no_quick_reply_when_contact_is_ambiguous(uid):
+def test_similar_contacts_pick_best_without_asking(uid):
+    """Он просил не переспрашивать «кому именно»: похожих несколько — звоним лучшему."""
     phone.save_contacts(uid, [{"n": "Ойижон", "p": ["1"]}, {"n": "Мама Beeline", "p": ["2"]}])
     turn = phone.PhoneTurn(uid=uid)
-    result = _run_quick(turn, "позвони маме", _call("phone_call", who="мама"), _say("Какой маме: Ойижон или Мама Beeline?"))
-    assert turn.actions == [] and "Ойижон" in result.text
+    _run_quick(turn, "позвони маме", _call("phone_call", who="мама"), _say("Звоню."))
+    assert len(turn.actions) == 1 and turn.actions[0]["type"] == "call"
+
+
+def test_mama_prefers_person_over_organization_and_learns(uid):
+    phone.save_contacts(uid, [{"n": "Ona va bola Markazi", "p": ["+998901110000"]}, {"n": "ONAJONIM", "p": ["+998902220000"]},
+                              {"n": "Mashhur bek aka", "p": ["+998903330000"]}])
+    found = phone.find_contact(uid, "мама", ["ойи", "ona", "oyijon"])
+    assert found["match"]["name"] == "ONAJONIM"
+    phone.learn_alias(uid, "phone", "работа", "Mashhur bek aka")
+    assert phone.find_contact(uid, "работа", [])["match"]["name"] == "Mashhur bek aka"
+
+
+def test_call_log_breaks_ties(uid):
+    phone.save_contacts(uid, [{"n": "Alisher aka", "p": ["+998901111111"]}, {"n": "Alisher Ishxona", "p": ["+998902222222"]}])
+    device = {"calls": [{"number": "+998902222222", "type": "out"}] * 3}
+    assert phone.find_contact(uid, "Алишер", [], device)["match"]["name"] == "Alisher Ishxona"
 
 
 @pytest.mark.parametrize("n, word", [(1, "минуту"), (3, "минуты"), (5, "минут"), (11, "минут"), (21, "минуту"), (24, "минуты")])

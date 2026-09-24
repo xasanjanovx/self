@@ -22,9 +22,9 @@ _NON_WORD = re.compile(r"[^a-z0-9 ]+")
 # Кто как может быть записан в контактах. Ключ — нормализованная форма.
 _KIN = [
     ("мама", "мамочка", "мамуля", "мамa", "ойи", "ойижон", "онам", "она", "онажон", "ойим", "oyi", "oyijon", "ona", "onam", "onajon", "oyim",
-     "mama", "mamochka", "mom", "mother", "ойижоним"),
+     "mama", "mamochka", "mom", "mother", "ойижоним", "онажоним", "onajonim", "oyijonim", "onajonimsiz"),
     ("папа", "папочка", "дада", "дадажон", "ота", "отам", "отажон", "дадам", "ada", "adajon", "dada", "dadajon", "ota", "otam", "otajon",
-     "papa", "dad", "father", "дадажоним"),
+     "papa", "dad", "father", "дадажоним", "dadajonim", "otajonim", "adajonim"),
     ("брат", "братишка", "ака", "акам", "акажон", "ука", "укам", "укажон", "aka", "akam", "akajon", "uka", "ukam", "ukajon", "brat", "brother"),
     ("сестра", "сестрёнка", "опа", "опам", "опажон", "синглим", "сингил", "opa", "opam", "opajon", "singlim", "singil", "sestra", "sister"),
     ("жена", "жёнушка", "аёлим", "хотиним", "рафиқам", "ayolim", "xotinim", "rafiqam", "jena", "wife", "жана"),
@@ -117,6 +117,50 @@ def resolve(queries: Iterable[Any], items: list[dict[str, Any]], *, name_keys: t
     return {"candidates": close}
 
 
+# организации в книге («Ona va bola markazi», «Hamkorbank») — на «мама», «брат» их не выбираем
+_ORG_WORDS = ("markaz", "center", "centr", "tsentr", "klinik", "clinic", "shifoxona", "bank", "dokon", "magazin", "servis", "service",
+              "taxi", "taksi", "ofis", "office", "apteka", "dorixona", "maktab", "school", "universitet", "kafe", "cafe", "restoran",
+              "salon", "market", "sklad", "support", "saloni", "poliklinika", "bolnitsa", "hokimiyat", "idora", "firma", "mchj", "ooo")
+
+
+def is_kin(queries: Iterable[Any]) -> bool:
+    return any(norm(q) in group for q in queries for group in _KIN_GROUPS)
+
+
+def pick(queries: Iterable[Any], items: list[dict[str, Any]], *, name_keys: tuple[str, ...] = ("name",),
+         boosts: dict[str, float] | None = None, alias: str | None = None) -> dict[str, Any]:
+    """Всегда один лучший человек — без переспросов (он просил не спрашивать «кому именно»).
+
+    alias — как он уже называл этого человека раньше («мама» → «ONAJONIM»), выигрывает сразу;
+    boosts — надбавка по нормализованному имени (кому чаще звонит / с кем недавно переписывался);
+    на родственные слова организации из книги отодвигаем назад. {"match", "score", "others"} | {}."""
+    queries = [q for q in queries if q]
+    if alias:
+        a = norm(alias)
+        for item in items:
+            if any(norm(item.get(k)) == a for k in name_keys if item.get(k)):
+                return {"match": item, "score": 1.0, "others": [], "learned": True}
+    variants = expand(queries)
+    kin = is_kin(queries)
+    boosts = boosts or {}
+    scored: list[tuple[float, int]] = []
+    for idx, item in enumerate(items):
+        names = [norm(item.get(k)) for k in name_keys if item.get(k)]
+        best = max((score(v, n) * w for v, w in variants for n in names if n), default=0.0)
+        if best < MIN_SCORE:
+            continue
+        if kin and any(o in n for n in names for o in _ORG_WORDS):
+            best *= 0.8
+        best += max((boosts.get(n, 0.0) for n in names), default=0.0)
+        scored.append((best, idx))
+    if not scored:
+        return {}
+    scored.sort(key=lambda s: -s[0])
+    first = items[scored[0][1]]
+    others = [str(items[i].get(name_keys[0]) or "") for _, i in scored[1:4]]
+    return {"match": first, "score": round(scored[0][0], 2), "others": others}
+
+
 _PHONE_RE = re.compile(r"^\+?[\d\s\-()]{5,}$")
 
 
@@ -129,4 +173,4 @@ def as_phone_number(value: Any) -> str | None:
     return digits if len(digits.lstrip("+")) >= 5 else None
 
 
-__all__ = ["norm", "expand", "score", "resolve", "as_phone_number"]
+__all__ = ["norm", "expand", "score", "resolve", "pick", "is_kin", "as_phone_number"]

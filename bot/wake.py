@@ -70,7 +70,7 @@ class WakeSettings:
     takbir_offset_min: int = 20
     days_of_week: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
     call_enabled: bool = True
-    max_attempts: int = 150  # фактически «пока не встанет»: окно 2 часа (~65 с на попытку) закончится раньше
+    max_attempts: int = 30   # ~35 минут звонков (≈70 с на попытку); встал / нажал «Проснулся» — сразу хватит
     retry_seconds: int = 45
     voice_lang: str = "uz"   # на каком языке Джарвис говорит в трубке
     talk: bool = True        # живой диалог (слушает ответы) или просто говорит и кладёт трубку
@@ -89,10 +89,11 @@ class WakeSettings:
                 return None
         days = tuple(int(d) for d in (row.get("days_of_week") or (1, 2, 3, 4, 5, 6, 7)))
         return cls(
-            enabled=bool(row.get("enabled", True)), mode=str(row.get("mode") or "fajr"), fixed_time=row.get("fixed_time"),
+            # нет настроек — не будим: звоним только тем, кто сам включил будильник
+            enabled=bool(row.get("enabled", False)) if row else False, mode=str(row.get("mode") or "fajr"), fixed_time=row.get("fixed_time"),
             offset_min=int(row.get("offset_min") or 25), takbir_offset_min=int(row.get("takbir_offset_min") or 20),
             days_of_week=days or (1, 2, 3, 4, 5, 6, 7), call_enabled=bool(row.get("call_enabled", True)),
-            max_attempts=max(int(row.get("max_attempts") or 0), 150), retry_seconds=int(row.get("retry_seconds") or 45),
+            max_attempts=int(row.get("max_attempts") or 30), retry_seconds=int(row.get("retry_seconds") or 45),
             skip_until=_d(row.get("skip_until")),
             voice_lang=("ru" if str(row.get("voice_lang") or "uz") == "ru" else "uz"), talk=bool(row.get("talk", True)),
             latitude=float(row.get("latitude") or 40.7821), longitude=float(row.get("longitude") or 72.3442),
@@ -170,6 +171,16 @@ def should_call(plan: DayPlan, log: dict[str, Any] | None, now: datetime, s: Wak
     if isinstance(last, datetime) and (now - last).total_seconds() < max(20, s.retry_seconds):
         return False, "cooldown"
     return True, "call"
+
+
+_SKIP_WORDS = ("не звони", "не звонить", "не надо звонить", "не буди", "не будить", "не надо будить", "перестань звонить",
+               "хватит звонить", "qo'ng'iroq qilma", "qongiroq qilma", "uyg'otma", "uygotma", "uyg'otmang", "bezovta qilma")
+
+
+def looks_skip(text: str) -> bool:
+    """«Не звони», «не буди сегодня» — отменить подъём на сегодня (только в контексте будильника)."""
+    low = f" {str(text or '').strip().lower()} "
+    return any(w in low for w in _SKIP_WORDS)
 
 
 def looks_awake(text: str) -> bool:
@@ -292,5 +303,5 @@ def streak_days(rows: list[dict[str, Any]], today: date) -> int:
 
 __all__ = [
     "WakeSettings", "DayPlan", "MOTIVATION", "CONFIRM_MINUTES", "plan_for_day", "should_call", "motivation",
-    "looks_awake", "snooze_minutes", "call_script", "wake_message", "done_message", "stats_line", "streak_days",
+    "looks_awake", "looks_skip", "snooze_minutes", "call_script", "wake_message", "done_message", "stats_line", "streak_days",
 ]

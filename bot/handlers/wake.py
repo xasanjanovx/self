@@ -65,6 +65,18 @@ async def handle_awake_text(message: Message, profile: Profile, text: str) -> bo
         await safe_delete(message)
         await _say(message.bot, profile.telegram_id, profile.tr(f"😴 Хорошо, позвоню в {local:%H:%M}", f"😴 Mayli, {local:%H:%M} da qo'ng'iroq qilaman"))
         return True
+    if wake_mod.looks_skip(text) and await _wake_matters(profile):
+        # «не звони», «не буди» — сегодня больше не звоним (и кладём трубку, если звонок идёт)
+        await safe_delete(message)
+        await wake_runner.skip_today(profile, message.bot)
+        try:
+            from .. import caller
+
+            await caller.hang_up(profile.telegram_id)
+        except Exception:
+            pass
+        await _say(message.bot, profile.telegram_id, profile.tr("👌 Хорошо, сегодня больше не звоню.", "👌 Mayli, bugun boshqa qo'ng'iroq qilmayman."))
+        return True
     if not wake_mod.looks_awake(text):
         return False
     await safe_delete(message)
@@ -75,6 +87,22 @@ async def handle_awake_text(message: Message, profile: Profile, text: str) -> bo
         await _say(message.bot, profile.telegram_id, profile.tr("Звонка сегодня не будет 👍 Пусть Аллах примет ваш намаз!",
                                                                 "Bugun qo'ng'iroq bo'lmaydi 👍 Alloh namozingizni qabul qilsin!"))
     return True
+
+
+async def _wake_matters(profile: Profile) -> bool:
+    """«Не звони» относится к будильнику: подъём идёт или сегодня ещё будет (а не «не звони маме» днём)."""
+    if wake_runner.is_waking(profile.telegram_id):
+        return True
+    try:
+        _, plan = await wake_runner.plan_for(profile)
+    except Exception:
+        return False
+    if not plan.active or plan.wake_at is None:
+        return False
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    return plan.wake_at - timedelta(hours=10) <= now <= plan.wake_at + timedelta(hours=2)
 
 
 __all__ = ["router", "handle_awake_text"]
