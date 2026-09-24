@@ -218,7 +218,7 @@ def test_new_phone_tools_need_unlock_and_are_declared():
 
     names = {d["name"] for d in live_call.tool_declarations("phone")}
     for n in ("recent_calls", "call_back", "call_forwarding", "phone_status", "brightness", "do_not_disturb", "ringer_mode",
-              "settings_panel", "look", "ai_status", "set_ai_balance", "bot_task", "whatsapp_send", "screen_look", "gallery",
+              "settings_panel", "look", "bot_task", "whatsapp_send", "screen_look", "gallery",
               "play_media", "youtube_search", "telegram_search", "taxi", "remember_contact"):
         assert n in names
     assert {"look", "screen_look", "open_app"} <= phone_live.NEED_UNLOCK

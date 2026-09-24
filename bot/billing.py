@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,8 @@ URGENT_DAYS = 1.0     # меньше суток — срочно
 LOW_USD = 2.0
 URGENT_USD = 0.5
 KEEP_DAYS = 45
+# он выбрал: не больше $0.5 в день (по Ташкенту). Дошли — пишем в чат, Джарвис до конца дня в экономном режиме
+DAILY_LIMIT_USD = float(os.getenv("GEMINI_DAILY_LIMIT_USD") or 0.5)
 TOPUP_URL = "https://aistudio.google.com/"
 
 _state: dict[str, Any] | None = None
@@ -179,7 +182,27 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
     st.pop("exhausted_at", None)  # ответ пришёл — значит, деньги есть
     _schedule_save()
     _maybe_alert()
+    _maybe_limit_alert(st, day)
     return usd
+
+
+def spent_today() -> float:
+    return float(((_load().get("days") or {}).get(_today()) or {}).get("usd") or 0.0) * float(_load().get("factor") or 1.0)
+
+
+def over_limit() -> bool:
+    """Сегодняшний расход дошёл до дневного лимита — экономный режим до полуночи."""
+    return DAILY_LIMIT_USD > 0 and spent_today() >= DAILY_LIMIT_USD
+
+
+def _maybe_limit_alert(st: dict[str, Any], day: dict[str, Any]) -> None:
+    if DAILY_LIMIT_USD <= 0 or day.get("limit_alert") or float(day["usd"]) * float(st.get("factor") or 1.0) < DAILY_LIMIT_USD:
+        return
+    day["limit_alert"] = True
+    _schedule_save()
+    _notify(f"🟡 <b>Лимит Gemini на сегодня — ${DAILY_LIMIT_USD:g} — достигнут.</b>\nДо конца дня Джарвис в экономном режиме: "
+            "команды выполняет молча, отвечает одной фразой, камера и экран — по одному кадру, разговор закрывается быстрее. "
+            "Будильник работает как обычно.")
 
 
 def rate_limited() -> None:

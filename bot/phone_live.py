@@ -41,6 +41,58 @@ INPUT_RATE = 16000
 # он выбрал: ждать 1 секунду тишины — не обрывать на полуслове, если задумался посреди фразы
 VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 1000)
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
+IDLE_END_S = 15.0        # он выбрал: 15 с тишины — разговор закрывается
+IDLE_END_ECONOMY = 8.0   # после дневного лимита — быстрее
+FRAME_EVERY_S = 3.0      # камера/экран: пока он говорит — не чаще кадра в 3 с
+
+
+class SpeechGate:
+    """Микрофон → Gemini только когда он говорит: с 0.5 с до начала речи и до 1.5 с тишины после (Gemini успевает
+    понять, что фраза кончилась). Тишина и фоновый шум не уходят — не оплачиваются и не копятся в разговоре."""
+
+    PREROLL_S = 0.5
+
+    def __init__(self) -> None:
+        from collections import deque
+
+        self.active = False
+        self.floor = 300.0
+        self.quiet = 0.0
+        self.hangover = (VAD_SILENCE_MS + 500) / 1000
+        self.last_voice = time.monotonic()
+        self._pre: Any = deque()
+        self._pre_s = 0.0
+
+    def feed(self, pcm: bytes) -> list[bytes]:
+        import numpy as np
+
+        x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
+        if not len(x):
+            return []
+        dur = len(x) / INPUT_RATE
+        rms = float(np.sqrt(np.mean(x * x)))
+        loud = rms > max(self.floor * 2.5, 350.0)
+        if not loud and rms > 0:
+            self.floor = min(3000.0, max(50.0, self.floor * 0.95 + rms * 0.05))
+        if loud:
+            self.last_voice = time.monotonic()
+        if self.active:
+            self.quiet = 0.0 if loud else self.quiet + dur
+            if self.quiet > self.hangover:
+                self.active = False
+            return [pcm]
+        if loud:
+            self.active = True
+            self.quiet = 0.0
+            out = [*self._pre, pcm]
+            self._pre.clear()
+            self._pre_s = 0.0
+            return out
+        self._pre.append(pcm)
+        self._pre_s += dur
+        while self._pre_s > self.PREROLL_S and self._pre:
+            self._pre_s -= len(self._pre.popleft()) / 2 / INPUT_RATE
+        return []
 
 _TOOL_STATUS = {
     "web_search": "Ищу в интернете…", "weather": "Смотрю погоду…", "currency_rates": "Смотрю курс…",
@@ -96,6 +148,15 @@ class PhoneLive(_Session):
         self._gem_lock = self._send_lock
         self.user_lines: list[str] = []
         self.jarvis_lines: list[str] = []
+        self.gate = SpeechGate()
+        self.idle_limit = IDLE_END_ECONOMY if billing.over_limit() else IDLE_END_S
+        self._last_model_audio = time.monotonic()
+        self._ended = False
+        self._streams: set[str] = set()        # идёт камера / показ экрана
+        self._stream_on_at = 0.0
+        self._frame_rx = 0.0                   # когда пришёл последний кадр с телефона
+        self._frame_tx = 0.0                   # когда последний кадр ушёл в Gemini
+        self._pending_frame: dict[str, Any] | None = None
 
     # --- Gemini: быстрее понимать, что он договорил (по умолчанию модель ждёт паузу ~2–3 с)
     vad_tuned = True
@@ -152,8 +213,14 @@ class PhoneLive(_Session):
 
         async for msg in self.phone_ws:
             if msg.type == aiohttp.WSMsgType.BINARY:
-                await self.to_gemini(gem, {"realtimeInput": {"audio": {"data": base64.b64encode(msg.data).decode(),
-                                                                       "mimeType": f"audio/pcm;rate={INPUT_RATE}"}}})
+                # в Gemini — только речь (с полсекунды до и 1.5 с после): тишина тоже оплачивается и копится в разговоре
+                was_active = self.gate.active
+                for chunk in self.gate.feed(bytes(msg.data)):
+                    await self.to_gemini(gem, {"realtimeInput": {"audio": {"data": base64.b64encode(chunk).decode(),
+                                                                           "mimeType": f"audio/pcm;rate={INPUT_RATE}"}}})
+                if self.gate.active and not was_active:
+                    await self._send_pending_frame(gem, min_gap=1.0)  # заговорил — модель видит свежий кадр экрана/камеры
+                await self._maybe_end_idle()
             elif msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
@@ -161,6 +228,7 @@ class PhoneLive(_Session):
                     continue
                 kind = data.get("type")
                 if kind == "text" and str(data.get("text") or "").strip():
+                    self.gate.last_voice = time.monotonic()
                     await self.to_phone({"type": "user", "text": str(data["text"]), "final": True})
                     self.user_lines.append(str(data["text"]))
                     await self.say_text(gem, str(data["text"]))
@@ -172,12 +240,16 @@ class PhoneLive(_Session):
                 elif kind == "greet":
                     await self.say_text(gem, GREET)
                 elif kind == "image" and data.get("data"):
-                    # кадр живой камеры (JPEG ~1 в секунду) — модель «видит», что он показывает
-                    await self.to_gemini(gem, {"realtimeInput": {"video": {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")}}})
+                    await self._on_frame(gem, {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")})
                 elif kind in {"camera", "screen"}:
+                    if data.get("on"):
+                        self._streams.add(kind)
+                        self._stream_on_at = time.monotonic()
+                    else:
+                        self._streams.discard(kind)
                     what = "Камера" if kind == "camera" else "Показ экрана"
                     seen = "то, что он показывает камерой" if kind == "camera" else "экран его телефона (переведи, объясни, прочитай — что попросит)"
-                    note = (f"[{what} включена — ты видишь {seen}. Кадры идут потоком.]" if data.get("on")
+                    note = (f"[{what} включена — ты видишь {seen}. Свежий кадр приходит, когда он говорит.]" if data.get("on")
                             else f"[{what} выключена — ты больше ничего не видишь.]")
                     await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
                 elif kind == "note" and str(data.get("text") or "").strip():
@@ -190,6 +262,35 @@ class PhoneLive(_Session):
             elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
         self.stop.set()
+
+    # --- кадры камеры и экрана: телефон шлёт раз в 1–1.5 с, в Gemini — по одному, когда нужно (каждый кадр
+    # оплачивается и остаётся в разговоре; раньше 2 минуты экрана = ~80 кадров в каждом следующем ответе)
+    async def _on_frame(self, gem, frame: dict[str, Any]) -> None:  # noqa: ANN001
+        now = time.monotonic()
+        burst = now - self._frame_rx < 0.4  # галерея шлёт фото пачкой — их все
+        self._frame_rx = now
+        self._pending_frame = frame
+        first = self._frame_tx < self._stream_on_at
+        periodic = self.gate.active and not billing.over_limit() and now - self._frame_tx >= FRAME_EVERY_S
+        if not self._streams or burst or first or periodic:
+            await self._send_pending_frame(gem, min_gap=0.0)
+
+    async def _send_pending_frame(self, gem, *, min_gap: float) -> None:  # noqa: ANN001
+        frame = self._pending_frame
+        if frame is None or time.monotonic() - self._frame_tx < min_gap:
+            return
+        self._pending_frame = None
+        self._frame_tx = time.monotonic()
+        await self.to_gemini(gem, {"realtimeInput": {"video": frame}})
+
+    async def _maybe_end_idle(self) -> None:
+        """Как он выбрал: 15 с тишины (экономный режим — 8 с) — разговор закрывается, чужую речь дальше не слушаем."""
+        if self._ended or self._tool_tasks or self.gate.active:
+            return
+        if time.monotonic() - max(self.gate.last_voice, self._last_model_audio) > self.idle_limit:
+            self._ended = True
+            logger.info("phone live: %.0f с тишины — закрываю разговор", self.idle_limit)
+            await self.to_phone({"type": "end"})
 
     async def downlink(self, ws) -> None:  # noqa: ANN001
         """Gemini → телефон: голос, субтитры, перебивания, инструменты."""
@@ -214,6 +315,7 @@ class PhoneLive(_Session):
             for part in ((sc.get("modelTurn") or {}).get("parts") or []):
                 blob = part.get("inlineData") or {}
                 if blob.get("data"):
+                    self._last_model_audio = time.monotonic()
                     await self.to_phone(base64.b64decode(blob["data"]))
             if (t := (sc.get("inputTranscription") or {}).get("text")):
                 self._in_text.append(t)
@@ -291,9 +393,9 @@ async def _build(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any,
 
     started = time.monotonic()
     profile, persona, memory = await asyncio.gather(profile_by_id(uid), services.persona(uid), extra.memory_prompt(uid))
-    snapshot = await phone._snapshot(profile)
     prepared = time.monotonic() - started
-    system = live_call.system_instruction(profile, persona, mode="phone", snapshot=snapshot, memory=memory)
+    # данные бота (траты, задачи) в промпт не кладём — они оплачивались бы в каждом ответе; нужны — инструменты и bot_task
+    system = live_call.system_instruction(profile, persona, mode="phone", memory=memory)
     system += phone.device_prompt(device) + billing.voice_note()
     sess = PhoneLive(profile, persona, system=system, phone_ws=None, device=dict(device))
     http = aiohttp.ClientSession()

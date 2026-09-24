@@ -263,3 +263,129 @@ def _profile_stub():
     from bot.profile import Profile
 
     return Profile(telegram_id=1, lang="ru", tz_name="Asia/Tashkent", currency="UZS", first_name="Тест", username="t")
+
+
+# ------------------------------------------------------------------ 1.6.2: «Live, но экономно», лимит $0.5 в день
+import numpy as np  # noqa: E402
+
+from bot import billing  # noqa: E402
+
+
+def _pcm(level: float, ms: int = 80) -> bytes:
+    n = int(16000 * ms / 1000)
+    return (np.sin(np.arange(n) / 3) * level).astype(np.int16).tobytes() if level else bytes(n * 2)
+
+
+def test_silence_is_not_sent_to_gemini_but_speech_is_with_preroll():
+    gate = phone_live.SpeechGate()
+    sent = []
+    for _ in range(40):                       # 3.2 с тишины и тихого фона — ничего
+        sent += gate.feed(_pcm(40))
+    assert sent == [] and not gate.active
+    sent += gate.feed(_pcm(4000))             # заговорил — уходит и полсекунды «до»
+    assert gate.active and 6 <= len(sent) <= 8
+    for _ in range(10):                       # пауза посреди фразы (0.8 с) — продолжаем слать
+        sent += gate.feed(_pcm(40))
+    assert gate.active
+    for _ in range(25):                       # 2 с тишины — окно закрылось
+        gate.feed(_pcm(40))
+    assert not gate.active
+    assert gate.feed(bytes(2560)) == []       # нули, пока Джарвис говорит, — тоже не шлём
+
+
+class _Gem:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_str(self, s: str) -> None:
+        self.sent.append(json.loads(s))
+
+
+class _Phone:
+    closed = False
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    async def send_str(self, s: str) -> None:
+        self.sent.append(json.loads(s))
+
+    async def send_bytes(self, b: bytes) -> None:
+        self.sent.append(b)
+
+
+def _live() -> phone_live.PhoneLive:
+    return phone_live.PhoneLive(_profile_stub(), persona_mod.Persona(lang="ru"), system="", phone_ws=_Phone(), device={})
+
+
+def test_screen_frames_go_one_at_a_time(monkeypatch):
+    monkeypatch.setattr(billing, "over_limit", lambda: False)
+    sess, gem = _live(), _Gem()
+    frames = lambda: [m for m in gem.sent if "video" in m.get("realtimeInput", {})]  # noqa: E731
+
+    async def scenario():
+        sess._streams.add("screen")
+        sess._stream_on_at = time.monotonic()
+        await sess._on_frame(gem, {"data": "a", "mimeType": "image/jpeg"})   # первый кадр — сразу
+        assert len(frames()) == 1
+        for _ in range(3):                                                    # молчит — новые кадры не уходят
+            await asyncio.sleep(0.45)
+            await sess._on_frame(gem, {"data": "b", "mimeType": "image/jpeg"})
+        assert len(frames()) == 1
+        await sess._send_pending_frame(gem, min_gap=1.0)                      # заговорил — свежий кадр
+        assert len(frames()) == 2 and frames()[-1]["realtimeInput"]["video"]["data"] == "b"
+        sess._streams.clear()                                                 # галерея — все фото пачкой
+        for i in range(3):
+            await sess._on_frame(gem, {"data": f"g{i}", "mimeType": "image/jpeg"})
+        assert len(frames()) == 5
+
+    import time
+    asyncio.run(scenario())
+
+
+def test_conversation_ends_after_15_seconds_of_silence(monkeypatch):
+    monkeypatch.setattr(billing, "over_limit", lambda: False)
+    sess = _live()
+    assert sess.idle_limit == 15.0
+
+    async def scenario():
+        await sess._maybe_end_idle()
+        assert not sess.phone_ws.sent
+        sess.gate.last_voice -= 16
+        sess._last_model_audio -= 16
+        await sess._maybe_end_idle()
+        await sess._maybe_end_idle()
+        assert sess.phone_ws.sent == [{"type": "end"}]
+
+    asyncio.run(scenario())
+
+
+def test_daily_limit_alerts_once_and_turns_on_economy(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(billing, "_state", None)
+    monkeypatch.setattr(billing, "_maybe_alert", lambda: None)
+    sent: list[str] = []
+    monkeypatch.setattr(billing, "_notify", lambda text: sent.append(text))
+    usage = {"promptTokenCount": 100000, "responseTokenCount": 10000,
+             "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 100000}],
+             "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 10000}]}
+    assert not billing.over_limit()
+    for _ in range(3):
+        billing.record("gemini-3.8-live", usage, kind="live")  # ~$0.2 за раз
+    assert billing.over_limit() and billing.spent_today() >= billing.DAILY_LIMIT_USD == 0.5
+    assert len(sent) == 1 and "экономном режиме" in sent[0]
+    assert phone_live.PhoneLive(_profile_stub(), persona_mod.Persona(), system="", phone_ws=_Phone(), device={}).idle_limit == 8.0
+    assert "ЭКОНОМНЫЙ РЕЖИМ" in live_call.system_instruction(_profile_stub(), persona_mod.Persona(lang="ru"), mode="phone")
+
+
+def test_phone_prompt_and_tools_are_short(monkeypatch):
+    monkeypatch.setattr(billing, "over_limit", lambda: False)
+    text = live_call.system_instruction(_profile_stub(), persona_mod.Persona(lang="ru", address="siz"), mode="phone", snapshot="x" * 3000)
+    decls = live_call.tool_declarations("phone")
+    size = len(json.dumps(decls, ensure_ascii=False))
+    assert len(text) < 7500 and "x" * 100 not in text and "О СЕБЕ" not in text     # было ~14.5 тысяч знаков
+    assert size < 18500                                                           # было ~25 тысяч
+    assert "КОМАНДЫ — МОЛЧА" in text and "{year}" not in text
+    names = {d["name"] for d in decls}
+    assert {"phone_call", "bot_task", "screen_look", "undo_last"} <= names and not {"expect_photo", "complete_tasks", "ai_status"} & names
+    assert all(len(d["description"]) <= 172 for d in decls)
