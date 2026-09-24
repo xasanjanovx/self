@@ -514,9 +514,22 @@ async def _live_say(uid: int, persona, text: str) -> bytes | None:  # noqa: ANN0
             logger.warning("greeting via live failed: %s", text, exc_info=True)
             continue
         if out and (not said or _same_words("".join(said), text)):
-            return trim_clip(bytes(out))
+            clip = trim_clip(bytes(out))
+            if await _clear(clip, text, persona.lang):
+                return clip
+            said = ["(нечётко после обрезки)"]
         logger.info("greeting: сказала «%s» вместо «%s» — ещё раз", "".join(said), text)
     return None
+
+
+async def _clear(clip: bytes, text: str, lang: str) -> bool:
+    """Русский отклик ещё раз слушаем своим распознавателем: «Да, босс» не должно звучать как «даблас»."""
+    if lang != "ru":
+        return True
+    from . import wakeword
+
+    heard = await wakeword.check(pcm_to_wav(clip))
+    return heard is None or _same_words(heard["text"], text)
 
 
 def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
