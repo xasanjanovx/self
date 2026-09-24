@@ -311,7 +311,7 @@ async def _open(http: aiohttp.ClientSession) -> aiohttp.ClientWebSocketResponse:
         raise QwenError("нет ключа DASHSCOPE_API_KEY")
     try:
         return await http.ws_connect(f"{ws_url()}?model={MODEL}", headers={"Authorization": f"Bearer {key}"},
-                                     heartbeat=20, max_msg_size=0, timeout=aiohttp.ClientWSTimeout(ws_close=5))
+                                     heartbeat=20, max_msg_size=0)
     except aiohttp.WSServerHandshakeError as exc:
         raise QwenError(f"Alibaba не пустил: {exc.status} {exc.message}") from exc
 
