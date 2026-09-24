@@ -338,14 +338,21 @@ async def _open(http: aiohttp.ClientSession) -> aiohttp.ClientWebSocketResponse:
     key = api_key()
     if not key:
         raise QwenError("нет ключа DASHSCOPE_API_KEY")
-    try:
-        return await http.ws_connect(f"{ws_url()}?model={MODEL}", headers={"Authorization": f"Bearer {key}"},
-                                     heartbeat=20, max_msg_size=0)
-    except aiohttp.WSServerHandshakeError as exc:
-        reason = f"Alibaba не пустил: {exc.status} {exc.message}"
-        if exc.status in (401, 403):
-            block(reason)
-        raise QwenError(reason) from exc
+    # адрес workspace, если он задан; не принял (400/404 — неверный ID) — общий адрес Сингапура
+    urls = list(dict.fromkeys([ws_url(), DEFAULT_URL]))
+    for i, url in enumerate(urls):
+        try:
+            return await http.ws_connect(f"{url}?model={MODEL}", headers={"Authorization": f"Bearer {key}"},
+                                         heartbeat=20, max_msg_size=0)
+        except aiohttp.WSServerHandshakeError as exc:
+            if exc.status in (400, 404) and i + 1 < len(urls):
+                logger.warning("qwen: адрес %s не принят (%s) — общий адрес", url.split("//")[-1].split("/")[0], exc.status)
+                continue
+            reason = f"Alibaba не пустил: {exc.status} {exc.message}"
+            if exc.status in (401, 403):
+                block(reason)
+            raise QwenError(reason) from exc
+    raise QwenError("нет адреса Qwen")
 
 
 async def _configure(ws: aiohttp.ClientWebSocketResponse, session: dict[str, Any]) -> None:
