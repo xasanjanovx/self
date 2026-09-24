@@ -355,3 +355,43 @@ def test_youtube_parse_desktop_and_mobile_formats():
     mobile = "<script>var ytInitialData = '" + escaped + "';</script>"
     got = media.parse_youtube(mobile)
     assert got and got[0]["title"] == "Nasheed" and got[0]["duration"] == "3:41"
+
+
+# ------------------------------------------------------------------ «только мой голос»
+def test_voice_threshold_is_strict_but_bounded():
+    from bot import voiceprint
+
+    assert voiceprint.calibrate([]) == 0.40
+    assert voiceprint.calibrate([0.9, 0.85, 0.8, 0.88]) == voiceprint.MAX_THRESHOLD      # не выше — иначе самого отсечёт
+    assert voiceprint.calibrate([0.3, 0.31, 0.29]) == voiceprint.MIN_THRESHOLD          # не ниже — иначе пустит чужих (до ~0.27)
+    assert 0.3 < voiceprint.calibrate([0.6, 0.55, 0.5, 0.45, 0.7]) < 0.55
+
+
+def test_voice_trim_and_resample(tmp_path):
+    import io
+    import wave
+
+    import numpy as np
+
+    from bot import voiceprint
+
+    rate = 24000
+    tone = (np.sin(np.arange(rate) * 2 * np.pi * 220 / rate) * 12000).astype(np.int16)
+    pcm = np.concatenate([np.zeros(rate, np.int16), tone, np.zeros(rate, np.int16)])
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(pcm.tobytes())
+    x = voiceprint.pcm16k(buf.getvalue())
+    assert abs(len(x) - 3 * 16000) < 10                      # 24 кГц → 16 кГц
+    y = voiceprint.trim_silence(x)
+    assert 0.9 * 16000 < len(y) < 1.3 * 16000                # тишину по краям срезали
+
+
+def test_voice_status_without_enrollment(tmp_path, monkeypatch):
+    from bot import voiceprint
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert voiceprint.status(5)["enrolled"] is False
+    import asyncio
+
+    assert asyncio.run(voiceprint.verify(5, b""))["ok"] is True   # не записан — не мешаем

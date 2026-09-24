@@ -10,7 +10,7 @@
   POST /jarvis/v1/warm          — услышал «Джарвис»: прогреть кэши, пока человек договаривает
   GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
-  POST /jarvis/v1/wake_check    — {"audio": WAV} → прозвучало ли «Джарвис» (защита от ложных срабатываний)
+  POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «Джарвис» (защита от чужих и ТВ)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
@@ -18,6 +18,8 @@
   POST /jarvis/v1/tg/logout
   GET  /jarvis/v1/tg/status
   POST /jarvis/v1/tg/quick_send — {"name", "text"}: сбросил звонок в Telegram — «перезвоню» звонившему от его имени
+  POST /jarvis/v1/voice/enroll  — {"wake": [WAV…], "reading": WAV} → отпечаток голоса («только мой голос»)
+  GET  /jarvis/v1/voice/status · POST /jarvis/v1/voice/forget
 """
 from __future__ import annotations
 
@@ -175,6 +177,20 @@ async def wake_check(request: web.Request) -> web.Response:
     if not audio:
         return web.json_response({"error": "audio required"}, status=400)
     started = time.monotonic()
+    uid = owner_id()
+    # 1) голос — его? (свой отпечаток, ~0.05 с): чужой голос и телевизор отсекаем сразу, без Gemini
+    if uid is not None:
+        from . import voiceprint
+
+        voice = await voiceprint.verify(uid, audio)
+        if not voice.get("ok"):
+            logger.info("wake check: чужой голос (%.2f < %.2f) за %.2f с", voice.get("score") or 0, voice.get("threshold") or 0,
+                        time.monotonic() - started)
+            return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
+        # 2) детектор уверен, что это «Джарвис», а голос его — не ждём Gemini
+        if data.get("confident"):
+            logger.info("wake check: его голос (%s) за %.2f с", voice.get("score"), time.monotonic() - started)
+            return web.json_response({"ok": True, "voice": voice.get("score"), "fast": True})
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
                                 model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
@@ -289,6 +305,38 @@ async def tg_status(request: web.Request) -> web.Response:
     return web.json_response(await tg_user.status())
 
 
+async def voice_enroll(request: web.Request) -> web.Response:
+    """Запись голоса из приложения: 10 раз «Джарвис» + ~40 с чтения → отпечаток и порог «только мой голос»."""
+    from . import voiceprint
+
+    uid = owner_id()
+    data = await _json(request)
+    if uid is None:
+        return web.json_response({"error": "owner is not configured"}, status=500)
+    try:
+        wake = [base64.b64decode(str(w), validate=False) for w in data.get("wake") or []]
+        reading = base64.b64decode(str(data.get("reading") or ""), validate=False) or None
+    except (binascii.Error, ValueError):
+        return web.json_response({"error": "bad audio"}, status=400)
+    return web.json_response(await voiceprint.enroll(uid, wake, reading))
+
+
+async def voice_status(request: web.Request) -> web.Response:
+    from . import voiceprint
+
+    uid = owner_id()
+    return web.json_response(voiceprint.status(uid) if uid else {"enrolled": False})
+
+
+async def voice_forget(request: web.Request) -> web.Response:
+    from . import voiceprint
+
+    uid = owner_id()
+    if uid:
+        voiceprint.forget(uid)
+    return web.json_response({"ok": True})
+
+
 async def tg_quick_send(request: web.Request) -> web.Response:
     """Он сбросил звонок в Telegram словами «скажи, что перезвоню» — пишем звонившему от его имени.
     Имя — ровно как в уведомлении о звонке; если чат не найден однозначно — не пишем никому."""
@@ -322,6 +370,9 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
     app.router.add_get("/jarvis/v1/tg/status", tg_status)
     app.router.add_post("/jarvis/v1/tg/quick_send", tg_quick_send)
+    app.router.add_post("/jarvis/v1/voice/enroll", voice_enroll)
+    app.router.add_get("/jarvis/v1/voice/status", voice_status)
+    app.router.add_post("/jarvis/v1/voice/forget", voice_forget)
     return app
 
 
@@ -340,6 +391,9 @@ async def start() -> bool:
     global _warm
     if owner_id() is not None:
         _warm = asyncio.create_task(phone.keep_warm(owner_id()), name="jarvis-warm")
+        from . import voiceprint
+
+        asyncio.create_task(voiceprint.warm(), name="voiceprint-warm")
     return True
 
 
