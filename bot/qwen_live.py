@@ -63,6 +63,8 @@ def ws_url() -> str:
 
 
 def save_key(key: str, workspace: str = "") -> None:
+    global _blocked_until
+    _blocked_until = 0.0
     data = _secrets()
     data["dashscope_api_key"] = key.strip()
     if workspace.strip():
@@ -76,8 +78,31 @@ def save_key(key: str, workspace: str = "") -> None:
         pass
 
 
+# бесплатная квота кончилась при включённом «Stop-on-Exhaust» (403 AllocationQuota.FreeTierOnly), долг, неверный ключ —
+# час не пробуем Qwen (каждая попытка — лишняя задержка перед Gemini); новый ключ /qwen снимает запрет сразу
+_FATAL = ("allocationquota", "freetieronly", "arrearage", "overdue", "invalidapikey", "accessdenied", "unauthorized", "401", "403")
+BLOCK_S = 3600
+_blocked_until = 0.0
+
+
+def is_fatal(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(k in low for k in _FATAL)
+
+
+def block(reason: str) -> None:
+    global _blocked_until
+    import time
+
+    _blocked_until = time.monotonic() + BLOCK_S
+    logger.warning("qwen: отключаю на час — %s", reason[:200])
+    report_failure(reason)
+
+
 def available() -> bool:
-    return bool(api_key())
+    import time
+
+    return bool(api_key()) and time.monotonic() >= _blocked_until
 
 
 class QwenError(RuntimeError):
@@ -136,8 +161,8 @@ def _schema(s: Any) -> Any:
 
 def tools_from_setup(setup: dict[str, Any]) -> list[dict[str, Any]]:
     tools = []
-    for block in setup.get("tools") or []:
-        for d in block.get("functionDeclarations") or []:
+    for group in setup.get("tools") or []:
+        for d in group.get("functionDeclarations") or []:
             tools.append({"type": "function", "name": d["name"], "description": d.get("description", ""),
                           "parameters": _schema(d.get("parameters") or {"type": "OBJECT", "properties": {}})})
     return tools
@@ -303,6 +328,10 @@ class QwenBridge:
             err = ev.get("error") or {}
             self.error = f"{err.get('code') or ''}: {err.get('message') or ''}".strip(": ")
             logger.warning("qwen: %s", self.error[:300])
+            if is_fatal(self.error):
+                # квота/долг посреди разговора: закрываем — телефон скажет об ошибке, следующий разговор пойдёт на Gemini
+                block(self.error)
+                asyncio.ensure_future(self._ws.close())
 
 
 async def _open(http: aiohttp.ClientSession) -> aiohttp.ClientWebSocketResponse:
@@ -313,7 +342,10 @@ async def _open(http: aiohttp.ClientSession) -> aiohttp.ClientWebSocketResponse:
         return await http.ws_connect(f"{ws_url()}?model={MODEL}", headers={"Authorization": f"Bearer {key}"},
                                      heartbeat=20, max_msg_size=0)
     except aiohttp.WSServerHandshakeError as exc:
-        raise QwenError(f"Alibaba не пустил: {exc.status} {exc.message}") from exc
+        reason = f"Alibaba не пустил: {exc.status} {exc.message}"
+        if exc.status in (401, 403):
+            block(reason)
+        raise QwenError(reason) from exc
 
 
 async def _configure(ws: aiohttp.ClientWebSocketResponse, session: dict[str, Any]) -> None:
@@ -330,7 +362,10 @@ async def _configure(ws: aiohttp.ClientWebSocketResponse, session: dict[str, Any
             return
         if ev.get("type") == "error":
             err = ev.get("error") or {}
-            raise QwenError(f"{err.get('code')}: {err.get('message')}")
+            reason = f"{err.get('code')}: {err.get('message')}"
+            if is_fatal(reason):
+                block(reason)
+            raise QwenError(reason)
     raise QwenError("нет ответа на session.update")
 
 

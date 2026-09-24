@@ -198,3 +198,25 @@ def test_key_is_kept_in_data_dir(tmp_path, monkeypatch):
     qwen_live.save_key("sk-test", "ws-123")
     assert qwen_live.available() and qwen_live.api_key() == "sk-test"
     assert qwen_live.ws_url() == "wss://ws-123.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_free_quota_exhausted_switches_to_gemini_for_an_hour(tmp_path, monkeypatch):
+    """«Stop-on-Exhaust» включён, квота кончилась: 403 AllocationQuota.FreeTierOnly — час без Qwen, запись в чат."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr(qwen_live, "_blocked_until", 0.0)
+    reports = []
+    monkeypatch.setattr(qwen_live, "report_failure", lambda reason: reports.append(reason))
+    assert qwen_live.available()
+    bridge, ws = _bridge()
+
+    async def scenario():
+        bridge.translate({"type": "error", "error": {"code": "AllocationQuota.FreeTierOnly", "message": "free tier exhausted"}})
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert not qwen_live.available() and ws.closed
+    assert reports and "FreeTierOnly" in reports[0]
+    bridge.translate({"type": "error", "error": {"code": "InvalidParameter", "message": "bad voice"}})  # не смертельно
+    qwen_live.save_key("sk-new")  # новый ключ — снова пробуем
+    assert qwen_live.available()
