@@ -113,6 +113,8 @@ class PhoneLive(_Session):
     async def connect(self, session):  # noqa: ANN001
         try:
             return await super().connect(session)
+        except live_call.BillingExhausted:
+            raise
         except Exception as exc:
             if not self.vad_tuned:
                 raise
@@ -375,7 +377,9 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
             built = await _build(uid, device)
         except Exception as exc:
             logger.warning("phone live: Gemini недоступен: %s", exc)
-            await phone_ws.send_str(json.dumps({"type": "error", "text": "Не удалось подключиться к Gemini"}, ensure_ascii=False))
+            text = ("Баланс Gemini закончился — пополните в AI Studio" if isinstance(exc, live_call.BillingExhausted)
+                    else "Не удалось подключиться к Gemini")
+            await phone_ws.send_str(json.dumps({"type": "error", "text": text}, ensure_ascii=False))
             return
     sess, http, gem, prepared = built
     profile = sess.profile
@@ -425,14 +429,14 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
 
 # ------------------------------------------------------------------ «Да, слушаю» голосом бота — мгновенно, без ожидания Gemini
 # совсем короткое («Да?») TTS Gemini часто не озвучивает — фразы чуть длиннее
-# Он выбрал сам: коротко и на «вы» — «Да, сэр», «Да, шеф», «Да, босс», «Да, слышу вас, сэр/шеф/босс».
+# Он выбрал сам: на вызов — только коротко: «Да, сэр», «Да, шеф», «Да, босс» (длинное «Да, слышу вас…» — нет).
 _GREETINGS = {
-    "ru": ["Да, {hon}.", "Да, слышу вас, {hon}."],
-    "uz": ["Ha, {hon}.", "Labbay, {hon}, eshitaman."],
-    "en": ["Yes, {hon}.", "Yes, {hon}, I'm listening."],
+    "ru": ["Да, {hon}."],
+    "uz": ["Labbay, {hon}."],
+    "en": ["Yes, {hon}."],
 }
-_GREETINGS_PLAIN = {"ru": ["Да, слушаю вас.", "Слушаю вас."], "uz": ["Labbay, eshitaman."], "en": ["Yes, I'm listening."]}
-GREETINGS_VERSION = 3
+_GREETINGS_PLAIN = {"ru": ["Да?", "Слушаю."], "uz": ["Labbay?"], "en": ["Yes?"]}
+GREETINGS_VERSION = 4
 _HON = {"shef": [("шеф", "shef", "boss")], "ser": [("сэр", "ser", "sir")], "boss": [("босс", "boss", "boss")],
         "mix": [("сэр", "ser", "sir"), ("шеф", "shef", "boss"), ("босс", "boss", "boss")]}
 
@@ -553,6 +557,20 @@ async def greetings(uid: int) -> dict[str, Any]:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
+    # уже записанные раньше фразы (прошлые версии) берём как есть — без Gemini
+    ready: dict[str, str] = {}
+    for old in data_dir().glob(f"greetings_v*_{persona.voice}_{persona.lang}_{persona.honorific}.json"):
+        try:
+            ready.update({c["text"]: c["wav"] for c in json.loads(old.read_text(encoding="utf-8")).get("clips", [])})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if all(t in ready for t in texts):
+        out = {"key": key, "clips": [{"text": t, "wav": ready[t]} for t in texts]}
+        try:
+            cache_file.write_text(json.dumps(out), encoding="utf-8")
+        except OSError:
+            logger.warning("greetings not cached", exc_info=True)
+        return out
     pcms = await asyncio.gather(*(_live_say(uid, persona, t) for t in texts), return_exceptions=True)
     clips = [{"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()} for t, pcm in zip(texts, pcms) if isinstance(pcm, bytes) and pcm]
     out = {"key": key, "clips": clips}

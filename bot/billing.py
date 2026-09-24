@@ -191,7 +191,8 @@ def rate_limited() -> None:
 
 def is_billing_error(status: int | None, text: str = "") -> bool:
     low = str(text or "").lower()
-    return status == 402 or "payment required" in low or ("prepay" in low and "balance" in low) or "insufficient credit" in low
+    return (status == 402 or "payment required" in low or ("prepay" in low and ("balance" in low or "depleted" in low))
+            or "insufficient credit" in low or "credits are depleted" in low)
 
 
 def exhausted(detail: str = "") -> None:

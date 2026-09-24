@@ -172,13 +172,41 @@ def test_phone_conversation_stays_open_until_goodbye():
 from bot import persona as persona_mod  # noqa: E402
 
 
-def test_greetings_are_his_phrases():
-    assert phone_live.greeting_texts("ru", "mix") == ["Да, сэр.", "Да, шеф.", "Да, босс.", "Да, слышу вас, сэр.",
-                                                      "Да, слышу вас, шеф.", "Да, слышу вас, босс."]
-    assert phone_live.greeting_texts("ru", "ser") == ["Да, сэр.", "Да, слышу вас, сэр."]
-    assert all("вас" in t for t in phone_live.greeting_texts("ru", "none"))
-    assert phone_live._same_words("Да, слышу вас, сэр.", "да слышу вас сэр")
+def test_greetings_are_short_on_wake():
+    # он просил: на вызов — только коротко, без «Да, слышу вас, …»
+    assert phone_live.greeting_texts("ru", "mix") == ["Да, сэр.", "Да, шеф.", "Да, босс."]
+    assert phone_live.greeting_texts("ru", "ser") == ["Да, сэр."]
+    assert all(len(t.split()) <= 2 for t in phone_live.greeting_texts("ru", "none"))
+    assert phone_live._same_words("Да, сэр.", "да сэр")
     assert not phone_live._same_words("Да, сэр, я здесь", "Да, сэр.")
+
+
+def test_short_greetings_reuse_already_recorded_clips(tmp_path, monkeypatch):
+    """Баланс Gemini на нуле — короткие фразы берутся из уже записанных, без нового синтеза."""
+    from bot import services
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    old = {"key": "v3", "clips": [{"text": t, "wav": "UklGRg=="} for t in
+                                  ("Да, сэр.", "Да, шеф.", "Да, босс.", "Да, слышу вас, сэр.")]}
+    (tmp_path / "greetings_v3_Sulafat_ru_mix.json").write_text(json.dumps(old), encoding="utf-8")
+
+    async def persona(uid):
+        return persona_mod.Persona(lang="ru", honorific="mix")
+
+    async def no_live(*a, **k):
+        raise AssertionError("не должен синтезировать заново")
+
+    monkeypatch.setattr(services, "persona", persona)
+    monkeypatch.setattr(phone_live, "_live_say", no_live)
+    out = asyncio.run(phone_live.greetings(1))
+    assert [c["text"] for c in out["clips"]] == ["Да, сэр.", "Да, шеф.", "Да, босс."]
+    assert out["key"].startswith("v4_")
+
+
+def test_depleted_prepay_is_a_billing_error():
+    from bot import billing
+
+    assert billing.is_billing_error(None, "gemini-3.8-live: Your prepayment credits are depleted. Please go to AI Studio")
 
 
 def test_greeting_clip_is_trimmed_without_tail():

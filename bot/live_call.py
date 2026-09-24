@@ -44,6 +44,10 @@ _SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me", "test_wake_call
 _WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
+class BillingExhausted(RuntimeError):
+    """Gemini: «prepayment credits are depleted» — баланс AI Studio кончился."""
+
+
 @dataclass
 class LiveResult:
     answered: bool = False
@@ -302,6 +306,12 @@ class _Session:
             last_error = f"{model}: {getattr(msg, 'extra', None) or getattr(msg, 'data', '')!s}"[:300]
             logger.warning("live setup failed: %s", last_error)
             await ws.close()
+            from . import billing
+
+            if billing.is_billing_error(None, last_error):
+                # предоплата кончилась — другие модели тоже откажут, не перебираем все 6 вариантов
+                billing.exhausted(last_error)
+                raise BillingExhausted(last_error)
         raise RuntimeError(last_error or "live setup failed")
 
     def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
