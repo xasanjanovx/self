@@ -131,7 +131,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
 
 PHONE_RULES = (
     "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Он уже позвал тебя — НЕ здоровайся и не представляйся, сразу слушай и выполняй. "
-    "Если он сказал только «Джарвис» — НИЧЕГО не отвечай: телефон уже откликнулся «Да, слушаю» твоим голосом; молча жди команду. "
+    "Если он сказал только «Джарвис» — НИЧЕГО не отвечай: телефон уже откликнулся «Да, сэр» твоим голосом; молча жди команду. "
     "Отвечай на имя, только если придёт пометка «[Он позвал тебя по имени и ждёт…]». "
     "Телефон заблокирован и инструмент вернул need_unlock — одной фразой попроси разблокировать; "
     "придёт пометка «[Телефон разблокирован…]» — сразу сделай то, что он просил. "
@@ -311,7 +311,7 @@ class _Session:
         speech: dict[str, Any] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.persona.voice}}}
         gen: dict[str, Any] = {"responseModalities": ["AUDIO"], "speechConfig": speech}
         tools: list[dict[str, Any]] = [{"functionDeclarations": tool_declarations(self.mode)}]
-        if rich:
+        if rich and not self.persona.mirror:  # отвечает на языке вопроса — язык речи не фиксируем
             speech["languageCode"] = LANG_CODES.get(self.persona.lang, "uz-UZ")
         return {"setup": {
             "model": f"models/{model}",

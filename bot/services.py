@@ -295,9 +295,25 @@ async def persona(uid: int):
     from .persona import Persona
 
     if not db.available("assistant_settings"):
-        return Persona()
+        return persona_overrides(uid, Persona())
     row = await cache.remember(uid, ("persona",), 600, lambda: db.get_assistant_settings(uid))
-    return Persona.from_row(row)
+    return persona_overrides(uid, Persona.from_row(row))
+
+
+def persona_overrides(uid: int, p):  # noqa: ANN001, ANN201
+    """Голосовые настройки, которых нет в таблице: DATA_DIR/persona_<uid>.json, например {"mirror": true} —
+    отвечать голосом на языке вопроса (он говорит по-узбекски, по-русски и по-английски вперемешку)."""
+    import json
+
+    from .tg_user import data_dir
+
+    try:
+        extra = json.loads((data_dir() / f"persona_{uid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return p
+    if isinstance(extra, dict) and "mirror" in extra:
+        p.mirror = bool(extra["mirror"])
+    return p
 
 
 async def save_persona(uid: int, fields: dict[str, Any]) -> None:

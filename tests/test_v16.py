@@ -166,3 +166,72 @@ def test_phone_conversation_stays_open_until_goodbye():
     assert "НЕ закрывается сам" in live_call.PHONE_RULES
     assert "обращённую не к тебе" in live_call.PHONE_RULES
     assert "end_call" in live_call.PHONE_RULES
+
+
+# ------------------------------------------------------------------ 1.6.1: слышит каждое слово, «вы», язык вопроса, «Да, сэр»
+from bot import persona as persona_mod  # noqa: E402
+
+
+def test_greetings_are_his_phrases():
+    assert phone_live.greeting_texts("ru", "mix") == ["Да, сэр.", "Да, шеф.", "Да, босс.", "Да, слышу вас, сэр.",
+                                                      "Да, слышу вас, шеф.", "Да, слышу вас, босс."]
+    assert phone_live.greeting_texts("ru", "ser") == ["Да, сэр.", "Да, слышу вас, сэр."]
+    assert all("вас" in t for t in phone_live.greeting_texts("ru", "none"))
+    assert phone_live._same_words("Да, слышу вас, сэр.", "да слышу вас сэр")
+    assert not phone_live._same_words("Да, сэр, я здесь", "Да, сэр.")
+
+
+def test_greeting_clip_is_trimmed_without_tail():
+    import numpy as np
+
+    rate = 24000
+    voice = (np.sin(np.arange(rate) / 5) * 8000).astype(np.int16)
+    pcm = np.concatenate([np.zeros(rate // 5, np.int16), voice, (np.random.randn(rate // 10) * 40).astype(np.int16),
+                          np.zeros(rate // 5, np.int16)]).tobytes()
+    out = np.frombuffer(phone_live.trim_clip(pcm, rate), dtype=np.int16)
+    assert rate <= len(out) <= rate + rate // 10  # тишина и шорох по краям срезаны
+    assert abs(int(out[0])) < 50 and abs(int(out[-1])) < 50  # мягкое начало и конец — без щелчка
+
+
+def test_formal_address_in_every_language():
+    p = persona_mod.Persona(address="siz", lang="ru")
+    style = persona_mod.style_rules(p, spoken=True)
+    assert "ТОЛЬКО на «вы»" in style and "никогда «ты»" in style and "«siz»" in style
+    assert "ну вы даёте" in persona_mod.human_rules(p) and "ну ты даёшь" not in persona_mod.human_rules(p)
+
+
+def test_answers_in_the_language_of_the_question():
+    p = persona_mod.Persona(lang="ru", mirror=True, address="siz")
+    rule = persona_mod.lang_rule(p)
+    assert "на том языке, на котором он сейчас" in rule and "по-узбекски, по-русски и по-английски" in rule
+    assert "Не расслышала, повтори" not in rule and "пойми по смыслу" in rule
+    sess = live_call._Session(_profile_stub(), p, mode="phone", system="x")
+    speech = sess.setup_payload("m", rich=True)["setup"]["generationConfig"]["speechConfig"]
+    assert "languageCode" not in speech  # язык речи не фиксируем
+    fixed = live_call._Session(_profile_stub(), persona_mod.Persona(lang="ru"), mode="phone", system="x")
+    assert fixed.setup_payload("m", rich=True)["setup"]["generationConfig"]["speechConfig"]["languageCode"] == "ru-RU"
+
+
+def test_every_language_rule_knows_his_three_languages():
+    for lang in ("ru", "uz"):
+        rule = persona_mod.lang_rule(persona_mod.Persona(lang=lang))
+        assert "испанский" in rule and "Не расслышала, повтори" not in rule
+
+
+def test_mirror_is_read_from_data_dir(tmp_path, monkeypatch):
+    from bot import services
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "persona_9.json").write_text('{"mirror": true}', encoding="utf-8")
+    assert services.persona_overrides(9, persona_mod.Persona()).mirror is True
+    assert services.persona_overrides(10, persona_mod.Persona()).mirror is False
+
+
+def test_phone_waits_one_second_of_silence():
+    assert phone_live.VAD_SILENCE_MS == 1000
+
+
+def _profile_stub():
+    from bot.profile import Profile
+
+    return Profile(telegram_id=1, lang="ru", tz_name="Asia/Tashkent", currency="UZS", first_name="Тест", username="t")

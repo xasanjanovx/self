@@ -38,7 +38,8 @@ from .live_call import MAX_SECONDS, _decode, _jsonable, _send_to_chat, _Session
 logger = logging.getLogger(__name__)
 
 INPUT_RATE = 16000
-VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 700)
+# он выбрал: ждать 1 секунду тишины — не обрывать на полуслове, если задумался посреди фразы
+VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 1000)
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
 
 _TOOL_STATUS = {
@@ -424,13 +425,98 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
 
 # ------------------------------------------------------------------ «Да, слушаю» голосом бота — мгновенно, без ожидания Gemini
 # совсем короткое («Да?») TTS Gemini часто не озвучивает — фразы чуть длиннее
+# Он выбрал сам: коротко и на «вы» — «Да, сэр», «Да, шеф», «Да, босс», «Да, слышу вас, сэр/шеф/босс».
 _GREETINGS = {
-    "ru": ["Да, слушаю.", "Слушаю вас.", "Да, {hon}, я здесь."],
-    "uz": ["Ha, eshitaman.", "Labbay, eshitaman.", "Ha, {hon}, shu yerdaman."],
-    "en": ["Yes, I'm listening.", "I'm here.", "Yes, {hon}?"],
+    "ru": ["Да, {hon}.", "Да, слышу вас, {hon}."],
+    "uz": ["Ha, {hon}.", "Labbay, {hon}, eshitaman."],
+    "en": ["Yes, {hon}.", "Yes, {hon}, I'm listening."],
 }
-GREETINGS_VERSION = 2
-_HON = {"shef": ("Шеф", "Shef"), "ser": ("Сэр", "Ser"), "boss": ("Босс", "Boss"), "mix": ("Шеф", "Shef")}
+_GREETINGS_PLAIN = {"ru": ["Да, слушаю вас.", "Слушаю вас."], "uz": ["Labbay, eshitaman."], "en": ["Yes, I'm listening."]}
+GREETINGS_VERSION = 3
+_HON = {"shef": [("шеф", "shef", "boss")], "ser": [("сэр", "ser", "sir")], "boss": [("босс", "boss", "boss")],
+        "mix": [("сэр", "ser", "sir"), ("шеф", "shef", "boss"), ("босс", "boss", "boss")]}
+
+
+def greeting_texts(lang: str, honorific: str) -> list[str]:
+    col = {"ru": 0, "uz": 1, "en": 2}.get(lang, 0)
+    hons = _HON.get(honorific)
+    if not hons:
+        return list(_GREETINGS_PLAIN.get(lang, _GREETINGS_PLAIN["ru"]))
+    texts: list[str] = []
+    for t in _GREETINGS.get(lang, _GREETINGS["ru"]):
+        for h in hons:
+            text = t.format(hon=h[col])
+            texts.append(text[0].upper() + text[1:])
+    return list(dict.fromkeys(texts))
+
+
+def trim_clip(pcm: bytes, rate: int = 24000) -> bytes:
+    """Срезать тишину и шорох по краям, мягко (20 мс) начать и закончить — без щелчка и «хвоста» в конце."""
+    import numpy as np
+
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    frame = rate // 100  # 10 мс
+    n = len(x) // frame
+    if n < 5:
+        return pcm
+    energy = np.sqrt((x[: n * frame].reshape(n, frame) ** 2).mean(axis=1))
+    voiced = np.where(energy > max(300.0, float(np.percentile(energy, 90)) * 0.06))[0]
+    if not len(voiced):
+        return pcm
+    a = max(0, voiced[0] - 3) * frame
+    b = min(n, voiced[-1] + 5) * frame
+    y = x[a:b].copy()
+    fade = min(len(y) // 4, rate // 50)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        y[:fade] *= ramp
+        y[-fade:] *= ramp[::-1]
+    return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
+
+
+def _same_words(heard: str, text: str) -> bool:
+    import re
+
+    norm = lambda v: re.sub(r"[^\w]+", " ", v.lower().replace("ё", "е")).split()  # noqa: E731
+    return norm(heard) == norm(text)
+
+
+async def _live_say(uid: int, persona, text: str) -> bytes | None:  # noqa: ANN001
+    """Фраза тем же голосом, что и в разговоре (Gemini Live), слово в слово — проверяем по расшифровке."""
+    import aiohttp
+
+    from .handlers.common import profile_by_id
+
+    profile = await profile_by_id(uid)
+    for _ in range(3):
+        sess = _Session(profile, persona, mode="wake", system="Ты диктор. Произнеси ровно тот текст, что тебе дали, — "
+                        "ни слова больше и ни слова меньше, спокойно и тепло, без пауз в начале.")
+        out, said = bytearray(), []
+        try:
+            async with aiohttp.ClientSession() as http:
+                ws = await sess.connect(http)
+                await ws.send_str(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": f"Произнеси: {text}"}]}],
+                                                                "turnComplete": True}}))
+                while True:
+                    data = _decode(await asyncio.wait_for(ws.receive(), timeout=30))
+                    if data is None:
+                        break
+                    sc = data.get("serverContent") or {}
+                    for part in ((sc.get("modelTurn") or {}).get("parts") or []):
+                        if (part.get("inlineData") or {}).get("data"):
+                            out.extend(base64.b64decode(part["inlineData"]["data"]))
+                    if (t := (sc.get("outputTranscription") or {}).get("text")):
+                        said.append(t)
+                    if sc.get("turnComplete"):
+                        break
+                await ws.close()
+        except Exception:
+            logger.warning("greeting via live failed: %s", text, exc_info=True)
+            continue
+        if out and (not said or _same_words("".join(said), text)):
+            return trim_clip(bytes(out))
+        logger.info("greeting: сказала «%s» вместо «%s» — ещё раз", "".join(said), text)
+    return None
 
 
 def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
@@ -447,21 +533,14 @@ async def greetings(uid: int) -> dict[str, Any]:
     from .tg_user import data_dir
 
     persona = await services.persona(uid)
-    hon = _HON.get(persona.honorific)
-    texts = []
-    for t in _GREETINGS.get(persona.lang, _GREETINGS["ru"]):
-        if "{hon}" in t:
-            if not hon:
-                continue
-            t = t.format(hon=hon[0] if persona.lang == "ru" else hon[1])
-        texts.append(t)
+    texts = greeting_texts(persona.lang, persona.honorific)
     key = f"v{GREETINGS_VERSION}_{persona.voice}_{persona.lang}_{persona.honorific}"
     cache_file = data_dir() / f"greetings_{key}.json"
     try:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    pcms = await asyncio.gather(*(ai.synthesize(t, voice=persona.voice) for t in texts), return_exceptions=True)
+    pcms = await asyncio.gather(*(_live_say(uid, persona, t) for t in texts), return_exceptions=True)
     clips = [{"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()} for t, pcm in zip(texts, pcms) if isinstance(pcm, bytes) and pcm]
     out = {"key": key, "clips": clips}
     if len(clips) == len(texts):
