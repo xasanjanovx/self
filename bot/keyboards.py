@@ -363,9 +363,10 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
 
 
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
-                             honorific: str = "mix") -> InlineKeyboardMarkup:
-    """«Голос и характер» Джарвиса: голос, язык, ты/вы, как величать, тон, длина ответов."""
+                             honorific: str = "mix", voice_model: str = "gemini", qwen_voice: str = "Tina") -> InlineKeyboardMarkup:
+    """«Голос и характер» Джарвиса: модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
     from .persona import HONORIFICS, VOICES
+    from .qwen_live import VOICES as QWEN_VOICES
 
     uz = lang == "uz"
 
@@ -373,6 +374,11 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
         return _btn(label + (" ✓" if on else ""), data, style="primary" if on else None)
 
     rows: list[list[InlineKeyboardButton]] = []
+    # модель живого голоса — чтобы сравнить: Gemini (как было) или Qwen (Alibaba, в 3–6 раз дешевле)
+    rows.append([pick("🧠 Gemini", "jarvis:vmodel:gemini", voice_model == "gemini"),
+                 pick("🧠 Qwen · " + ("arzon" if uz else "дешевле"), "jarvis:vmodel:qwen", voice_model == "qwen")])
+    if voice_model == "qwen":
+        rows.append([pick(name, f"jarvis:qvoice:{name}", name == qwen_voice) for name in QWEN_VOICES])
     voice_row: list[InlineKeyboardButton] = []
     for key, (ru_name, uz_name) in VOICES.items():
         voice_row.append(pick(uz_name if uz else ru_name, f"jarvis:voice:{key}", key == voice))

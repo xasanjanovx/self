@@ -311,9 +311,33 @@ def persona_overrides(uid: int, p):  # noqa: ANN001, ANN201
         extra = json.loads((data_dir() / f"persona_{uid}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return p
-    if isinstance(extra, dict) and "mirror" in extra:
+    if not isinstance(extra, dict):
+        return p
+    if "mirror" in extra:
         p.mirror = bool(extra["mirror"])
+    if extra.get("voice_model") in {"gemini", "qwen"}:
+        p.voice_model = str(extra["voice_model"])
+    if extra.get("qwen_voice"):
+        p.qwen_voice = str(extra["qwen_voice"])
     return p
+
+
+def save_persona_extra(uid: int, fields: dict[str, Any]) -> None:
+    """Голосовые настройки вне таблицы (модель голоса, голос Qwen, язык вопроса) — в DATA_DIR/persona_<uid>.json."""
+    import json
+
+    from .tg_user import data_dir
+
+    path = data_dir() / f"persona_{uid}.json"
+    try:
+        extra = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    extra.update(fields)
+    path.write_text(json.dumps(extra, ensure_ascii=False), encoding="utf-8")
+    cache.invalidate(uid, "persona")
 
 
 async def save_persona(uid: int, fields: dict[str, Any]) -> None:

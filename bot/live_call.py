@@ -336,6 +336,20 @@ class _Session:
         from .context import settings
 
         last_error = None
+        # в настройках выбран Qwen (Alibaba, в 3–6 раз дешевле) — сначала он; не вышло — как обычно Gemini.
+        # Подъём на фаджр — всегда Gemini: там арабские дуа, которые должны звучать точно.
+        if self.persona.voice_model == "qwen" and self.mode in {"phone", "assistant"}:
+            from . import qwen_live
+
+            if qwen_live.available():
+                try:
+                    ws = await qwen_live.connect(self.setup_payload(qwen_live.MODEL, rich=False), voice=self.persona.qwen_voice)
+                    self.result.model = qwen_live.MODEL
+                    logger.info("live: модель %s, голос %s, язык %s", qwen_live.MODEL, self.persona.qwen_voice, self.persona.lang)
+                    return ws
+                except Exception as exc:
+                    logger.warning("live: Qwen недоступен (%s) — Gemini", str(exc)[:200])
+                    qwen_live.report_failure(str(exc))
         # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него
         for model, rich in ((m, r) for m in MODELS for r in (True, False)):
             try:

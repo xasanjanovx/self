@@ -41,6 +41,8 @@ class Persona:
     morning_voice: bool = False  # утренняя сводка голосом
     alert_calls: bool = False    # звонить, если важное (бюджет, долг сегодня, цель отстаёт)
     mirror: bool = False         # голосом отвечать на языке вопроса (uz / ru / en), lang — основной
+    voice_model: str = "gemini"  # живой голос: gemini (Gemini 3.8 Live) | qwen (Qwen3.8-Omni, Alibaba — дешевле)
+    qwen_voice: str = "Tina"     # голос Qwen (женские, говорят по-русски)
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None) -> "Persona":

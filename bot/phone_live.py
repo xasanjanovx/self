@@ -94,6 +94,7 @@ class SpeechGate:
             self._pre_s -= len(self._pre.popleft()) / 2 / INPUT_RATE
         return []
 
+
 _TOOL_STATUS = {
     "web_search": "Ищу в интернете…", "weather": "Смотрю погоду…", "currency_rates": "Смотрю курс…",
     "telegram_read": "Читаю Telegram…", "telegram_send": "Готовлю сообщение…", "deep_analysis": "Анализирую…",
@@ -628,6 +629,24 @@ async def _live_say(uid: int, persona, text: str) -> bytes | None:  # noqa: ANN0
     return None
 
 
+async def _qwen_say(persona, text: str) -> bytes | None:  # noqa: ANN001
+    """Отклик голосом Qwen — слово в слово (по его расшифровке и нашему распознавателю)."""
+    from . import qwen_live
+
+    for _ in range(3):
+        try:
+            pcm, said = await qwen_live.say(text, voice=persona.qwen_voice)
+        except Exception:
+            logger.warning("greeting via qwen failed: %s", text, exc_info=True)
+            return None
+        if pcm and (not said or _same_words(said, text)):
+            clip = trim_clip(pcm)
+            if await _clear(clip, text, persona.lang):
+                return clip
+        logger.info("greeting (qwen): сказала «%s» вместо «%s» — ещё раз", said, text)
+    return None
+
+
 async def _clear(clip: bytes, text: str, lang: str) -> bool:
     """Русский отклик ещё раз слушаем своим распознавателем: «Да, босс» не должно звучать как «даблас»."""
     if lang != "ru":
@@ -651,9 +670,14 @@ def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
 async def greetings(uid: int) -> dict[str, Any]:
     from .tg_user import data_dir
 
+    from . import qwen_live
+
     persona = await services.persona(uid)
     texts = greeting_texts(persona.lang, persona.honorific)
-    key = f"v{GREETINGS_VERSION}_{persona.voice}_{persona.lang}_{persona.honorific}"
+    # разговор идёт голосом Qwen — и «Да, сэр» его голосом, чтобы голос не менялся посреди разговора
+    use_qwen = persona.voice_model == "qwen" and qwen_live.available()
+    voice_key = f"qwen-{persona.qwen_voice}" if use_qwen else persona.voice
+    key = f"v{GREETINGS_VERSION}_{voice_key}_{persona.lang}_{persona.honorific}"
     cache_file = data_dir() / f"greetings_{key}.json"
     try:
         return json.loads(cache_file.read_text(encoding="utf-8"))
@@ -661,7 +685,7 @@ async def greetings(uid: int) -> dict[str, Any]:
         pass
     # уже записанные раньше фразы (прошлые версии) берём как есть — без Gemini
     ready: dict[str, str] = {}
-    for old in data_dir().glob(f"greetings_v*_{persona.voice}_{persona.lang}_{persona.honorific}.json"):
+    for old in data_dir().glob(f"greetings_v*_{voice_key}_{persona.lang}_{persona.honorific}.json"):
         try:
             ready.update({c["text"]: c["wav"] for c in json.loads(old.read_text(encoding="utf-8")).get("clips", [])})
         except (OSError, ValueError, KeyError, TypeError):
@@ -673,7 +697,8 @@ async def greetings(uid: int) -> dict[str, Any]:
         except OSError:
             logger.warning("greetings not cached", exc_info=True)
         return out
-    pcms = await asyncio.gather(*(_live_say(uid, persona, t) for t in texts), return_exceptions=True)
+    say = (lambda t: _qwen_say(persona, t)) if use_qwen else (lambda t: _live_say(uid, persona, t))
+    pcms = await asyncio.gather(*(say(t) for t in texts), return_exceptions=True)
     clips = [{"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()} for t, pcm in zip(texts, pcms) if isinstance(pcm, bytes) and pcm]
     out = {"key": key, "clips": clips}
     if len(clips) == len(texts):

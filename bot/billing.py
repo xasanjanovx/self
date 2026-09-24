@@ -33,7 +33,10 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-2.5-pro-preview-tts": {"text_in": 1.0, "audio_out": 20.0},
     "gemini-2.5-flash-lite": {"text_in": 0.1, "audio_in": 0.3, "image_in": 0.1, "text_out": 0.4},
     "gemini-2.5-flash": {"text_in": 0.3, "audio_in": 1.0, "image_in": 0.3, "text_out": 2.5},
+    # Alibaba Model Studio, Сингапур (alibabacloud.com/help/en/model-studio/model-pricing) — отдельный счёт, не AI Studio
+    "qwen3.8-omni-flash-realtime": {"text_in": 0.23, "audio_in": 0.93, "image_in": 0.23, "text_out": 0.70, "audio_out": 1.87},
 }
+OTHER_PROVIDERS = ("qwen",)  # их расход — отдельной строкой: он не уменьшает предоплату Gemini и не входит в её лимит
 _DEFAULT = {"text_in": 1.0, "audio_in": 3.0, "image_in": 1.0, "text_out": 5.0, "audio_out": 12.0}
 
 LOW_DAYS = 3.0        # «хватит меньше чем на 3 дня» — предупреждаем
@@ -174,6 +177,12 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
         return 0.0
     st = _load()
     day = st["days"].setdefault(_today(), {"usd": 0.0, "calls": 0, "kinds": {}})
+    provider = next((p for p in OTHER_PROVIDERS if str(model).startswith(p)), None)
+    if provider:
+        other = day.setdefault("other", {})
+        other[provider] = round(float(other.get(provider) or 0) + usd, 6)
+        _schedule_save()
+        return usd
     day["usd"] = round(day["usd"] + usd, 6)
     day["calls"] = int(day.get("calls") or 0) + 1
     day["kinds"][kind] = round(float(day["kinds"].get(kind) or 0) + usd, 6)
@@ -265,6 +274,9 @@ def status() -> dict[str, Any]:
         "daily_average_usd": round(_daily_burn(st), 3),
         "calls_today": int((days.get(today) or {}).get("calls") or 0),
         "by_kind_today_usd": {k: round(v * factor, 3) for k, v in ((days.get(today) or {}).get("kinds") or {}).items()},
+        # Qwen (Alibaba) — отдельный счёт, для сравнения с Gemini
+        "qwen_today_usd": round(float(((days.get(today) or {}).get("other") or {}).get("qwen") or 0), 4),
+        "qwen_month_usd": round(sum(float((v.get("other") or {}).get("qwen") or 0) for k, v in days.items() if k.startswith(month)), 3),
         "calibration_factor": round(factor, 2),
     }
     anchor = st.get("anchor")

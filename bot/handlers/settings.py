@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import Any
 
 from aiogram import F, Router
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
@@ -24,7 +25,7 @@ from ..context import db
 from ..keyboards import _btn, notify_keyboard, reminders_keyboard, settings_keyboard
 from ..profile import Profile, h
 from ..states import BotStates
-from .common import answer_now, get_profile, safe_edit
+from .common import answer_now, get_profile, safe_delete, safe_edit
 
 router = Router(name="settings")
 logger = logging.getLogger(__name__)
@@ -417,12 +418,22 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
         f" · <b>{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}</b>",
         f"🎭 {'Ohang' if uz else 'Тон'}: <b>{tone[1] if uz else tone[0]}</b> · {'javoblar' if uz else 'ответы'}: <b>{length[1] if uz else length[0]}</b>",
         f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
+        f"🧠 {'Jonli ovoz modeli' if uz else 'Модель живого голоса'}: <b>"
+        + ("Qwen3.8 Omni (Alibaba)" + f" · {p.qwen_voice}" if p.voice_model == "qwen" else "Gemini 3.8 Live") + "</b>",
     ]
+    from .. import qwen_live
+
+    if p.voice_model == "qwen" and not qwen_live.available():
+        lines.append(profile.tr("⚠️ Ключа Alibaba нет — пришлите боту <code>/qwen ВАШ_КЛЮЧ</code>. Пока говорю через Gemini.",
+                                "⚠️ Alibaba kaliti yo'q — botga <code>/qwen KALIT</code> yuboring. Hozircha Gemini orqali."))
+    elif p.voice_model == "qwen":
+        lines.append(profile.tr("<i>Телефон и звонки «позвони мне» — Qwen, подъём на фаджр — Gemini (точные арабские дуа).</i>",
+                                "<i>Telefon va «qo'ng'iroq qil» — Qwen, bomdodga uyg'otish — Gemini.</i>"))
     text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
     if notice:
         text += f"\n\n{notice}"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
-                                  verbosity=p.verbosity, honorific=p.honorific)
+                                  verbosity=p.verbosity, honorific=p.honorific, voice_model=p.voice_model, qwen_voice=p.qwen_voice)
     await _show(target, text, kb)
 
 
@@ -445,6 +456,18 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(BotStates.waiting_alarm_time)
         await safe_edit(callback, profile.tr("⏰ Во сколько будить? Например <code>6:30</code>", "⏰ Soat nechada uyg'otay? Masalan <code>6:30</code>"),
                         InlineKeyboardMarkup(inline_keyboard=[[_btn(profile.tr("Отмена", "Bekor"), "settings:wake")]]))
+        return
+    if action in {"vmodel", "qvoice"}:  # модель живого голоса и голос Qwen — в файле, не в таблице
+        from .. import qwen_live
+
+        if action == "vmodel" and value in {"gemini", "qwen"}:
+            services.save_persona_extra(profile.telegram_id, {"voice_model": value})
+        elif action == "qvoice" and value in qwen_live.VOICES:
+            services.save_persona_extra(profile.telegram_id, {"qwen_voice": value})
+        await answer_now(callback, "✅")
+        await render_jarvis(callback, profile)
+        if action == "qvoice" or (value == "qwen" and qwen_live.available()):
+            await _send_voice_sample(callback, profile)
         return
     if not await db.ensure_available("assistant_settings"):
         await answer_now(callback, profile.tr("Нужна миграция 009", "009 migratsiyasi kerak"), alert=True)
@@ -497,7 +520,12 @@ async def _send_voice_sample(callback: CallbackQuery, profile: Profile) -> None:
               else f"Hello, {name}. I'm Jarvis, ready to help." if p.lang == "en"
               else f"Ассалому алайкум, {name}. Я Джарвис, готова помочь.")
     try:
-        pcm = await ai.synthesize(phrase, voice=p.voice)
+        from .. import qwen_live
+
+        if p.voice_model == "qwen" and qwen_live.available():
+            pcm, _ = await qwen_live.say(phrase, voice=p.qwen_voice)
+        else:
+            pcm = await ai.synthesize(phrase, voice=p.voice)
         ogg = await voice_mod.pcm_to_ogg(pcm) if pcm else None
         if not ogg:
             return
@@ -604,3 +632,34 @@ async def cb_brief_text(callback: CallbackQuery) -> None:
         logger.exception("morning brief text failed")
         return
     await screen_mod.send_ephemeral(callback.bot, profile.telegram_id, text, keep_previous=True)
+
+
+# ------------------------------------------------------------------ ключ Alibaba (Qwen) — «/qwen КЛЮЧ [WORKSPACE_ID]»
+@router.message(Command("qwen"))
+async def cmd_qwen_key(message: Message, command: CommandObject, state: FSMContext) -> None:
+    """Ключ Model Studio для живого голоса Qwen. Сообщение с ключом сразу удаляем из чата."""
+    from .. import qwen_live
+    from ..context import settings as app_settings
+
+    await safe_delete(message)
+    if message.from_user is None or message.from_user.id not in app_settings.allowed_telegram_ids:
+        return
+    parts = (command.args or "").split()
+    if not parts:
+        await message.answer(
+            "🔑 <b>Qwen (Alibaba Model Studio)</b>\n"
+            + ("Ключ сохранён." if qwen_live.available() else "Ключа пока нет.")
+            + "\nПришлите: <code>/qwen КЛЮЧ</code> (ключ из Model Studio → API Key, регион Singapore). Если ключ из "
+              "workspace — <code>/qwen КЛЮЧ WORKSPACE_ID</code>.")
+        return
+    qwen_live.save_key(parts[0], parts[1] if len(parts) > 1 else "")
+    note = await message.answer("🔑 Ключ Alibaba сохранён (сообщение с ним удалено). Проверяю связь с Qwen…")
+    problem = await qwen_live.check()
+    text = ("✅ <b>Qwen отвечает.</b> Выберите его: Джарвис → «Голос и характер» → 🧠 Qwen. Сравнить расход — спросите "
+            "Джарвиса «сколько потратили сегодня?»." if not problem else
+            f"⚠️ Qwen не ответил: <code>{problem}</code>\nПроверьте, что ключ из региона Singapore и на счёте Alibaba есть "
+            "бесплатная квота или деньги. Если ключ из workspace — пришлите <code>/qwen КЛЮЧ WORKSPACE_ID</code>.")
+    try:
+        await note.edit_text(text)
+    except Exception:
+        await message.answer(text)
