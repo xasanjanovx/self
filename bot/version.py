@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "1.4"          # выпуск Джарвиса (бот + приложение на телефоне); меняется вместе с APK
-APP_VERSION = "1.4"      # последняя версия приложения jarvis-android
+VERSION = "1.6"          # выпуск Джарвиса (бот + приложение на телефоне); меняется вместе с APK
+APP_VERSION = "1.6"      # последняя версия приложения jarvis-android
 
 _ROOT = Path(__file__).resolve().parent.parent
 

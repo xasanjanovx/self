@@ -271,8 +271,16 @@ class PhoneLive(_Session):
         await self.to_gemini(ws, {"toolResponse": {"functionResponses": responses}})
 
 
-# ------------------------------------------------------------------ точка входа
-async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN001
+# ------------------------------------------------------------------ заготовка разговора
+# Пока сервер проверяет «Джарвис» (голос и слово, ~0.1–0.2 с), он уже собирает промпт и подключается к Gemini:
+# подтвердили — телефон получает готовую сессию, и команда, сказанная на одном дыхании с именем, уходит сразу.
+PREWARM_TTL = 15.0
+_last_device: dict[int, dict[str, Any]] = {}
+_warm: dict[int, tuple[float, asyncio.Task]] = {}
+
+
+async def _build(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any, float]:
+    """(сессия, aiohttp-клиент, соединение с Gemini, сколько собирали данные)."""
     import aiohttp
 
     from . import agent_tools_extra as extra
@@ -282,19 +290,106 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
     profile, persona, memory = await asyncio.gather(profile_by_id(uid), services.persona(uid), extra.memory_prompt(uid))
     snapshot = await phone._snapshot(profile)
     prepared = time.monotonic() - started
-    device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
     system = live_call.system_instruction(profile, persona, mode="phone", snapshot=snapshot, memory=memory)
     system += phone.device_prompt(device) + billing.voice_note()
-    sess = PhoneLive(profile, persona, system=system, phone_ws=phone_ws, device=device)
-    async with aiohttp.ClientSession() as http:
+    sess = PhoneLive(profile, persona, system=system, phone_ws=None, device=dict(device))
+    http = aiohttp.ClientSession()
+    try:
+        gem = await sess.connect(http)
+    except BaseException:
+        await http.close()
+        raise
+    return sess, http, gem, prepared
+
+
+async def _close_built(task: asyncio.Task) -> None:
+    try:
+        _sess, http, gem, _ = await task
+    except BaseException:
+        return
+    try:
+        await gem.close()
+    finally:
+        await http.close()
+
+
+def prewarm(uid: int) -> None:
+    """Начать собирать разговор, пока проверяется «Джарвис». Телефон ещё ни разу не подключался — не с чем."""
+    device = _last_device.get(uid)
+    if device is None:
+        return
+    discard(uid)
+    task = asyncio.create_task(_build(uid, device), name="phone-prewarm")
+    _warm[uid] = (time.monotonic(), task)
+
+    def expire() -> None:
+        if _warm.get(uid, (0, None))[1] is task:
+            discard(uid)
+
+    asyncio.get_running_loop().call_later(PREWARM_TTL, expire)
+
+
+def discard(uid: int) -> None:
+    """Заготовка не пригодилась (не «Джарвис» или телефон так и не подключился)."""
+    item = _warm.pop(uid, None)
+    if item is None:
+        return
+    task = item[1]
+    if task.done():
+        asyncio.create_task(_close_built(task))
+    else:
+        task.cancel()
+
+
+async def _take(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any, float] | None:
+    item = _warm.pop(uid, None)
+    if item is None or time.monotonic() - item[0] > PREWARM_TTL:
+        if item is not None:
+            asyncio.create_task(_close_built(item[1]))
+        return None
+    try:
+        sess, http, gem, prepared = await asyncio.wait_for(asyncio.shield(item[1]), timeout=8)
+    except BaseException:
+        if not item[1].done():
+            item[1].cancel()
+        return None
+    if bool(sess.turn.device.get("duplex")) != bool(device.get("duplex")) or gem.closed:
+        # настройка «перебивать голосом» поменялась — VAD в заготовке другой
+        await _close_built(item[1])
+        return None
+    return sess, http, gem, prepared
+
+
+# ------------------------------------------------------------------ точка входа
+async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN001
+    from . import agent_tools_extra as extra
+
+    started = time.monotonic()
+    device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
+    _last_device[uid] = dict(device)
+    built = await _take(uid, device)
+    warm = built is not None
+    if built is None:
         try:
-            gem = await sess.connect(http)
+            built = await _build(uid, device)
         except Exception as exc:
             logger.warning("phone live: Gemini недоступен: %s", exc)
-            await sess.to_phone({"type": "error", "text": "Не удалось подключиться к Gemini"})
+            await phone_ws.send_str(json.dumps({"type": "error", "text": "Не удалось подключиться к Gemini"}, ensure_ascii=False))
             return
+    sess, http, gem, prepared = built
+    profile = sess.profile
+    sess.phone_ws = phone_ws
+    if warm:
+        # заготовка собрана с прошлыми данными телефона — свежие (заряд, пропущенные, блокировка) пометкой
+        stale = phone.device_prompt(sess.turn.device)
+        sess.turn.device.update(device)
+        fresh = phone.device_prompt(device)
+        if fresh.strip() and fresh != stale:
+            await sess.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": f"[Сейчас.{fresh}]"}]}],
+                                                         "turnComplete": False}})
+    try:
         await sess.to_phone({"type": "ready", "model": sess.result.model})
-        logger.info("phone live %s: готов за %.1f с (данные %.1f с)", uid, time.monotonic() - started, prepared)
+        logger.info("phone live %s: готов за %.1f с (данные %.1f с%s)", uid, time.monotonic() - started, prepared, ", заготовка" if warm else "")
         if str(hello.get("text") or "").strip():
             await sess.to_phone({"type": "user", "text": str(hello["text"]), "final": True})
             sess.user_lines.append(str(hello["text"]))
@@ -317,6 +412,8 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
                 pass
             sess._flush_transcript()
             undo.end_turn(uid)
+    finally:
+        await http.close()
     said = " / ".join(x for x in sess.user_lines if x)[:400]
     answered = " / ".join(x for x in sess.jarvis_lines if x)[:400]
     logger.info("phone live %s: %.0f с, действия %s, «%s» → «%s»", uid, time.monotonic() - started, sess.result.actions, said[:80], answered[:80])

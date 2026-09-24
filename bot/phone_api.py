@@ -168,7 +168,12 @@ _WAKE_PROMPT = (
 
 
 async def wake_check(request: web.Request) -> web.Response:
-    """Телефон решил, что услышал «Джарвис», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова."""
+    """Телефон решил, что услышал «Джарвис», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова.
+
+    Голос (свой отпечаток, ~0.05 с) и слово (локальный распознаватель, ~0.05–0.1 с) — параллельно; Gemini — только
+    если распознаватель недоступен или ничего не расслышал. Пока проверяем, сервер уже готовит разговор с Gemini
+    (phone_live.prewarm): подтвердили — телефон подключается к готовой сессии.
+    """
     data = await _json(request)
     try:
         audio = base64.b64decode(str(data.get("audio") or ""), validate=False)
@@ -176,21 +181,27 @@ async def wake_check(request: web.Request) -> web.Response:
         return web.json_response({"error": "bad audio"}, status=400)
     if not audio:
         return web.json_response({"error": "audio required"}, status=400)
+    from . import phone_live, voiceprint, wakeword
+
     started = time.monotonic()
     uid = owner_id()
-    # 1) голос — его? (свой отпечаток, ~0.05 с): чужой голос и телевизор отсекаем сразу, без Gemini
     if uid is not None:
-        from . import voiceprint
-
-        voice = await voiceprint.verify(uid, audio)
-        if not voice.get("ok"):
-            logger.info("wake check: чужой голос (сходство %s, z %s, порог %s) за %.2f с", voice.get("score"), voice.get("z"),
-                        voice.get("threshold"), time.monotonic() - started)
-            return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
-        # 2) детектор уверен, что это «Джарвис», а голос его — не ждём Gemini
-        if data.get("confident"):
-            logger.info("wake check: его голос (%s, z %s) за %.2f с", voice.get("score"), voice.get("z"), time.monotonic() - started)
-            return web.json_response({"ok": True, "voice": voice.get("score"), "fast": True})
+        phone_live.prewarm(uid)
+    voice, heard = await asyncio.gather(voiceprint.verify(uid, audio) if uid is not None else _no_voice(), wakeword.check(audio))
+    took = time.monotonic() - started
+    if not voice.get("ok"):
+        # чужой голос и телевизор отсекаем сразу
+        logger.info("wake check: чужой голос (сходство %s, z %s, порог %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
+                    voice.get("threshold"), took, (heard or {}).get("text", ""))
+        _reject(uid)
+        return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
+    if heard is not None and (heard["text"] or data.get("confident")):
+        ok = heard["name"] or (not heard["text"] and bool(data.get("confident")))
+        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
+                    voice.get("score"), voice.get("z"), heard["ms"])
+        if not ok:
+            _reject(uid)
+        return web.json_response({"ok": ok, "text": heard["text"], "command": bool(heard["after"]), "voice": voice.get("score"), "fast": True})
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
                                 model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
@@ -201,8 +212,22 @@ async def wake_check(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "unchecked": True})
     ok = bool(verdict.get("name"))
     after = str(verdict.get("after") or "").strip()
-    logger.info("wake check: %s за %.1f с «%s»", "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
+    logger.info("wake check: %s за %.1f с «%s» (Gemini)", "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
+    if not ok:
+        _reject(uid)
     return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
+
+
+async def _no_voice() -> dict[str, Any]:
+    return {"ok": True}
+
+
+def _reject(uid: int | None) -> None:
+    """Не «Джарвис» — заготовленный разговор с Gemini не нужен."""
+    if uid is not None:
+        from . import phone_live
+
+        phone_live.discard(uid)
 
 
 _CALL_COMMAND_PROMPT = (
@@ -394,6 +419,9 @@ async def start() -> bool:
         from . import voiceprint
 
         asyncio.create_task(voiceprint.warm(), name="voiceprint-warm")
+        from . import wakeword
+
+        asyncio.create_task(wakeword.warm(), name="wakeword-warm")
     return True
 
 
