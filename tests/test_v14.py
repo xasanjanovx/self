@@ -395,3 +395,11 @@ def test_voice_status_without_enrollment(tmp_path, monkeypatch):
     import asyncio
 
     assert asyncio.run(voiceprint.verify(5, b""))["ok"] is True   # не записан — не мешаем
+
+
+def test_voice_z_threshold_bounds():
+    from bot import voiceprint
+
+    assert voiceprint.calibrate_z([]) == 0.8
+    assert voiceprint.calibrate_z([0.1, 0.2, 0.3]) == voiceprint.Z_MIN      # чужие до ~0.5 — ниже 0.55 не опускаемся
+    assert voiceprint.calibrate_z([2.0, 2.2, 1.9]) == voiceprint.Z_MAX      # слишком строго самого отсечёт

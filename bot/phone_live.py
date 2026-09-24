@@ -171,10 +171,15 @@ class PhoneLive(_Session):
                 elif kind == "image" and data.get("data"):
                     # кадр живой камеры (JPEG ~1 в секунду) — модель «видит», что он показывает
                     await self.to_gemini(gem, {"realtimeInput": {"video": {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")}}})
-                elif kind == "camera":
-                    note = ("[Камера включена — ты видишь то, что он показывает. Кадры идут потоком.]" if data.get("on")
-                            else "[Камера выключена — ты больше ничего не видишь.]")
+                elif kind in {"camera", "screen"}:
+                    what = "Камера" if kind == "camera" else "Показ экрана"
+                    seen = "то, что он показывает камерой" if kind == "camera" else "экран его телефона (переведи, объясни, прочитай — что попросит)"
+                    note = (f"[{what} включена — ты видишь {seen}. Кадры идут потоком.]" if data.get("on")
+                            else f"[{what} выключена — ты больше ничего не видишь.]")
                     await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
+                elif kind == "note" and str(data.get("text") or "").strip():
+                    # служебная пометка от телефона («вот последние 2 фото из галереи») — модель отвечает сама
+                    await self.say_text(gem, f"[{str(data['text'])[:300]}]")
                 elif kind == "action_error":
                     await self.say_text(gem, f"[Действие на телефоне не удалось: {str(data.get('text') or '')[:200]}. Коротко скажи ему об этом.]")
                 elif kind == "bye":

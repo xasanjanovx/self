@@ -184,12 +184,12 @@ async def wake_check(request: web.Request) -> web.Response:
 
         voice = await voiceprint.verify(uid, audio)
         if not voice.get("ok"):
-            logger.info("wake check: чужой голос (%.2f < %.2f) за %.2f с", voice.get("score") or 0, voice.get("threshold") or 0,
-                        time.monotonic() - started)
+            logger.info("wake check: чужой голос (сходство %s, z %s, порог %s) за %.2f с", voice.get("score"), voice.get("z"),
+                        voice.get("threshold"), time.monotonic() - started)
             return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
         # 2) детектор уверен, что это «Джарвис», а голос его — не ждём Gemini
         if data.get("confident"):
-            logger.info("wake check: его голос (%s) за %.2f с", voice.get("score"), time.monotonic() - started)
+            logger.info("wake check: его голос (%s, z %s) за %.2f с", voice.get("score"), voice.get("z"), time.monotonic() - started)
             return web.json_response({"ok": True, "voice": voice.get("score"), "fast": True})
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],

@@ -5,6 +5,10 @@
 даёт мало данных: у одного и того же голоса на 1–2 с похожесть гуляет 0.3–0.7, у чужих — до ~0.27).
 Порог подбирается под человека по его же коротким записям — строго, но так, чтобы его не отсекало.
 
+Сырая похожесть на коротком «Джарвис» у чужих голосов бывает до ~0.58, поэтому решаем по нормированной:
+насколько запись ближе к нему, чем к «толпе» из 12 других голосов (z-норма, models/cohort_live.npy).
+Проверено на голосах Gemini: свой — z 0.4…1.5, чужие — не выше 0.5; порог — по его собственной записи.
+
 Модель — DATA_DIR/models (том, переживает пересборку); нет модели или библиотеки — проверка выключена,
 Джарвис работает как раньше. Отпечаток — DATA_DIR/voiceprint_<uid>.json.
 """
@@ -26,11 +30,14 @@ MODEL_NAME = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
 MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/{MODEL_NAME}"
 RATE = 16000
 WINDOW_S = 3.0          # длинное чтение режем на куски по 3 с — отпечаток устойчивее
-MIN_THRESHOLD = 0.30    # ниже — чужие начнут проходить (у чужих голосов до ~0.27)
+MIN_THRESHOLD = 0.30    # сырая похожесть: ниже — точно не он
 MAX_THRESHOLD = 0.55    # выше — его самого будет отсекать на коротком «Джарвис»
+Z_MIN, Z_MAX = 0.55, 1.2  # нормированная: чужие голоса до ~0.5, его — от ~0.4 (строго: лучше иногда повторить)
+COHORT_FILE = "cohort_live.npy"
 
 _extractor: Any = None
 _load_error: str | None = None
+_cohort: Any = None
 _lock = asyncio.Lock()
 
 
@@ -80,6 +87,36 @@ async def extractor() -> Any | None:
 
 def available() -> bool:
     return _extractor is not None
+
+
+def cohort():
+    """Векторы «толпы» (12 чужих голосов) для нормировки; нет файла — None (решаем по сырой похожести)."""
+    global _cohort
+    if _cohort is None:
+        import numpy as np
+
+        path = _model_path().parent / COHORT_FILE
+        _cohort = np.load(path) if path.exists() else False
+    return _cohort if _cohort is not False else None
+
+
+def zscore(vp, e) -> tuple[float, float | None]:
+    """(сырая похожесть, насколько ближе к нему, чем к толпе — в стандартных отклонениях толпы)."""
+    s = float(vp @ e)
+    c = cohort()
+    if c is None or not len(c):
+        return s, None
+    cs = c @ e
+    return s, float((s - cs.mean()) / (cs.std() + 1e-6))
+
+
+def calibrate_z(zs: list[float]) -> float:
+    import numpy as np
+
+    if not zs:
+        return 0.8
+    low = float(np.percentile(zs, 10))
+    return round(min(Z_MAX, max(Z_MIN, low - 0.15)), 3)
 
 
 # ------------------------------------------------------------------ звук → вектор
@@ -158,16 +195,19 @@ async def enroll(uid: int, wake_wavs: list[bytes], reading_wav: bytes | None) ->
         vp = np.mean(base, axis=0)
         vp /= np.linalg.norm(vp) + 1e-9
         # проверяем на тех же коротких «Джарвис» — ровно так, как будет при срабатывании
-        scores = [float(vp @ e) for e in short_emb]
+        pairs = [zscore(vp, e) for e in short_emb]
+        scores = [p[0] for p in pairs]
+        zs = [p[1] for p in pairs if p[1] is not None]
         threshold = calibrate(scores)
+        z_threshold = calibrate_z(zs) if zs else None
         # итоговый отпечаток — и чтение, и короткие (ближе к тому, что услышим утром)
         full = np.mean(long_emb + short_emb, axis=0)
         full /= np.linalg.norm(full) + 1e-9
-        data = {"vp": [round(float(v), 6) for v in full], "threshold": threshold, "created": time.time(),
+        data = {"vp": [round(float(v), 6) for v in full], "threshold": threshold, "z_threshold": z_threshold, "created": time.time(),
                 "short": len(short_emb), "reading_s": round(sum(len(x) for x in long_parts) / RATE, 1)}
         _file(uid).write_text(json.dumps(data), encoding="utf-8")
-        return {"ok": True, "threshold": threshold, "scores": [round(s, 3) for s in scores], "short": len(short_emb),
-                "reading_s": data["reading_s"]}
+        return {"ok": True, "threshold": threshold, "z_threshold": z_threshold, "scores": [round(s, 3) for s in scores],
+                "z": [round(z, 2) for z in zs], "short": len(short_emb), "reading_s": data["reading_s"]}
 
     result = await asyncio.to_thread(work)
     logger.info("voiceprint %s: %s", uid, {k: v for k, v in result.items() if k != "scores"})
@@ -202,8 +242,14 @@ async def verify(uid: int, wav: bytes) -> dict[str, Any]:
     if len(x) < RATE * 0.3:
         return {"ok": False, "score": 0.0, "threshold": data["threshold"], "reason": "short"}
     e = await asyncio.to_thread(_embed_sync, ext, x)
-    score = float(vp @ e)
-    return {"ok": score >= float(data["threshold"]), "score": round(score, 3), "threshold": data["threshold"]}
+    score, z = zscore(vp, e)
+    z_thr = data.get("z_threshold")
+    if z is not None and z_thr is not None:
+        ok = score >= MIN_THRESHOLD and z >= float(z_thr)
+    else:
+        ok = score >= float(data["threshold"])
+    return {"ok": ok, "score": round(score, 3), "z": None if z is None else round(z, 2),
+            "threshold": z_thr if z is not None and z_thr is not None else data["threshold"]}
 
 
 async def warm() -> None:
