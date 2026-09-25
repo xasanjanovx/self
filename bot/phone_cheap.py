@@ -570,6 +570,8 @@ class PhoneCheap:
         if self.upgrade is not None:
             return  # отвечать будет Live
         say = clean_reply(text)
+        if stt is not None and not transcript and not calls:
+            say = ""  # расшифровка пустая (шум, эхо его же голоса) — не отвечаем на то, чего он не говорил
         logger.info("phone cheap: %.1f с, инструменты %s, «%s» → «%s»", time.monotonic() - started, calls, transcript[:60], say[:60])
         if say:
             self.jarvis_lines.append(say)
