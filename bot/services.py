@@ -319,6 +319,8 @@ def persona_overrides(uid: int, p):  # noqa: ANN001, ANN201
         p.voice_model = str(extra["voice_model"])
     if extra.get("qwen_voice"):
         p.qwen_voice = str(extra["qwen_voice"])
+    if extra.get("voice_mode") in {"economy", "live"}:
+        p.voice_mode = str(extra["voice_mode"])
     return p
 
 

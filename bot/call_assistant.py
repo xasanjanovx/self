@@ -193,6 +193,8 @@ async def _notify_failure(profile: Profile, error: str) -> None:
         "privacy": ("Telegram не пропустил звонок: твои настройки «Кто может мне звонить» запрещают аккаунту Джарвиса. " + _FIX_RU,
                     "Telegram qo'ng'iroqni o'tkazmadi: «Kim menga qo'ng'iroq qila oladi» sozlamasi Jarvis akkauntiga ruxsat bermayapti. " + _FIX_UZ),
         "no_answer": ("Звонила, но трубку не взяли. " + _DEVICE_RU, "Qo'ng'iroq qildim, lekin javob bo'lmadi. " + _DEVICE_UZ),
+        "daily_limit": ("Дневной лимит на живой голос исчерпан — позвоню завтра. Пишите здесь или зовите «Джарвис» на телефоне (экономный режим).",
+                        "Jonli ovoz uchun kunlik limit tugadi — ertaga qo'ng'iroq qilaman. Shu yerda yozing yoki telefonda «Jarvis» deng."),
     }
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
@@ -357,6 +359,11 @@ async def on_incoming_call(user_id: int) -> bool:
         return False
     if uid in _running:
         return False  # уже разговариваем (или звоним ему сами)
+    from . import billing
+
+    if not billing.live_allowed("assistant"):
+        logger.info("call %s: входящий — дневной лимит живого голоса, не беру", uid)
+        return False
     from .handlers.common import profile_by_id
 
     profile = await profile_by_id(uid)

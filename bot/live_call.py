@@ -37,6 +37,10 @@ UPLINK_BATCH_MS = 40         # шлём звук в Gemini пачками по 4
 MAX_SECONDS = 600            # 10 минут — страховка
 DRAIN_SECONDS = 8.0          # после «до связи» даём договорить фразу
 SILENCE_NUDGE_SECONDS = 7.0  # подъём: столько тишины — и Джарвис снова зовёт по имени
+COMPRESS_ABOVE = 8000        # разговор (сверх инструкции и инструментов) вырос до ~8 тыс. токенов (~4 мин речи) — сжимаем…
+COMPRESS_KEEP = 3000         # …до последних ~3 тыс. (минута-две разговора)
+# экономные настройки сессии, которые модель приняла: 2 — «размышления» minimal + сжатие, 1 — только сжатие, 0 — ничего
+_extras_level: dict[str, int] = {}
 
 # инструменты чата, которые в голосе не нужны или мешают
 _SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me", "test_wake_call"}
@@ -61,17 +65,25 @@ class LiveResult:
 
 
 # ------------------------------------------------------------------ промпт и инструменты
+def now_line(profile: Profile) -> str:
+    now = profile.now
+    return f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}"
+
+
 def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str = "", memory: str = "",
-                       wake: dict[str, Any] | None = None, topic: str = "") -> str:
+                       wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True) -> str:
+    """with_time=False — без текущего времени: экономный режим телефона кладёт его в реплику, чтобы инструкция
+    не менялась каждую минуту и Gemini брал её из кэша (10% цены)."""
     now = profile.now
     name = p.name_for(profile.first_name) or "пользователь"
     channel = ("Он позвал тебя голосом («Джарвис») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
                "говоришь через динамик телефона и управляешь телефоном своими инструментами. "
                if mode == "phone" else "Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). ")
+    where = f"{now_line(profile)}, Андижан, Узбекистан" if with_time else "Он живёт в Андижане, Узбекистан (время — в его репликах)"
     base = (
         f"Ты — Джарвис, личный помощник {name}. {channel}"
         "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
-        f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}, Андижан, Узбекистан. Валюта — сум.\n\n"
+        f"{where}. Валюта — сум.\n\n"
         f"{lang_rule(p)}\n\n{human_rules(p)}\n{style_rules(p, spoken=True)}\n"
         "Речь: без списков, эмодзи и markdown; суммы словами («двадцать пять тысяч сум»), не называй id записей. "
         "Если перебили — сразу остановись и слушай.\n"
@@ -293,6 +305,13 @@ def tool_declarations(mode: str) -> list[dict[str, Any]]:
     return decls
 
 
+def _extras_rejected(error: str) -> bool:
+    """Отказ похож на «не знаю такую настройку» (или безликое invalid argument) — стоит попробовать без экономных настроек."""
+    low = str(error or "").lower()
+    return any(k in low for k in ("thinking", "compression", "context_window", "contextwindow", "sliding", "invalid argument",
+                                  "unknown name", "cannot find field"))
+
+
 # ------------------------------------------------------------------ сессия
 class _Session:
     def __init__(self, profile: Profile, persona: Persona, *, mode: str, system: str) -> None:
@@ -350,13 +369,18 @@ class _Session:
                 except Exception as exc:
                     logger.warning("live: Qwen недоступен (%s) — Gemini", str(exc)[:200])
                     qwen_live.report_failure(str(exc))
-        # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него
-        for model, rich in ((m, r) for m in MODELS for r in (True, False)):
+        # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него.
+        # Не приняла экономные настройки (_extras_level) — та же попытка проще (запоминаем до перезапуска).
+        attempts = [(m, r) for m in MODELS for r in (True, False)]
+        i = 0
+        while i < len(attempts):
+            model, rich = attempts[i]
             try:
                 ws = await session.ws_connect(WS_URL.format(ver="v1beta") + f"?key={settings.gemini_api_key}",
                                               heartbeat=20, max_msg_size=0)
             except Exception as exc:
                 last_error = f"connect: {exc}"
+                i += 1
                 continue
             await ws.send_str(json.dumps(self.setup_payload(model, rich=rich)))
             try:
@@ -364,11 +388,13 @@ class _Session:
             except asyncio.TimeoutError:
                 await ws.close()
                 last_error = f"{model}: setup timeout"
+                i += 1
                 continue
             data = _decode(msg)
             if data is not None and "setupComplete" in data:
                 self.result.model = model
-                logger.info("live: модель %s, голос %s, язык %s, расширенный режим %s", model, self.persona.voice, self.persona.lang, rich)
+                logger.info("live: модель %s, голос %s, язык %s, расширенный режим %s, экономия %s", model, self.persona.voice,
+                            self.persona.lang, rich, _extras_level.get(model, 2))
                 return ws
             last_error = f"{model}: {getattr(msg, 'extra', None) or getattr(msg, 'data', '')!s}"[:300]
             logger.warning("live setup failed: %s", last_error)
@@ -379,25 +405,50 @@ class _Session:
                 # предоплата кончилась — другие модели тоже откажут, не перебираем все 6 вариантов
                 billing.exhausted(last_error)
                 raise BillingExhausted(last_error)
+            level = _extras_level.get(model, 2)
+            if level > 0 and _extras_rejected(last_error):
+                _extras_level[model] = level - 1
+                logger.warning("live: %s не принял экономные настройки (уровень %s) — пробую проще", model, level)
+                continue
+            i += 1
         raise RuntimeError(last_error or "live setup failed")
 
     def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
         """rich — жёсткий язык речи (languageCode из настроек). Не включаем: enableAffectiveDialog
         (модель отвечает «invalid argument» на первую же реплику) и встроенный googleSearch
-        (модель им не пользуется — поиск идёт через обычный инструмент web_search)."""
+        (модель им не пользуется — поиск идёт через обычный инструмент web_search).
+
+        Экономия (_extras_level, модель не приняла — без них): «размышления» минимальные (у 3.x по умолчанию high —
+        оплачиваются как текст на выходе) и сжатие памяти разговора: Live в КАЖДОМ ответе заново оплачивает весь
+        разговор, поэтому, когда он вырос, старое начало отбрасывается (инструкция и инструменты остаются всегда)."""
+        from .ai import thinking_config
+
         speech: dict[str, Any] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.persona.voice}}}
         gen: dict[str, Any] = {"responseModalities": ["AUDIO"], "speechConfig": speech}
-        tools: list[dict[str, Any]] = [{"functionDeclarations": tool_declarations(self.mode)}]
+        decls = self.declarations()
+        tools: list[dict[str, Any]] = [{"functionDeclarations": decls}] if decls else []
         if rich and not self.persona.mirror:  # отвечает на языке вопроса — язык речи не фиксируем
             speech["languageCode"] = LANG_CODES.get(self.persona.lang, "uz-UZ")
-        return {"setup": {
+        setup: dict[str, Any] = {
             "model": f"models/{model}",
             "generationConfig": gen,
             "systemInstruction": {"parts": [{"text": self.system}]},
-            "tools": tools,
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
-        }}
+        }
+        if tools:
+            setup["tools"] = tools
+        level = 0 if model.startswith("qwen") else _extras_level.get(model, 2)
+        if level >= 2 and (tc := thinking_config(model, 0)) is not None:
+            gen["thinkingConfig"] = tc
+        if level >= 1:
+            # ~3 знака на токен: инструкция + описания инструментов — постоянная часть; разговор сверху — до ~8 тыс. токенов
+            base = (len(self.system) + len(json.dumps(decls, ensure_ascii=False))) // 3
+            setup["contextWindowCompression"] = {"triggerTokens": base + COMPRESS_ABOVE, "slidingWindow": {"targetTokens": base + COMPRESS_KEEP}}
+        return {"setup": setup}
+
+    def declarations(self) -> list[dict[str, Any]]:
+        return tool_declarations(self.mode)
 
     # --- задачи
     async def uplink(self, ws, incoming: asyncio.Queue) -> None:  # noqa: ANN001
@@ -647,24 +698,17 @@ async def _live_ready(sess: "_Session", http, early: asyncio.Task, kick: str):  
 
 
 async def _prompt_parts(profile: Profile, mode: str) -> tuple[Persona, str, str]:
-    """Голос/характер, срез данных и память — параллельно (по очереди это до 5 с холодного старта)."""
+    """Голос/характер и память — параллельно. Срез данных бота в промпт звонка больше не кладём: Live оплачивает
+    инструкцию заново в КАЖДОМ ответе (срез — десятки тысяч знаков), а данные есть в инструментах и bot_task."""
     from . import services
 
     uid = profile.telegram_id
     if mode != "assistant":
         return await services.persona(uid), "", ""
-    from . import agent_tools
     from . import agent_tools_extra as extra
 
-    async def snap() -> str:
-        try:
-            return await agent_tools.snapshot(profile)
-        except Exception:
-            logger.debug("live: snapshot failed", exc_info=True)
-            return ""
-
-    persona, snapshot, memory = await asyncio.gather(services.persona(uid), snap(), extra.memory_prompt(uid))
-    return persona, snapshot, memory
+    persona, memory = await asyncio.gather(services.persona(uid), extra.memory_prompt(uid))
+    return persona, "", memory
 
 
 async def _converse(sess: "_Session", http, call: dict[str, Any], early: asyncio.Task, kick: str) -> None:
@@ -719,7 +763,22 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
     """Позвонить и провести разговор целиком. Возвращает итог (что сказано, что сделано).
 
     Всё, что можно, — параллельно с гудками: набор номера стартует сразу, промпт собирается и
-    Gemini готовит приветствие, пока телефон звонит. Взяли трубку — голос через полсекунды."""
+    Gemini готовит приветствие, пока телефон звонит. Взяли трубку — голос через полсекунды.
+    После дневного лимита — не звоним (кроме подъёма на фаджр)."""
+    from . import billing
+
+    uid = profile.telegram_id
+    if not billing.live_allowed(mode):
+        logger.info("call %s: дневной лимит живого голоса — не звоню (%s)", uid, mode)
+        return LiveResult(error="daily_limit")
+    meter = billing.start_session("wake" if mode == "wake" else "call")
+    try:
+        return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang)
+    finally:
+        billing.end_session(meter)
+
+
+async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] | None, ring_seconds: int, lang: str | None) -> LiveResult:
     import aiohttp
 
     from . import billing
@@ -755,6 +814,16 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
 async def answer(profile: Profile) -> LiveResult:
     """Он сам позвонил Джарвису в Telegram: сначала Gemini (приветствие готовится ~1 с), потом берём
     трубку — он слышит голос сразу, а не тишину после ответа."""
+    from . import billing
+
+    meter = billing.start_session("incoming")
+    try:
+        return await _answer(profile)
+    finally:
+        billing.end_session(meter)
+
+
+async def _answer(profile: Profile) -> LiveResult:
     import aiohttp
 
     from . import billing

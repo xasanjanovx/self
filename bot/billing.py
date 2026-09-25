@@ -7,14 +7,19 @@
 
 Кончились деньги — Gemini отвечает 402: сразу пишем в чат, а Джарвис говорит об этом в разговоре.
 Состояние — JSON в DATA_DIR (переживает перезапуск и передеплой).
+
+Подробно: за день — сумма по видам (kinds: live/agent/stt/tts…), внутри — по типам токенов (detail: звук на вход/выход,
+текст, кадры, кэш, «размышления»), и цена каждого разговора (sessions: телефон экономно/Live, звонки) — через Meter.
 """
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +44,8 @@ PRICES: dict[str, dict[str, float]] = {
 OTHER_PROVIDERS = ("qwen",)  # их расход — отдельной строкой: он не уменьшает предоплату Gemini и не входит в её лимит
 _DEFAULT = {"text_in": 1.0, "audio_in": 3.0, "image_in": 1.0, "text_out": 5.0, "audio_out": 12.0}
 
+CACHED_SHARE = 0.1    # вход из кэша (неявный кэш Gemini 2.5+/3.x) — 10% обычной цены
+KEEP_SESSIONS = 60
 LOW_DAYS = 3.0        # «хватит меньше чем на 3 дня» — предупреждаем
 URGENT_DAYS = 1.0     # меньше суток — срочно
 LOW_USD = 2.0
@@ -142,25 +149,93 @@ def _split(details: Any, total: int) -> dict[str, int]:
     return out
 
 
-def cost(model: str, usage: dict[str, Any]) -> float:
-    """Стоимость одного ответа в USD по usageMetadata (REST generateContent или Live API)."""
+PARTS = ("text_in", "audio_in", "image_in", "cached", "text_out", "thoughts", "audio_out")
+
+
+def breakdown(model: str, usage: dict[str, Any]) -> tuple[dict[str, float], dict[str, int]]:
+    """Один ответ по usageMetadata (REST generateContent или Live API) → (USD по видам, токены по видам).
+    Виды: text_in / audio_in / image_in (кадры) / cached (вход из кэша, 10% цены) / text_out / thoughts / audio_out."""
+    usd = dict.fromkeys(PARTS, 0.0)
+    tokens = dict.fromkeys(PARTS, 0)
     if not isinstance(usage, dict):
-        return 0.0
+        return usd, tokens
     p = prices_for(model)
     prompt = int(usage.get("promptTokenCount") or 0)
     output = int(usage.get("candidatesTokenCount") or usage.get("responseTokenCount") or 0)
     thoughts = int(usage.get("thoughtsTokenCount") or 0)
     tool_prompt = int(usage.get("toolUsePromptTokenCount") or 0)
+    cached_total = min(int(usage.get("cachedContentTokenCount") or 0), prompt)
     ins = _split(usage.get("promptTokensDetails"), prompt)
+    cached = _split(usage.get("cacheTokensDetails"), cached_total) if cached_total else {"text": 0, "audio": 0, "image": 0}
+    ins["text"] += tool_prompt
+    price_in = {"text": p.get("text_in", 1.0), "audio": p.get("audio_in", p.get("text_in", 1.0)),
+                "image": p.get("image_in", p.get("text_in", 1.0))}
+    for kind, price in price_in.items():
+        from_cache = min(cached[kind], ins[kind])
+        tokens[f"{kind}_in"] = ins[kind] - from_cache
+        usd[f"{kind}_in"] = (ins[kind] - from_cache) * price
+        tokens["cached"] += from_cache
+        usd["cached"] += from_cache * price * CACHED_SHARE
     outs = _split(usage.get("candidatesTokensDetails") or usage.get("responseTokensDetails"), output)
-    usd = (ins["text"] + tool_prompt) * p.get("text_in", 1.0)
-    usd += ins["audio"] * p.get("audio_in", p.get("text_in", 1.0))
-    usd += ins["image"] * p.get("image_in", p.get("text_in", 1.0))
     # у TTS нет текстового выхода: весь ответ — звук, даже если модель не расписала виды
     text_out = p.get("text_out", p.get("audio_out", 5.0))
-    usd += (outs["text"] + outs["image"] + thoughts) * text_out
-    usd += outs["audio"] * p.get("audio_out", text_out)
-    return usd / 1_000_000
+    tokens["text_out"], tokens["thoughts"], tokens["audio_out"] = outs["text"] + outs["image"], thoughts, outs["audio"]
+    usd["text_out"] = tokens["text_out"] * text_out
+    usd["thoughts"] = thoughts * text_out
+    usd["audio_out"] = outs["audio"] * p.get("audio_out", text_out)
+    return {k: v / 1_000_000 for k, v in usd.items()}, tokens
+
+
+def cost(model: str, usage: dict[str, Any]) -> float:
+    """Стоимость одного ответа в USD по usageMetadata (REST generateContent или Live API)."""
+    return sum(breakdown(model, usage)[0].values())
+
+
+# ------------------------------------------------------------------ цена одного разговора
+@dataclass
+class Meter:
+    """Сколько стоил один разговор: всё, что записано в его задачах (и задачах, созданных из них), — сюда."""
+
+    kind: str                       # phone | call | wake | incoming
+    mode: str = ""                  # phone: economy | live
+    started: float = field(default_factory=time.monotonic)
+    usd: float = 0.0
+    parts: dict[str, float] = field(default_factory=dict)
+    token: Any = None
+
+    def add(self, kind: str, usd: float) -> None:
+        self.usd += usd
+        self.parts[kind] = self.parts.get(kind, 0.0) + usd
+
+
+_meter: contextvars.ContextVar[Meter | None] = contextvars.ContextVar("billing_meter", default=None)
+
+
+def start_session(kind: str, mode: str = "") -> Meter:
+    """Начать счёт разговора в текущей задаче (asyncio копирует контекст в задачи, созданные после этого)."""
+    meter = Meter(kind=kind, mode=mode)
+    meter.token = _meter.set(meter)
+    return meter
+
+
+def end_session(meter: Meter, **info: Any) -> None:
+    """Разговор окончен — в журнал: когда, какой, сколько секунд и сколько стоил (и из чего сложилась цена)."""
+    if meter.token is not None:
+        try:
+            _meter.reset(meter.token)  # дальше расход вызывающей задачи — уже не этого разговора
+        except ValueError:
+            pass
+        meter.token = None
+    st = _load()
+    sessions = st.setdefault("sessions", [])
+    sessions.append({"at": datetime.now(timezone(timedelta(hours=5))).isoformat(timespec="seconds"), "kind": meter.kind,
+                     "mode": meter.mode, "sec": round(time.monotonic() - meter.started),
+                     "usd": round(meter.usd * float(st.get("factor") or 1.0), 5),
+                     "by": {k: round(v, 5) for k, v in meter.parts.items() if v > 0}, **info})
+    del sessions[:-KEEP_SESSIONS]
+    _schedule_save()
+    logger.info("billing: разговор %s/%s — %d с, $%.4f %s", meter.kind, meter.mode, round(time.monotonic() - meter.started),
+                meter.usd, {k: round(v, 4) for k, v in meter.parts.items()})
 
 
 # ------------------------------------------------------------------ учёт
@@ -172,9 +247,12 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
     """Записать расход одного ответа Gemini. kind: text | live | tts | stt | vision."""
     if not usage:
         return 0.0
-    usd = cost(model, usage)
+    parts, tokens = breakdown(model, usage)
+    usd = sum(parts.values())
     if usd <= 0:
         return 0.0
+    if (meter := _meter.get()) is not None:
+        meter.add(kind, usd)
     st = _load()
     day = st["days"].setdefault(_today(), {"usd": 0.0, "calls": 0, "kinds": {}})
     provider = next((p for p in OTHER_PROVIDERS if str(model).startswith(p)), None)
@@ -186,6 +264,13 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
     day["usd"] = round(day["usd"] + usd, 6)
     day["calls"] = int(day.get("calls") or 0) + 1
     day["kinds"][kind] = round(float(day["kinds"].get(kind) or 0) + usd, 6)
+    detail = day.setdefault("detail", {}).setdefault(kind, {})
+    counts = day.setdefault("tokens", {}).setdefault(kind, {})
+    for part in PARTS:
+        if parts[part] > 0:
+            detail[part] = round(float(detail.get(part) or 0) + parts[part], 6)
+        if tokens[part] > 0:
+            counts[part] = int(counts.get(part) or 0) + tokens[part]
     if st.get("anchor"):
         st["spent_since"] = round(float(st.get("spent_since") or 0) + usd, 6)
     st.pop("exhausted_at", None)  # ответ пришёл — значит, деньги есть
@@ -204,14 +289,20 @@ def over_limit() -> bool:
     return DAILY_LIMIT_USD > 0 and spent_today() >= DAILY_LIMIT_USD
 
 
+def live_allowed(mode: str = "phone") -> bool:
+    """Жёсткий лимит (он выбрал): после дневного лимита живой голос (Gemini Live) до полуночи выключен —
+    телефон отвечает только в экономном режиме, звонков «позвони мне» нет. Подъём на фаджр — всегда."""
+    return mode == "wake" or not over_limit()
+
+
 def _maybe_limit_alert(st: dict[str, Any], day: dict[str, Any]) -> None:
     if DAILY_LIMIT_USD <= 0 or day.get("limit_alert") or float(day["usd"]) * float(st.get("factor") or 1.0) < DAILY_LIMIT_USD:
         return
     day["limit_alert"] = True
     _schedule_save()
-    _notify(f"🟡 <b>Лимит Gemini на сегодня — ${DAILY_LIMIT_USD:g} — достигнут.</b>\nДо конца дня Джарвис в экономном режиме: "
-            "команды выполняет молча, отвечает одной фразой, камера и экран — по одному кадру, разговор закрывается быстрее. "
-            "Будильник работает как обычно.")
+    _notify(f"🟡 <b>Лимит Gemini на сегодня — ${DAILY_LIMIT_USD:g} — достигнут.</b>\nДо полуночи живой голос (Gemini Live) выключен: "
+            "Джарвис на телефоне выполняет команды и отвечает в экономном режиме, камера, экран и звонки «позвони мне» — завтра. "
+            "Будильник на фаджр работает как обычно.")
 
 
 def rate_limited() -> None:
@@ -278,7 +369,25 @@ def status() -> dict[str, Any]:
         "qwen_today_usd": round(float(((days.get(today) or {}).get("other") or {}).get("qwen") or 0), 4),
         "qwen_month_usd": round(sum(float((v.get("other") or {}).get("qwen") or 0) for k, v in days.items() if k.startswith(month)), 3),
         "calibration_factor": round(factor, 2),
+        "daily_limit_usd": DAILY_LIMIT_USD,
+        "live_voice_today": "выключен до полуночи (дневной лимит)" if over_limit() else "включён",
     }
+    # из чего сложился расход сегодня: вид (live/agent/stt/tts…) → тип токенов (звук, текст, кадры, кэш, размышления)
+    detail = (days.get(today) or {}).get("detail") or {}
+    if detail:
+        out["detail_today_usd"] = {k: {p: round(v * factor, 4) for p, v in d.items() if v * factor >= 0.0001} for k, d in detail.items()}
+    sessions = [s for s in st.get("sessions") or [] if str(s.get("at") or "").startswith(today)]
+    if sessions:
+        by_mode: dict[str, dict[str, float]] = {}
+        for s in sessions:
+            key = f"{s.get('kind')}/{s.get('mode')}" if s.get("mode") else str(s.get("kind"))
+            agg = by_mode.setdefault(key, {"count": 0, "usd": 0.0, "sec": 0})
+            agg["count"] += 1
+            agg["usd"] += float(s.get("usd") or 0)
+            agg["sec"] += int(s.get("sec") or 0)
+        out["conversations_today"] = {k: {"count": int(v["count"]), "usd": round(v["usd"], 3), "avg_usd": round(v["usd"] / v["count"], 4),
+                                          "minutes": round(v["sec"] / 60, 1)} for k, v in by_mode.items()}
+        out["last_conversations"] = [{k: s.get(k) for k in ("at", "kind", "mode", "sec", "usd", "said")} for s in sessions[-5:]]
     anchor = st.get("anchor")
     if anchor:
         remaining = float(anchor["usd"]) - float(st.get("spent_since") or 0) * factor
@@ -395,4 +504,5 @@ def _notify(text: str) -> None:
         pass
 
 
-__all__ = ["record", "cost", "status", "set_balance", "exhausted", "is_billing_error", "rate_limited", "voice_note", "flush", "PRICES"]
+__all__ = ["record", "cost", "breakdown", "status", "set_balance", "exhausted", "is_billing_error", "rate_limited", "voice_note", "flush",
+           "PRICES", "Meter", "start_session", "end_session", "live_allowed"]

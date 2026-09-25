@@ -43,6 +43,7 @@ class Persona:
     mirror: bool = False         # голосом отвечать на языке вопроса (uz / ru / en), lang — основной
     voice_model: str = "gemini"  # живой голос: gemini (Gemini 3.8 Live) | qwen (Qwen3.8-Omni, Alibaba — дешевле)
     qwen_voice: str = "Tina"     # голос Qwen (женские, говорят по-русски)
+    voice_mode: str = "economy"  # телефон: economy — команды и короткие ответы без Gemini Live (bot/phone_cheap.py) | live — всегда Live
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None) -> "Persona":

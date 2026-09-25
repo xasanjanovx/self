@@ -252,6 +252,25 @@ async def verify(uid: int, wav: bytes) -> dict[str, Any]:
             "threshold": z_thr if z is not None and z_thr is not None else data["threshold"]}
 
 
+OTHER_Z_MARGIN = 0.15    # посреди разговора мягче, чем на «Джарвис»: его самого лучше лишний раз пропустить, чем не услышать
+OTHER_SCORE = 0.25
+
+
+def enrolled(uid: int) -> bool:
+    return _file(uid).exists() and available()
+
+
+async def is_other(uid: int, wav: bytes) -> dict[str, Any]:
+    """Фраза посреди разговора — явно чужой голос (телевизор, кто-то рядом)? {"other": bool, …}.
+    Короткое, неразборчивое, нет отпечатка или модели — не чужое."""
+    res = await verify(uid, wav)
+    if res.get("ok") or res.get("reason") == "short" or res.get("enrolled") is False or res.get("unchecked"):
+        return {**res, "other": False}
+    score, z, thr = float(res.get("score") or 0), res.get("z"), float(res.get("threshold") or 0)
+    other = score < OTHER_SCORE or (z < thr - OTHER_Z_MARGIN if z is not None else score < thr - 0.08)
+    return {**res, "other": other}
+
+
 async def warm() -> None:
     """При запуске: модель в память заранее (первое «Джарвис» не ждёт загрузки)."""
     await extractor()

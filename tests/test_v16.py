@@ -140,11 +140,16 @@ def test_prewarm_is_taken_by_the_phone_and_expires_otherwise(monkeypatch):
     monkeypatch.setattr(phone_live, "_build", fake_build)
     monkeypatch.setattr(phone_live, "_warm", {})
     monkeypatch.setattr(phone_live, "_last_device", {})
+    monkeypatch.setattr(phone_live, "_modes", {})
+    monkeypatch.setattr(phone_live.billing, "live_allowed", lambda mode="phone": True)
 
     async def scenario():
         phone_live.prewarm(5)  # телефон ещё ни разу не подключался — заготовки нет
         assert 5 not in phone_live._warm
         phone_live._last_device[5] = {"duplex": True}
+        phone_live.prewarm(5)  # экономный режим (по умолчанию) начинается без Live — заготовка не нужна
+        assert 5 not in phone_live._warm
+        phone_live._modes[5] = "live"
         phone_live.prewarm(5)
         taken = await phone_live._take(5, {"duplex": True})
         assert taken == built[0] and not taken[2].closed

@@ -420,6 +420,10 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
         f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
         f"🧠 {'Jonli ovoz modeli' if uz else 'Модель живого голоса'}: <b>"
         + ("Qwen3.8 Omni (Alibaba)" + f" · {p.qwen_voice}" if p.voice_model == "qwen" else "Gemini 3.8 Live") + "</b>",
+        f"💸 {'Telefonda' if uz else 'На телефоне'}: <b>"
+        + (profile.tr("экономно — команды и короткие ответы без Live, камера и беседа — вживую",
+                      "tejamkor — buyruqlar Live'siz, kamera va suhbat — jonli")
+           if p.voice_mode == "economy" else profile.tr("всегда Gemini Live (дороже)", "doim Gemini Live (qimmatroq)")) + "</b>",
     ]
     from .. import qwen_live
 
@@ -433,7 +437,8 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     if notice:
         text += f"\n\n{notice}"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
-                                  verbosity=p.verbosity, honorific=p.honorific, voice_model=p.voice_model, qwen_voice=p.qwen_voice)
+                                  verbosity=p.verbosity, honorific=p.honorific, voice_model=p.voice_model, qwen_voice=p.qwen_voice,
+                                  voice_mode=p.voice_mode)
     await _show(target, text, kb)
 
 
@@ -456,6 +461,11 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(BotStates.waiting_alarm_time)
         await safe_edit(callback, profile.tr("⏰ Во сколько будить? Например <code>6:30</code>", "⏰ Soat nechada uyg'otay? Masalan <code>6:30</code>"),
                         InlineKeyboardMarkup(inline_keyboard=[[_btn(profile.tr("Отмена", "Bekor"), "settings:wake")]]))
+        return
+    if action == "vmode" and value in {"economy", "live"}:  # экономный режим телефона — в файле, не в таблице
+        services.save_persona_extra(profile.telegram_id, {"voice_mode": value})
+        await answer_now(callback, "✅")
+        await render_jarvis(callback, profile)
         return
     if action in {"vmodel", "qvoice"}:  # модель живого голоса и голос Qwen — в файле, не в таблице
         from .. import qwen_live

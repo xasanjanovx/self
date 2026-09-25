@@ -4,16 +4,21 @@
 телефонные действия (bot/phone.py): звонок, SMS, Telegram от имени владельца, будильник, таймер,
 приложения, фонарик, громкость, музыка, маршрут, системные кнопки. Действия выполняет само приложение.
 
+По умолчанию разговор начинается в экономном режиме (bot/phone_cheap.py: команды и короткие ответы без Live);
+камера, экран, галерея и «давай поговорим» — и он продолжается здесь, в Gemini Live, по тому же соединению.
+
 Протокол /jarvis/v1/live (заголовок Authorization: Bearer <JARVIS_TOKEN>):
   телефон → сервер
     {"type":"hello","device":{…},"greet":bool,"text":str?} — первым сообщением
     бинарные кадры — микрофон, PCM s16le 16 кГц моно
     {"type":"text","text":…} — написанная реплика; {"type":"greet"} — позвали только по имени
     {"type":"action_error","text":…} — действие на телефоне не удалось; {"type":"bye"}
+    {"type":"image",…} — кадр камеры/экрана (device.frames_on_request — только в ответ на frame_request)
   сервер → телефон
     бинарные кадры — голос Джарвиса, PCM s16le 24 кГц моно
     {"type":"ready"} {"type":"user","text":…} {"type":"jarvis","text":…} {"type":"turn_complete"} {"type":"interrupted"}
     {"type":"action","action":{…}} {"type":"status","text":…} {"type":"need_contacts"} {"type":"end"} {"type":"error","text":…}
+    {"type":"frame_request"} — пришли один свежий кадр камеры/экрана
 """
 from __future__ import annotations
 
@@ -95,6 +100,52 @@ class SpeechGate:
         return []
 
 
+class OwnerGate:
+    """«Только мой голос» посреди разговора: начало каждой фразы (~1.2 с) сверяем с его отпечатком; явно чужой голос
+    (телевизор, кто-то рядом, эхо самого Джарвиса) в Gemini не уходит — не оплачивается и не вызывает ответ.
+    Его фразы уходят целиком: задержка — только в начале (конец фразы Gemini слышит вовремя)."""
+
+    CHECK_S = 1.2
+
+    def __init__(self, uid: int, enabled: bool) -> None:
+        self.uid = uid
+        self.enabled = enabled
+        self.state = "idle"            # idle | buffer | pass | drop
+        self._buf: list[bytes] = []
+        self.dropped = 0
+
+    async def filter(self, chunks: list[bytes], active: bool) -> list[bytes]:
+        """chunks — то, что пропустил SpeechGate; active — идёт ли ещё фраза."""
+        if not self.enabled:
+            return chunks
+        if not chunks:
+            if not active:
+                self.state = "idle"
+            return []
+        if self.state == "idle":
+            self.state, self._buf = "buffer", []
+        out: list[bytes] = []
+        if self.state == "buffer":
+            self._buf.extend(chunks)
+            if sum(len(c) for c in self._buf) / 2 / INPUT_RATE >= self.CHECK_S or not active:
+                from . import voiceprint
+
+                audio, self._buf = b"".join(self._buf), []
+                verdict = await voiceprint.is_other(self.uid, pcm_to_wav(audio, INPUT_RATE))
+                if verdict.get("other"):
+                    self.state = "drop"
+                    self.dropped += 1
+                    logger.info("phone live: чужой голос — в Gemini не отправляю (сходство %s, z %s)", verdict.get("score"), verdict.get("z"))
+                else:
+                    self.state = "pass"
+                    out = [audio]
+        elif self.state == "pass":
+            out = chunks
+        if not active:
+            self.state = "idle"
+        return out
+
+
 _TOOL_STATUS = {
     "web_search": "Ищу в интернете…", "weather": "Смотрю погоду…", "currency_rates": "Смотрю курс…",
     "telegram_read": "Читаю Telegram…", "telegram_send": "Готовлю сообщение…", "deep_analysis": "Анализирую…",
@@ -150,6 +201,7 @@ class PhoneLive(_Session):
         self.user_lines: list[str] = []
         self.jarvis_lines: list[str] = []
         self.gate = SpeechGate()
+        self.owner = OwnerGate(self.uid, enabled=False)   # включает run(), если есть отпечаток голоса
         self.idle_limit = IDLE_END_ECONOMY if billing.over_limit() else IDLE_END_S
         self._last_model_audio = time.monotonic()
         self._ended = False
@@ -157,7 +209,10 @@ class PhoneLive(_Session):
         self._stream_on_at = 0.0
         self._frame_rx = 0.0                   # когда пришёл последний кадр с телефона
         self._frame_tx = 0.0                   # когда последний кадр ушёл в Gemini
+        self._frame_req = 0.0                  # когда последний раз просили кадр у телефона
         self._pending_frame: dict[str, Any] | None = None
+        # новое приложение шлёт кадр камеры/экрана только по просьбе — не гоняет JPEG каждую секунду впустую
+        self.frames_on_request = bool(device.get("frames_on_request"))
 
     # --- Gemini: быстрее понимать, что он договорил (по умолчанию модель ждёт паузу ~2–3 с)
     vad_tuned = True
@@ -214,13 +269,21 @@ class PhoneLive(_Session):
 
         async for msg in self.phone_ws:
             if msg.type == aiohttp.WSMsgType.BINARY:
-                # в Gemini — только речь (с полсекунды до и 1.5 с после): тишина тоже оплачивается и копится в разговоре
+                # в Gemini — только речь (с полсекунды до и 1.5 с после): тишина тоже оплачивается и копится в разговоре;
+                # и только его речь (OwnerGate): телевизор и чужие голоса — нет
                 was_active = self.gate.active
-                for chunk in self.gate.feed(bytes(msg.data)):
+                chunks = await self.owner.filter(self.gate.feed(bytes(msg.data)), self.gate.active)
+                for chunk in chunks:
                     await self.to_gemini(gem, {"realtimeInput": {"audio": {"data": base64.b64encode(chunk).decode(),
                                                                            "mimeType": f"audio/pcm;rate={INPUT_RATE}"}}})
                 if self.gate.active and not was_active:
-                    await self._send_pending_frame(gem, min_gap=1.0)  # заговорил — модель видит свежий кадр экрана/камеры
+                    # заговорил — модель видит свежий кадр экрана/камеры
+                    if self.frames_on_request:
+                        await self._request_frame(min_gap=1.0)
+                    else:
+                        await self._send_pending_frame(gem, min_gap=1.0)
+                elif self.frames_on_request and self.gate.active and not billing.over_limit():
+                    await self._request_frame(min_gap=FRAME_EVERY_S)  # говорит долго — кадр раз в 3 с
                 await self._maybe_end_idle()
             elif msg.type == aiohttp.WSMsgType.TEXT:
                 try:
@@ -246,6 +309,8 @@ class PhoneLive(_Session):
                     if data.get("on"):
                         self._streams.add(kind)
                         self._stream_on_at = time.monotonic()
+                        if self.frames_on_request:
+                            await self._request_frame(min_gap=0.0)  # первый кадр — сразу
                     else:
                         self._streams.discard(kind)
                     what = "Камера" if kind == "camera" else "Показ экрана"
@@ -268,6 +333,11 @@ class PhoneLive(_Session):
     # оплачивается и остаётся в разговоре; раньше 2 минуты экрана = ~80 кадров в каждом следующем ответе)
     async def _on_frame(self, gem, frame: dict[str, Any]) -> None:  # noqa: ANN001
         now = time.monotonic()
+        if self.frames_on_request:
+            # кадр пришёл по просьбе (или это фото из галереи) — сразу в разговор
+            self._frame_rx = self._frame_tx = now
+            await self.to_gemini(gem, {"realtimeInput": {"video": frame}})
+            return
         burst = now - self._frame_rx < 0.4  # галерея шлёт фото пачкой — их все
         self._frame_rx = now
         self._pending_frame = frame
@@ -275,6 +345,12 @@ class PhoneLive(_Session):
         periodic = self.gate.active and not billing.over_limit() and now - self._frame_tx >= FRAME_EVERY_S
         if not self._streams or burst or first or periodic:
             await self._send_pending_frame(gem, min_gap=0.0)
+
+    async def _request_frame(self, *, min_gap: float) -> None:
+        if not self._streams or time.monotonic() - self._frame_req < min_gap:
+            return
+        self._frame_req = time.monotonic()
+        await self.to_phone({"type": "frame_request"})
 
     async def _send_pending_frame(self, gem, *, min_gap: float) -> None:  # noqa: ANN001
         frame = self._pending_frame
@@ -346,35 +422,42 @@ class PhoneLive(_Session):
         responses = []
         for call in calls:
             name, args, cid = str(call.get("name")), call.get("args") or {}, call.get("id")
-            logger.info("phone live tool %s %s", name, json.dumps(args, ensure_ascii=False)[:200])
-            if name in _TOOL_STATUS:
-                await self.to_phone({"type": "status", "text": _TOOL_STATUS[name]})
-            if self.turn.device.get("locked") and name in NEED_UNLOCK:
-                # заблокированный телефон: звонки, сообщения и чужая переписка — только после разблокировки
-                await self.to_phone({"type": "unlock"})
-                result: dict[str, Any] = {"error": "телефон заблокирован", "need_unlock": True}
-            elif name == "end_call":
-                await self.to_phone({"type": "end"})
-                result = {"ok": True}
-            elif name == "send_to_chat":
-                result = await _send_to_chat(self.uid, str(args.get("text") or ""))
-            elif name == "bot_task":
-                await self.to_phone({"type": "status", "text": "Делаю…"})
-                result = await live_call.delegate(self.profile, str(args.get("request") or ""))
-            else:
-                before = len(self.turn.actions)
-                result = await self.runner(name, args, self.ctx)
-                for action in self.turn.actions[before:]:
-                    await self.to_phone({"type": "action", "action": action})
-                if self.turn.need_contacts:
-                    self.turn.need_contacts = False
-                    await self.to_phone({"type": "need_contacts"})
-            if not (isinstance(result, dict) and result.get("error")):
-                self.result.actions.append(name)
-                if (card := result_card(name, args, result)) is not None:
-                    await self.to_phone({"type": "card", "card": card})
+            result = await exec_tool(self, name, args)
             responses.append({"id": cid, "name": name, "response": _jsonable(result)})
         await self.to_gemini(ws, {"toolResponse": {"functionResponses": responses}})
+
+
+async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN001
+    """Один инструмент телефона — и в Live (PhoneLive), и в экономном режиме (phone_cheap): действия уходят на телефон,
+    карточки — на панель. sess: uid, profile, turn, runner, ctx, result, to_phone()."""
+    logger.info("phone tool %s %s", name, json.dumps(args, ensure_ascii=False)[:200])
+    if name in _TOOL_STATUS:
+        await sess.to_phone({"type": "status", "text": _TOOL_STATUS[name]})
+    if sess.turn.device.get("locked") and name in NEED_UNLOCK:
+        # заблокированный телефон: открыть приложение или экран — только после разблокировки
+        await sess.to_phone({"type": "unlock"})
+        result: dict[str, Any] = {"error": "телефон заблокирован", "need_unlock": True}
+    elif name == "end_call":
+        await sess.to_phone({"type": "end"})
+        result = {"ok": True}
+    elif name == "send_to_chat":
+        result = await _send_to_chat(sess.uid, str(args.get("text") or ""))
+    elif name == "bot_task":
+        await sess.to_phone({"type": "status", "text": "Делаю…"})
+        result = await live_call.delegate(sess.profile, str(args.get("request") or ""))
+    else:
+        before = len(sess.turn.actions)
+        result = await sess.runner(name, args, sess.ctx)
+        for action in sess.turn.actions[before:]:
+            await sess.to_phone({"type": "action", "action": action})
+        if sess.turn.need_contacts:
+            sess.turn.need_contacts = False
+            await sess.to_phone({"type": "need_contacts"})
+    if not (isinstance(result, dict) and result.get("error")):
+        sess.result.actions.append(name)
+        if (card := result_card(name, args, result)) is not None:
+            await sess.to_phone({"type": "card", "card": card})
+    return result
 
 
 # ------------------------------------------------------------------ заготовка разговора
@@ -383,6 +466,7 @@ class PhoneLive(_Session):
 PREWARM_TTL = 15.0
 _last_device: dict[int, dict[str, Any]] = {}
 _warm: dict[int, tuple[float, asyncio.Task]] = {}
+_modes: dict[int, str] = {}   # режим телефона по настройкам (economy | live) — с прошлого разговора
 
 
 async def _build(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any, float]:
@@ -420,9 +504,10 @@ async def _close_built(task: asyncio.Task) -> None:
 
 
 def prewarm(uid: int) -> None:
-    """Начать собирать разговор, пока проверяется «Джарвис». Телефон ещё ни разу не подключался — не с чем."""
+    """Начать собирать разговор, пока проверяется «Джарвис». Телефон ещё ни разу не подключался — не с чем.
+    Экономный режим начинается без Gemini Live — заготовка не нужна."""
     device = _last_device.get(uid)
-    if device is None:
+    if device is None or _modes.get(uid, "economy") != "live" or not billing.live_allowed("phone"):
         return
     discard(uid)
     task = asyncio.create_task(_build(uid, device), name="phone-prewarm")
@@ -468,11 +553,37 @@ async def _take(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any, 
 
 # ------------------------------------------------------------------ точка входа
 async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN001
+    """Экономный режим (по умолчанию): команды и короткие ответы — Flash-Lite (bot/phone_cheap.py); попросил камеру,
+    экран, галерею или поговорить — разговор продолжается в Gemini Live по тому же соединению. «Всегда Live» в
+    настройках — сразу Live. После дневного лимита — только экономный режим."""
+    from . import phone_cheap
+
+    device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
+    _last_device[uid] = dict(device)
+    persona = await services.persona(uid)
+    _modes[uid] = persona.voice_mode
+    economy = persona.voice_mode != "live" or not billing.live_allowed("phone")
+    meter = billing.start_session("phone", "economy" if economy else "live")
+    info: dict[str, Any] = {}
+    try:
+        if economy:
+            discard(uid)  # настройку могли поменять после «Джарвис» — заготовка Live не нужна
+            upgrade = await phone_cheap.run(uid, phone_ws, hello, info)
+            if upgrade is None:
+                return
+            meter.mode = "economy+live"
+            hello = {"text": upgrade.request, "context": upgrade.context, "device": device}
+        await _run_live(uid, phone_ws, hello, info)
+    finally:
+        billing.end_session(meter, said=str(info.get("said") or "")[:80])
+
+
+async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, Any]) -> None:  # noqa: ANN001
     from . import agent_tools_extra as extra
+    from . import voiceprint
 
     started = time.monotonic()
     device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
-    _last_device[uid] = dict(device)
     built = await _take(uid, device)
     warm = built is not None
     if built is None:
@@ -487,6 +598,8 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
     sess, http, gem, prepared = built
     profile = sess.profile
     sess.phone_ws = phone_ws
+    sess.frames_on_request = bool(device.get("frames_on_request"))
+    sess.owner.enabled = voiceprint.enrolled(uid)
     if warm:
         # заготовка собрана с прошлыми данными телефона — свежие (заряд, пропущенные, блокировка) пометкой
         stale = phone.device_prompt(sess.turn.device)
@@ -498,8 +611,13 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
     try:
         await sess.to_phone({"type": "ready", "model": sess.result.model})
         logger.info("phone live %s: готов за %.1f с (данные %.1f с%s)", uid, time.monotonic() - started, prepared, ", заготовка" if warm else "")
+        if hello.get("context"):
+            # продолжение экономного разговора: что уже было сказано — пометкой, просьба — репликой (субтитр уже на экране)
+            await sess.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": str(hello["context"])}]}],
+                                                         "turnComplete": False}})
         if str(hello.get("text") or "").strip():
-            await sess.to_phone({"type": "user", "text": str(hello["text"]), "final": True})
+            if not hello.get("context"):
+                await sess.to_phone({"type": "user", "text": str(hello["text"]), "final": True})
             sess.user_lines.append(str(hello["text"]))
             await sess.say_text(gem, str(hello["text"]))
         elif hello.get("greet"):
@@ -524,7 +642,9 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
         await http.close()
     said = " / ".join(x for x in sess.user_lines if x)[:400]
     answered = " / ".join(x for x in sess.jarvis_lines if x)[:400]
-    logger.info("phone live %s: %.0f с, действия %s, «%s» → «%s»", uid, time.monotonic() - started, sess.result.actions, said[:80], answered[:80])
+    info["said"] = " / ".join(x for x in (info.get("said"), said) if x)
+    logger.info("phone live %s: %.0f с, действия %s, «%s» → «%s»%s", uid, time.monotonic() - started, sess.result.actions, said[:80], answered[:80],
+                f", чужой голос не пропущен {sess.owner.dropped} раз" if sess.owner.dropped else "")
     if said:
         phone._later(services.log_agent(uid, text=said, kind="phone_live", tools=",".join(sess.result.actions), reply=answered, ok=True))
         phone._later(extra.remember_exchange(uid, said, answered, when=profile.now.strftime("%d.%m %H:%M")))
