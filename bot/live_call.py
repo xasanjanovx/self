@@ -418,11 +418,10 @@ class _Session:
         (модель отвечает «invalid argument» на первую же реплику) и встроенный googleSearch
         (модель им не пользуется — поиск идёт через обычный инструмент web_search).
 
-        Экономия (_extras_level, модель не приняла — без них): «размышления» минимальные (у 3.x по умолчанию high —
-        оплачиваются как текст на выходе) и сжатие памяти разговора: Live в КАЖДОМ ответе заново оплачивает весь
+        Экономия (_extras_level, модель не приняла — без них): без «размышлений» (thinkingBudget 0: gemini-3.8-live думает
+        перед каждым ответом ~50–400 токенов, они оплачиваются как текст на выходе; thinkingLevel он не принимает)
+        и сжатие памяти разговора: Live в КАЖДОМ ответе заново оплачивает весь
         разговор, поэтому, когда он вырос, старое начало отбрасывается (инструкция и инструменты остаются всегда)."""
-        from .ai import thinking_config
-
         speech: dict[str, Any] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.persona.voice}}}
         gen: dict[str, Any] = {"responseModalities": ["AUDIO"], "speechConfig": speech}
         decls = self.declarations()
@@ -439,8 +438,8 @@ class _Session:
         if tools:
             setup["tools"] = tools
         level = 0 if model.startswith("qwen") else _extras_level.get(model, 2)
-        if level >= 2 and (tc := thinking_config(model, 0)) is not None:
-            gen["thinkingConfig"] = tc
+        if level >= 2:
+            gen["thinkingConfig"] = {"thinkingBudget": 0}
         if level >= 1:
             # ~3 знака на токен: инструкция + описания инструментов — постоянная часть; разговор сверху — до ~8 тыс. токенов
             base = (len(self.system) + len(json.dumps(decls, ensure_ascii=False))) // 3

@@ -49,7 +49,6 @@ async def main() -> None:
 
     phone = FakePhone()
     sess = phone_cheap.PhoneCheap(profile, persona, phone, {"battery": 90}, memory)
-    sess.speaker.warm()
     for phrase in phrases:
         phone.first_audio, phone.audio, phone.messages = None, 0, []
         meter = billing.start_session("probe", "economy")

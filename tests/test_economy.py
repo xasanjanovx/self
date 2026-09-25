@@ -86,11 +86,11 @@ def test_telegram_call_refused_after_limit(monkeypatch):
 
 
 # ------------------------------------------------------------------ Live: сжатие памяти, «размышления», промпт звонка
-def test_live_setup_has_compression_and_minimal_thinking(monkeypatch):
+def test_live_setup_has_compression_and_no_thinking(monkeypatch):
     monkeypatch.setattr(live_call, "_extras_level", {})
     sess = live_call._Session(_profile(), Persona(lang="ru"), mode="phone", system="x" * 3000)
     setup = sess.setup_payload("gemini-3.8-live", rich=False)["setup"]
-    assert setup["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert setup["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
     cw = setup["contextWindowCompression"]
     assert cw["triggerTokens"] > cw["slidingWindow"]["targetTokens"] > 1000
     live_call._extras_level["gemini-3.8-live"] = 1
@@ -333,3 +333,55 @@ def test_cheap_message_confirmation_is_spoken(monkeypatch, contacts):
     sess, ws, spoken = _cheap(monkeypatch, [_call("telegram_send", who="мама", text="буду в семь")])
     asyncio.run(sess._on_text("напиши маме, что буду в семь", visible=True))
     assert spoken == ["Отправить Ойижон: «буду в семь»?"]
+
+
+# ------------------------------------------------------------------ голос ответа: потоковый TTS, запасной — Live
+def test_speaker_streams_tts_and_stops_on_barge_in(monkeypatch):
+    sent: list[bytes] = []
+
+    async def send(b: bytes) -> None:
+        sent.append(b)
+        if len(sent) == 2:
+            speaker.interrupt()  # перебил голосом посреди ответа
+
+    async def stream(text, *, voice="Kore", model=""):
+        for i in range(5):
+            yield bytes([i]) * 10
+
+    speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
+    monkeypatch.setattr(phone_cheap.ai, "speak_stream", stream)
+    assert asyncio.run(speaker.say("Готово.")) is True
+    assert len(sent) == 2 and not speaker.speaking
+
+
+def test_speaker_falls_back_to_live_voice(monkeypatch):
+    async def send(b: bytes) -> None:
+        pass
+
+    async def broken(text, *, voice="Kore", model=""):
+        raise RuntimeError("TTS 429")
+        yield b""  # noqa: unreachable — это генератор
+
+    speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
+    monkeypatch.setattr(phone_cheap.ai, "speak_stream", broken)
+    live_said: list[str] = []
+
+    async def ready(timeout: float = 6.0) -> bool:
+        return True
+
+    async def say_live(text: str) -> bool:
+        live_said.append(text)
+        return True
+
+    monkeypatch.setattr(speaker, "_ready", ready)
+    monkeypatch.setattr(speaker, "_say_live", say_live)
+    assert asyncio.run(speaker.say("Готово.")) is True and live_said == ["Готово."]
+
+
+def test_voice_agent_turn_is_billed_as_agent():
+    from bot.ai import _usage_kind
+
+    audio = {"contents": [{"role": "user", "parts": [{"inline_data": {"mime_type": "audio/wav", "data": ""}}]}]}
+    assert _usage_kind("gemini-3.5-flash-lite", audio) == "stt"
+    assert _usage_kind("gemini-3.5-flash-lite", {**audio, "tools": [{}]}) == "agent"
+    assert _usage_kind("gemini-3.8-flash-lite-tts", audio) == "tts"

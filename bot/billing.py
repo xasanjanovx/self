@@ -34,6 +34,7 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-3.5-flash-lite": {"text_in": 0.3, "audio_in": 0.3, "image_in": 0.3, "text_out": 2.5},
     "gemini-3.5-flash": {"text_in": 1.5, "audio_in": 1.5, "image_in": 1.5, "text_out": 9.0},
     "gemini-3.1-flash-lite": {"text_in": 0.25, "audio_in": 0.5, "image_in": 0.25, "text_out": 1.5},
+    "gemini-3.8-flash-lite-tts": {"text_in": 0.5, "audio_out": 6.0},
     "gemini-2.5-flash-preview-tts": {"text_in": 0.5, "audio_out": 10.0},
     "gemini-2.5-pro-preview-tts": {"text_in": 1.0, "audio_out": 20.0},
     "gemini-2.5-flash-lite": {"text_in": 0.1, "audio_in": 0.3, "image_in": 0.1, "text_out": 0.4},

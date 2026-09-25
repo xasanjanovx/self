@@ -37,10 +37,15 @@ def _backoff(attempt: int) -> float:
     return delay + random.uniform(0, delay * 0.25)
 
 
+FAST_TTS_MODEL = "gemini-3.8-flash-lite-tts"   # ответы Джарвиса на телефоне (экономный режим), потоком
+
+
 def _usage_kind(model: str, payload: dict[str, Any]) -> str:
     """Для отчёта о расходе: на что ушли деньги."""
     if "tts" in model:
         return "tts"
+    if payload.get("tools"):
+        return "agent"  # и голосовой ход экономного режима (звук + инструменты) — это агент, а не расшифровка
     mimes = {str((p.get("inline_data") or p.get("inlineData") or {}).get("mime_type") or (p.get("inline_data") or p.get("inlineData") or {}).get("mimeType") or "")
              for c in payload.get("contents") or [] for p in (c.get("parts") or []) if isinstance(p, dict)}
     if any(m.startswith("audio") for m in mimes):
@@ -384,6 +389,37 @@ class AIService:
             await asyncio.sleep(0.8 * (attempt + 1))
         logger.error("TTS gave up after 3 attempts (finish=%s)", last.get("finishReason"))
         return None
+
+    async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL):
+        """Текст → речь потоком (PCM s16le, 24 kHz, mono): первые куски звука — через ~0.6 с, пока модель договаривает.
+        gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз."""
+        url = f"{self.base_url}/{model}:streamGenerateContent?alt=sse"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
+        }
+        usage: dict[str, Any] | None = None
+        try:
+            async with self._client.stream("POST", url, json=payload) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    if response.status_code == 429:
+                        billing.rate_limited()
+                    if billing.is_billing_error(response.status_code, body):
+                        billing.exhausted(body)
+                    raise RuntimeError(f"TTS {model} {response.status_code}: {body[:200]}")
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = json.loads(line[6:])
+                    usage = data.get("usageMetadata") or usage
+                    for cand in data.get("candidates") or []:
+                        for part in (cand.get("content") or {}).get("parts") or []:
+                            blob = part.get("inlineData") if isinstance(part, dict) else None
+                            if blob and blob.get("data"):
+                                yield base64.b64decode(blob["data"])
+        finally:
+            billing.record(model, usage, kind="voice")
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
         text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)
