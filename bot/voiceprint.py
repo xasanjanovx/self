@@ -1,16 +1,16 @@
-"""«Только мой голос»: отпечаток голоса владельца и проверка, что «Nurai» сказал именно он.
+"""«Только мой голос»: отпечаток голоса владельца и проверка, что «ZEKI» сказал именно он.
 
 Модель CAM++ (3D-Speaker, sherpa-onnx) превращает запись в вектор голоса; похожесть — косинус.
-Отпечаток — среднее по записи: 10 раз «Nurai» + ~40 с чтения текста (короткое «Nurai» само по себе
+Отпечаток — среднее по записи: 10 раз «ZEKI» + ~40 с чтения текста (короткое «ZEKI» само по себе
 даёт мало данных: у одного и того же голоса на 1–2 с похожесть гуляет 0.3–0.7, у чужих — до ~0.27).
 Порог подбирается под человека по его же коротким записям — строго, но так, чтобы его не отсекало.
 
-Сырая похожесть на коротком «Nurai» у чужих голосов бывает до ~0.58, поэтому решаем по нормированной:
+Сырая похожесть на коротком «ZEKI» у чужих голосов бывает до ~0.58, поэтому решаем по нормированной:
 насколько запись ближе к нему, чем к «толпе» из 12 других голосов (z-норма, models/cohort_live.npy).
 Проверено на голосах Gemini: свой — z 0.4…1.5, чужие — не выше 0.5; порог — по его собственной записи.
 
 Модель — DATA_DIR/models (том, переживает пересборку); нет модели или библиотеки — проверка выключена,
-Nurai работает как раньше. Отпечаток — DATA_DIR/voiceprint_<uid>.json.
+ZEKI работает как раньше. Отпечаток — DATA_DIR/voiceprint_<uid>.json.
 """
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def _embed_sync(ext: Any, x):
 
 # ------------------------------------------------------------------ отпечаток
 def calibrate(scores: list[float]) -> float:
-    """Порог по его же коротким «Nurai»: чуть ниже худших 10% — но в разумных рамках."""
+    """Порог по его же коротким «ZEKI»: чуть ниже худших 10% — но в разумных рамках."""
     import numpy as np
 
     if not scores:
@@ -172,7 +172,7 @@ def calibrate(scores: list[float]) -> float:
 
 
 async def enroll(uid: int, wake_wavs: list[bytes], reading_wav: bytes | None) -> dict[str, Any]:
-    """Записать отпечаток: короткие «Nurai» + длинное чтение. Возвращает порог и оценки."""
+    """Записать отпечаток: короткие «ZEKI» + длинное чтение. Возвращает порог и оценки."""
     import numpy as np
 
     ext = await extractor()
@@ -249,11 +249,36 @@ async def verify(uid: int, wav: bytes) -> dict[str, Any]:
     else:
         ok = score >= float(data["threshold"])
     return {"ok": ok, "score": round(score, 3), "z": None if z is None else round(z, 2),
-            "threshold": z_thr if z is not None and z_thr is not None else data["threshold"]}
+            "threshold": z_thr if z is not None and z_thr is not None else data["threshold"], "_emb": e}
 
 
-OTHER_Z_MARGIN = 0.15    # посреди разговора мягче, чем на «Джарвис»: его самого лучше лишний раз пропустить, чем не услышать
+OTHER_Z_MARGIN = 0.15    # посреди разговора мягче, чем на «ZEKI»: его самого лучше лишний раз пропустить, чем не услышать
 OTHER_SCORE = 0.25
+SAME_SCORE = 0.5         # сырая похожесть на отпечаток выше — это он, как бы ни вышла нормировка (25.09 его фразы
+                         # с похожестью 0.7–0.86 и z≈0 отсекались как чужие — отсюда и «не слышит»)
+
+# Образец ЭТОГО разговора: его «ZEKI», подтверждённое при пробуждении, и его же уверенные фразы. Тот же телефон, та же
+# комната и расстояние — сравнение с ним надёжнее отпечатка, записанного однажды в тишине.
+ANCHOR_TTL_S = 180.0
+ANCHOR_MAX = 6
+ANCHOR_SAME = 0.5        # похожесть на его фразы разговора выше — точно он (фраза сама становится образцом)
+ANCHOR_OTHER = 0.35      # ниже (и на отпечаток не похоже) — чужой голос
+_anchors: dict[int, tuple[float, list[Any]]] = {}
+
+
+def remember(uid: int, emb: Any) -> None:
+    """Его голос в этом разговоре (подтверждённое «ZEKI» или его уверенная фраза) — образец для следующих фраз."""
+    if emb is None:
+        return
+    at, embs = _anchors.get(uid, (0.0, []))
+    if time.monotonic() - at > ANCHOR_TTL_S:
+        embs = []
+    _anchors[uid] = (time.monotonic(), (embs + [emb])[-ANCHOR_MAX:])
+
+
+def anchors(uid: int) -> list[Any]:
+    at, embs = _anchors.get(uid, (0.0, []))
+    return embs if time.monotonic() - at <= ANCHOR_TTL_S else []
 
 
 def enrolled(uid: int) -> bool:
@@ -261,19 +286,33 @@ def enrolled(uid: int) -> bool:
 
 
 async def is_other(uid: int, wav: bytes) -> dict[str, Any]:
-    """Фраза посреди разговора — явно чужой голос (телевизор, кто-то рядом)? {"other": bool, …}.
+    """Фраза посреди разговора — чужой голос (телевизор, кто-то рядом)? {"other": bool, "anchor": похожесть на образец разговора, …}.
+
+    Его: похоже на образец разговора, или на отпечаток (сырая похожесть высокая, или нормированная выше порога).
+    Чужой: не похоже ни на то, ни на другое. На грани — пропускаем (его лучше не терять).
     Короткое, неразборчивое, нет отпечатка или модели — не чужое."""
     res = await verify(uid, wav)
-    if res.get("ok") or res.get("reason") == "short" or res.get("enrolled") is False or res.get("unchecked"):
+    emb = res.pop("_emb", None)
+    if res.get("reason") == "short" or res.get("enrolled") is False or res.get("unchecked") or emb is None:
         return {**res, "other": False}
     score, z, thr = float(res.get("score") or 0), res.get("z"), float(res.get("threshold") or 0)
-    other = score < OTHER_SCORE or (z < thr - OTHER_Z_MARGIN if z is not None else score < thr - 0.08)
-    return {**res, "other": other}
+    near = [float(a @ emb) for a in anchors(uid)]
+    anchor = round(max(near), 3) if near else None
+    strong = bool(res.get("ok")) or (anchor is not None and anchor >= ANCHOR_SAME)
+    if strong or score >= SAME_SCORE or (z is not None and z >= thr):
+        if strong:
+            remember(uid, emb)
+        return {**res, "other": False, "anchor": anchor}
+    if anchor is not None:
+        other = anchor < ANCHOR_OTHER and score < SAME_SCORE - 0.05
+    else:
+        other = score < OTHER_SCORE or (z < thr - OTHER_Z_MARGIN if z is not None else score < thr - 0.08)
+    return {**res, "other": other, "anchor": anchor}
 
 
 async def warm() -> None:
-    """При запуске: модель в память заранее (первое «Nurai» не ждёт загрузки)."""
+    """При запуске: модель в память заранее (первое «ZEKI» не ждёт загрузки)."""
     await extractor()
 
 
-__all__ = ["enroll", "verify", "status", "forget", "calibrate", "warm", "available"]
+__all__ = ["enroll", "verify", "status", "forget", "calibrate", "warm", "available", "is_other", "remember", "anchors"]

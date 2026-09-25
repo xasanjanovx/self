@@ -1,4 +1,4 @@
-"""Живой разговор с Nurai на телефоне (как Gemini Live): телефон ⇄ WebSocket ⇄ Gemini Live.
+"""Живой разговор с ZEKI на телефоне (как Gemini Live): телефон ⇄ WebSocket ⇄ Gemini Live.
 
 Тот же голос, характер и инструменты, что в звонках бота (bot/live_call.py, режим "phone"), плюс
 телефонные действия (bot/phone.py): звонок, SMS, Telegram от имени владельца, будильник, таймер,
@@ -15,7 +15,7 @@
     {"type":"action_error","text":…} — действие на телефоне не удалось; {"type":"bye"}
     {"type":"image",…} — кадр камеры/экрана (device.frames_on_request — только в ответ на frame_request)
   сервер → телефон
-    бинарные кадры — голос Nurai, PCM s16le 24 кГц моно
+    бинарные кадры — голос ZEKI, PCM s16le 24 кГц моно
     {"type":"ready"} {"type":"user","text":…} {"type":"jarvis","text":…} {"type":"turn_complete"} {"type":"interrupted"}
     {"type":"action","action":{…}} {"type":"status","text":…} {"type":"need_contacts"} {"type":"end"} {"type":"error","text":…}
     {"type":"frame_request"} — пришли один свежий кадр камеры/экрана
@@ -28,6 +28,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import wave
 from typing import Any
@@ -45,11 +46,21 @@ logger = logging.getLogger(__name__)
 INPUT_RATE = 16000
 # он выбрал: ждать 1 секунду тишины — не обрывать на полуслове, если задумался посреди фразы
 VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 1000)
+OWNER_STRICT = (os.getenv("PHONE_OWNER_STRICT") or "1") != "0"  # «только мой голос» и посреди разговора
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
 IDLE_END_S = 15.0        # он выбрал: 15 с тишины — разговор закрывается
 IDLE_END_ECONOMY = 8.0   # после дневного лимита — быстрее
 FRAME_EVERY_S = 3.0      # камера/экран: пока он говорит — не чаще кадра в 3 с
 FIRST_FRAME_WAIT_S = 4.0  # «посмотри»: результат инструмента отдаём, когда первый кадр уже в разговоре
+
+
+# он пишет и говорит только кириллицей и латиницей (ru/uz/en): арабица, иероглифы, деванагари и пр. в субтитрах —
+# ошибка распознавания тихой речи, такое не показываем
+_FOREIGN_SCRIPT = re.compile(r"[\u0370-\u03ff\u0590-\u08ff\u0900-\u0dff\u0e00-\u0fff\u1100-\u11ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+
+
+def foreign_script(text: str) -> bool:
+    return bool(_FOREIGN_SCRIPT.search(text or ""))
 
 
 class SpeechGate:
@@ -77,7 +88,7 @@ class SpeechGate:
             return []
         dur = len(x) / INPUT_RATE
         rms = float(np.sqrt(np.mean(x * x)))
-        loud = rms > max(self.floor * 2.5, 350.0)
+        loud = rms > max(self.floor * 2.2, 220.0)  # тихая речь — тоже речь (было ×2.5 и 350: тихое не доходило)
         if not loud and rms > 0:
             self.floor = min(3000.0, max(50.0, self.floor * 0.95 + rms * 0.05))
         if loud:
@@ -103,7 +114,7 @@ class SpeechGate:
 
 class OwnerGate:
     """«Только мой голос» посреди разговора: начало каждой фразы (~1.2 с) сверяем с его отпечатком; явно чужой голос
-    (телевизор, кто-то рядом, эхо самого Nurai) в Gemini не уходит — не оплачивается и не вызывает ответ.
+    (телевизор, кто-то рядом, эхо самого ZEKI) в Gemini не уходит — не оплачивается и не вызывает ответ.
     Его фразы уходят целиком: задержка — только в начале (конец фразы Gemini слышит вовремя)."""
 
     CHECK_S = 1.2
@@ -136,10 +147,13 @@ class OwnerGate:
                 if verdict.get("other"):
                     self.state = "drop"
                     self.dropped += 1
-                    logger.info("phone live: чужой голос — в Gemini не отправляю (сходство %s, z %s)", verdict.get("score"), verdict.get("z"))
+                    logger.info("phone live: чужой голос — в Gemini не отправляю (сходство %s, z %s, с его фразами %s)",
+                                verdict.get("score"), verdict.get("z"), verdict.get("anchor"))
                 else:
                     self.state = "pass"
                     out = [audio]
+                    logger.info("phone live: его голос (сходство %s, z %s, с его фразами %s)", verdict.get("score"), verdict.get("z"),
+                                verdict.get("anchor"))
         elif self.state == "pass":
             out = chunks
         if not active:
@@ -240,8 +254,11 @@ class PhoneLive(_Session):
         if self.vad_tuned:
             vad: dict[str, Any] = {"endOfSpeechSensitivity": "END_SENSITIVITY_HIGH", "silenceDurationMs": VAD_SILENCE_MS, "prefixPaddingMs": 200}
             if self.turn.device.get("duplex"):
-                # телефон шлёт микрофон и пока Джарвис говорит (эхоподавление): остаток эха не должен его перебивать
+                # телефон шлёт микрофон и пока ZEKI говорит (эхоподавление): остаток эха не должен его перебивать
                 vad["startOfSpeechSensitivity"] = "START_SENSITIVITY_LOW"
+            else:
+                # он говорит тихо — пусть Gemini слышит и тихую речь (чужие голоса до Gemini не доходят: OwnerGate)
+                vad["startOfSpeechSensitivity"] = "START_SENSITIVITY_HIGH"
             payload["setup"]["realtimeInputConfig"] = {"automaticActivityDetection": vad}
         return payload
 
@@ -412,7 +429,7 @@ class PhoneLive(_Session):
                 if blob.get("data"):
                     self._last_model_audio = time.monotonic()
                     await self.to_phone(base64.b64decode(blob["data"]))
-            if (t := (sc.get("inputTranscription") or {}).get("text")):
+            if (t := (sc.get("inputTranscription") or {}).get("text")) and not foreign_script(t):
                 self._in_text.append(t)
                 await self.to_phone({"type": "user", "text": t})
             if (t := (sc.get("outputTranscription") or {}).get("text")):
@@ -496,7 +513,7 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
 
 # ------------------------------------------------------------------ phone_task: редкое на телефоне — делает Flash-Lite
 PHONE_TASK_SYSTEM = (
-    "Ты исполнитель команд на Android-телефоне владельца для голосового ассистента Nurai. Выполни просьбу своими инструментами "
+    "Ты исполнитель команд на Android-телефоне владельца для голосового ассистента ZEKI. Выполни просьбу своими инструментами "
     "сразу, без уточнений: кому звонить/писать — инструмент сам выбирает лучшее совпадение, в variants — другие написания и "
     "родственные слова (мама → ойи, онам, ona, oyijon). Текст сообщения — от первого лица владельца, как он продиктовал "
     "(узбекский — латиницей). Если инструмент вернул ask_exactly — больше ничего не делай. В конце — одна короткая фраза-итог "
@@ -584,7 +601,7 @@ async def _close_built(task: asyncio.Task) -> None:
 
 
 def prewarm(uid: int) -> None:
-    """Начать собирать разговор, пока проверяется «Nurai». Телефон ещё ни разу не подключался — не с чем.
+    """Начать собирать разговор, пока проверяется «ZEKI». Телефон ещё ни разу не подключался — не с чем.
     Экономный режим начинается без Gemini Live — заготовка не нужна."""
     device = _last_device.get(uid)
     if device is None or _modes.get(uid, "live") != "live" or not billing.live_allowed("phone"):
@@ -601,7 +618,7 @@ def prewarm(uid: int) -> None:
 
 
 def discard(uid: int) -> None:
-    """Заготовка не пригодилась (не «Nurai» или телефон так и не подключился)."""
+    """Заготовка не пригодилась (не «ZEKI» или телефон так и не подключился)."""
     item = _warm.pop(uid, None)
     if item is None:
         return
@@ -678,7 +695,11 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
     profile = sess.profile
     sess.phone_ws = phone_ws
     sess.frames_on_request = bool(device.get("frames_on_request"))
-    sess.owner.enabled = False  # отсекал его самого (см. phone_cheap.OWNER_CHECK); чужих отсекает wake_check
+    # «только мой голос» строго (он выбрал 26.09): и посреди разговора чужие голоса и телевизор в Gemini не уходят.
+    # Раньше отсекал его самого (нормировка по «толпе») — теперь главное сравнение с его же «ZEKI» из этого разговора
+    from . import voiceprint
+
+    sess.owner.enabled = OWNER_STRICT and voiceprint.enrolled(uid)
     if warm:
         # заготовка собрана с прошлыми данными телефона — свежие (заряд, пропущенные, блокировка) пометкой
         stale = phone.device_prompt(sess.turn.device)

@@ -1,6 +1,6 @@
 """Звонок в Telegram от аккаунта-помощника (userbot) — Telethon + pytgcalls.
 
-Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «Nurai»: у тебя
+Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «ZEKI»: у тебя
 на экране обычный входящий Telegram-звонок, в трубке — синтезированный голос.
 
 Включается, только если в .env заданы TG_CALLER_API_ID / TG_CALLER_API_HASH /
@@ -85,7 +85,7 @@ async def start() -> bool:
             return False
 
 
-ASSISTANT_NAME = "Nurai"  # он переименовал ассистента 25.09.2026 (раньше «Jarvis»); юзернейм аккаунта не меняем
+ASSISTANT_NAME = "ZEKI"  # он переименовал ассистента 25.09.2026 (раньше «Jarvis»); юзернейм аккаунта не меняем
 
 
 async def _ensure_display_name(me: Any) -> None:
@@ -260,7 +260,7 @@ def _hook_updates() -> None:
 
 
 def _answer_or_decline(chat_id: int) -> None:
-    """Кто-то звонит аккаунту Nurai. Владелец — берём трубку (разговор ведёт call_assistant),
+    """Кто-то звонит аккаунту ZEKI. Владелец — берём трубку (разговор ведёт call_assistant),
     остальным — сбрасываем: это личный помощник, а не общий номер."""
     async def run() -> None:
         taken = False
@@ -398,7 +398,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
 def classify_error(exc: Exception) -> str | None:
     """Почему звонок не состоялся — чтобы сказать человеку, ЧТО сделать, а не «не удалось».
 
-    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт Nurai;
+    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт ZEKI;
     no_answer — звонило, но трубку не взяли (часто: звонящего нет в контактах → телефон глушит);
     None      — отклонил / занято (сам решил не брать)."""
     name = type(exc).__name__.lower()
@@ -526,7 +526,7 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
 
 
 async def send_message(user_id: int, text: str) -> bool:
-    """Сообщение от лица «Nurai» (например, если звонок не прошёл)."""
+    """Сообщение от лица «ZEKI» (например, если звонок не прошёл)."""
     if not await start():
         return False
     try:

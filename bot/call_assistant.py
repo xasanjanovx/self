@@ -1,4 +1,4 @@
-"""Звонок по требованию: «позвони» → Nurai звонит и говорит с тобой голосом.
+"""Звонок по требованию: «позвони» → ZEKI звонит и говорит с тобой голосом.
 
 Отличие от подъёма (bot/wake_runner.py): здесь обычный разговор с полным доступом
 к данным — тот же агент, что и в чате, со всеми инструментами. Можно спросить
@@ -65,7 +65,7 @@ def voice_reply(text: str) -> str:
 
 
 async def _agent_answer(profile: Profile, text: str, history: list[dict[str, Any]], snapshot: str) -> tuple[str, list[dict[str, Any]]]:
-    """Ответ «Nurai» со всеми инструментами — как в чате, но короткий, для трубки."""
+    """Ответ «ZEKI» со всеми инструментами — как в чате, но короткий, для трубки."""
     from .handlers.agent import run_agent
 
     hint = ("[разговор по телефону: ответь ОДНИМ-ДВУМЯ короткими предложениями, без списков, "
@@ -142,29 +142,29 @@ async def call_now(profile: Profile, *, topic: str = "", lang: str | None = None
 
 
 # что сделать, если звонок не доходит (у приглашённых чаще всего: аккаунта Джарвиса нет в контактах)
-_FIX_RU = ("Сделай один раз: 1) открой аккаунт Nurai (кнопка ниже или чат от него) → «Добавить в контакты»; "
+_FIX_RU = ("Сделай один раз: 1) открой аккаунт ZEKI (кнопка ниже или чат от него) → «Добавить в контакты»; "
            "2) Telegram → Настройки → Конфиденциальность → Звонки → «Все» (или «Мои контакты»).")
-_FIX_UZ = ("Bir marta qiling: 1) Nurai akkauntini oching (pastdagi tugma yoki undan kelgan chat) → «Kontaktga qo'shish»; "
+_FIX_UZ = ("Bir marta qiling: 1) ZEKI akkauntini oching (pastdagi tugma yoki undan kelgan chat) → «Kontaktga qo'shish»; "
            "2) Telegram → Sozlamalar → Maxfiylik → Qo'ng'iroqlar → «Hamma» (yoki «Kontaktlarim»).")
-_DEVICE_RU = ("Если телефон не звонил, а пришёл только «пропущенный»: добавь Nurai в контакты; на iPhone выключи "
+_DEVICE_RU = ("Если телефон не звонил, а пришёл только «пропущенный»: добавь ZEKI в контакты; на iPhone выключи "
               "Настройки → Телефон → «Заглушение неизвестных»; на Android разреши Telegram уведомления о звонках и работу в фоне.")
-_DEVICE_UZ = ("Telefon jiringlamay, faqat «o'tkazib yuborilgan» kelgan bo'lsa: Nuraini kontaktlarga qo'shing; iPhone'da "
+_DEVICE_UZ = ("Telefon jiringlamay, faqat «o'tkazib yuborilgan» kelgan bo'lsa: ZEKIni kontaktlarga qo'shing; iPhone'da "
               "Sozlamalar → Telefon → «Noma'lumlarni o'chirish»ni o'chiring; Android'da Telegram'ga qo'ng'iroq bildirishnomalari va fon rejimiga ruxsat bering.")
 HELPER_INTRO = {
-    "ru": ("Ассалому алайкум! Я — Nurai, помощник из бота. С этого аккаунта я вам звоню (будильник и разговор). "
+    "ru": ("Ассалому алайкум! Я — ZEKI, помощник из бота. С этого аккаунта я вам звоню (будильник и разговор). "
            "Чтобы звонки приходили, добавьте меня в контакты — кнопка «Добавить в контакты» вверху этого чата — "
            "и разрешите звонки: Настройки → Конфиденциальность → Звонки."),
-    "uz": ("Assalomu alaykum! Men — Nurai, botdagi yordamchi. Shu akkauntdan sizga qo'ng'iroq qilaman (budilnik va suhbat). "
+    "uz": ("Assalomu alaykum! Men — ZEKI, botdagi yordamchi. Shu akkauntdan sizga qo'ng'iroq qilaman (budilnik va suhbat). "
            "Qo'ng'iroqlar kelishi uchun meni kontaktlarga qo'shing — shu chat tepasidagi «Kontaktga qo'shish» tugmasi — "
            "va qo'ng'iroqlarga ruxsat bering: Sozlamalar → Maxfiylik → Qo'ng'iroqlar."),
-    "en": ("Assalamu alaikum! I'm Nurai, the assistant from the bot. I call you from this account (alarm and conversations). "
+    "en": ("Assalamu alaikum! I'm Zeki, the assistant from the bot. I call you from this account (alarm and conversations). "
            "For calls to come through, add me to your contacts — the “Add contact” button at the top of this chat — "
            "and allow calls: Settings → Privacy → Calls."),
 }
 
 
 async def helper_intro(profile: Profile) -> bool:
-    """Аккаунт Nurai один раз пишет человеку: появляется чат с кнопкой Telegram «Добавить в контакты»
+    """Аккаунт ZEKI один раз пишет человеку: появляется чат с кнопкой Telegram «Добавить в контакты»
     (номер телефона никому давать не нужно). Только приглашённым, не чаще одного раза."""
     from . import access
     from .context import db
@@ -189,19 +189,19 @@ async def _notify_failure(profile: Profile, error: str) -> None:
     reasons = {
         "tts unavailable": ("Не смог синтезировать голос — отвечаю текстом.", "Ovozni tayyorlay olmadim — matn bilan javob beraman."),
         "caller is not configured": ("Звонки пока не настроены.", "Qo'ng'iroqlar hali sozlanmagan."),
-        "peer_unknown": ("Аккаунт Nurai тебя ещё «не знает». " + _FIX_RU, "Nurai akkaunti sizni hali tanimaydi. " + _FIX_UZ),
-        "privacy": ("Telegram не пропустил звонок: твои настройки «Кто может мне звонить» запрещают аккаунту Nurai. " + _FIX_RU,
-                    "Telegram qo'ng'iroqni o'tkazmadi: «Kim menga qo'ng'iroq qila oladi» sozlamasi Nurai akkauntiga ruxsat bermayapti. " + _FIX_UZ),
+        "peer_unknown": ("Аккаунт ZEKI тебя ещё «не знает». " + _FIX_RU, "ZEKI akkaunti sizni hali tanimaydi. " + _FIX_UZ),
+        "privacy": ("Telegram не пропустил звонок: твои настройки «Кто может мне звонить» запрещают аккаунту ZEKI. " + _FIX_RU,
+                    "Telegram qo'ng'iroqni o'tkazmadi: «Kim menga qo'ng'iroq qila oladi» sozlamasi ZEKI akkauntiga ruxsat bermayapti. " + _FIX_UZ),
         "no_answer": ("Звонила, но трубку не взяли. " + _DEVICE_RU, "Qo'ng'iroq qildim, lekin javob bo'lmadi. " + _DEVICE_UZ),
-        "daily_limit": ("Дневной лимит на живой голос исчерпан — позвоню завтра. Пишите здесь или зовите «Nurai» на телефоне (экономный режим).",
-                        "Jonli ovoz uchun kunlik limit tugadi — ertaga qo'ng'iroq qilaman. Shu yerda yozing yoki telefonda «Nurai» deng."),
+        "daily_limit": ("Дневной лимит на живой голос исчерпан — позвоню завтра. Пишите здесь или зовите «ZEKI» на телефоне (экономный режим).",
+                        "Jonli ovoz uchun kunlik limit tugadi — ertaga qo'ng'iroq qilaman. Shu yerda yozing yoki telefonda «ZEKI» deng."),
     }
     ru, uz = reasons.get(error, ("Дозвониться не получилось — возможно, звонок отклонён или закрыт настройками приватности.",
                                  "Qo'ng'iroq o'tmadi — rad etilgan yoki maxfiylik sozlamalari to'sib turgan bo'lishi mumkin."))
     fixable = error in {"privacy", "no_answer", "peer_unknown"}
     if fixable and caller.helper_username:
-        ru += f" Аккаунт Nurai: @{caller.helper_username}"
-        uz += f" Nurai akkaunti: @{caller.helper_username}"
+        ru += f" Аккаунт ZEKI: @{caller.helper_username}"
+        uz += f" ZEKI akkaunti: @{caller.helper_username}"
     if fixable:
         await helper_intro(profile)
     await show_home(profile, f"📵 {profile.tr(ru, uz)}", helper_button=fixable)
@@ -209,7 +209,7 @@ async def _notify_failure(profile: Profile, error: str) -> None:
 
 async def show_home(profile: Profile, notice: str | None = None, *, undo: bool = False, helper_button: bool = False) -> None:
     """Главный экран (он в чате один) + строка про звонок — вместо отдельных сообщений,
-    которые потом висят в чате. Заодно убирает экран Nurai, с которого звонили."""
+    которые потом висят в чате. Заодно убирает экран ZEKI, с которого звонили."""
     try:
         from aiogram.types import InlineKeyboardMarkup
 
@@ -224,7 +224,7 @@ async def show_home(profile: Profile, notice: str | None = None, *, undo: bool =
         kb = main_menu_keyboard(profile.lang, undo=undo)
         if helper_button and caller.helper_id:
             # открыть профиль аккаунта Джарвиса → «Добавить в контакты» (без номера телефона)
-            button = _btn("👤 " + profile.tr("Аккаунт Nurai", "Nurai akkaunti"), url=f"tg://user?id={caller.helper_id}")
+            button = _btn("👤 " + profile.tr("Аккаунт ZEKI", "ZEKI akkaunti"), url=f"tg://user?id={caller.helper_id}")
             try:
                 await screen_mod.show_screen(bot_instance(), profile.telegram_id, text,
                                              InlineKeyboardMarkup(inline_keyboard=[[button], *kb.inline_keyboard]))
@@ -241,7 +241,7 @@ _running: set[int] = set()  # один звонок на человека одн
 
 async def _remember_call(profile: Profile, transcript: list[str]) -> None:
     """Один «мозг»: разговор по телефону попадает в историю чата и в недавние реплики,
-    чтобы в чате Nurai знал, о чём говорили («как я сказал по телефону…»)."""
+    чтобы в чате ZEKI знал, о чём говорили («как я сказал по телефону…»)."""
     lines = [t for t in transcript if t.strip() and not t.rstrip().endswith(":")]
     if not lines:
         return
@@ -251,7 +251,7 @@ async def _remember_call(profile: Profile, transcript: list[str]) -> None:
 
         text = "\n".join(lines[-30:])[:3000]
         history = load_history(profile.telegram_id)
-        history.append({"role": "user", "parts": [{"text": f"(разговор по телефону с Nurai только что:\n{text})"}]})
+        history.append({"role": "user", "parts": [{"text": f"(разговор по телефону с ZEKI только что:\n{text})"}]})
         history.append({"role": "model", "parts": [{"text": "Помню наш разговор по телефону."}]})
         save_history(profile.telegram_id, history)
         asks = [t[4:] for t in lines if t.startswith("он: ")]
@@ -284,7 +284,7 @@ def call_in_background(profile: Profile, *, topic: str = "", lang: str | None = 
     """Звонок фоном: инструмент агента должен ответить сразу, а не ждать конца разговора.
 
     Разговор ведёт Gemini Live (bot/live_call.py); `lang` — только если явно попросили
-    другой язык, иначе берётся из настроек Nurai.
+    другой язык, иначе берётся из настроек ZEKI.
     """
     uid = profile.telegram_id
     if uid in _running:
@@ -349,7 +349,7 @@ def wake_test_in_background(profile: Profile) -> asyncio.Task | None:
 
 
 async def on_incoming_call(user_id: int) -> bool:
-    """Он сам позвонил аккаунту Nurai в Telegram — берём трубку и говорим (Gemini Live).
+    """Он сам позвонил аккаунту ZEKI в Telegram — берём трубку и говорим (Gemini Live).
     Только владельцу: чужим звонкам caller отвечает сбросом. False — трубку не берём."""
     from .context import settings
 
@@ -394,7 +394,7 @@ _bg: set[asyncio.Task] = set()
 
 
 async def start_listening() -> None:
-    """При запуске бота: аккаунт Nurai в сети и берёт трубку, когда владелец звонит сам."""
+    """При запуске бота: аккаунт ZEKI в сети и берёт трубку, когда владелец звонит сам."""
     caller.set_incoming_handler(on_incoming_call)
     if caller.configured():
         if await caller.start():

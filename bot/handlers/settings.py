@@ -1,8 +1,8 @@
-"""Настройки бота (Уведомления · Напоминания · Язык) и отдельный экран «Nurai»
+"""Настройки бота (Уведомления · Напоминания · Язык) и отдельный экран «ZEKI»
 (кнопка главного меню): звонок, будильник, голос и характер, звонок о важном, утро голосом.
 
 Схема одна для всех разделов: сверху карточка «что сейчас», снизу кнопки. «Назад» из
-разделов настроек ведёт в настройки, из будильника и характера — на экран «Nurai».
+разделов настроек ведёт в настройки, из будильника и характера — на экран «ZEKI».
 """
 from __future__ import annotations
 
@@ -125,7 +125,7 @@ async def render_notify(target: Message | CallbackQuery, profile: Profile, *, no
     lines = [
         f"🌅 {'Ertalabki xulosa' if uz else 'Утренняя сводка'}: <b>{_morning_label(us, uz)}</b>",
         f"🌙 {'Kechki xulosa' if uz else 'Вечерняя сводка'}: <b>{_evening_label(us, uz)}</b>",
-        f"💡 {'Nurai maslahatlari' if uz else 'Подсказки Nurai'}: <b>{'✅' if us.get('proactive', True) else '⛔'}</b>",
+        f"💡 {'ZEKI maslahatlari' if uz else 'Подсказки ZEKI'}: <b>{'✅' if us.get('proactive', True) else '⛔'}</b>",
         f"🎙 {'Ovozli javoblar' if uz else 'Голосовые ответы'}: <b>{'✅' if us.get('voice_reply', True) else '⛔'}</b>",
     ]
     text = ui.join(ui.title("🔔", "Bildirishnomalar" if uz else "Уведомления"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
@@ -150,7 +150,7 @@ async def cb_notify(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("settings:toggle:"))
 async def cb_toggle(callback: CallbackQuery) -> None:
-    """Подсказки Nurai и голосовые ответы."""
+    """Подсказки ZEKI и голосовые ответы."""
     profile = await get_profile(callback.from_user)
     field = callback.data.split(":")[-1]
     if field not in {"proactive", "voice_reply"} or not await db.ensure_available("user_settings"):
@@ -412,7 +412,7 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     length = {"short": ("коротко", "qisqa"), "normal": ("обычно", "o'rtacha"), "detailed": ("подробно", "batafsil")}[p.verbosity]
     lines = [
         f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b>",
-        f"🗣 {'Nurai tili' if uz else 'Язык Nurai'}: <b>{i18n.LANG_NAMES[p.lang]}</b> "
+        f"🗣 {'ZEKI tili' if uz else 'Язык ZEKI'}: <b>{i18n.LANG_NAMES[p.lang]}</b> "
         f"<i>({'chat, qo`ng`iroq, ovoz — qaysi tilda gapirsangiz ham' if uz else 'чат, звонки, голос — на каком бы языке ты ни говорил'})</i>",
         f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}</b>"
         f" · <b>{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}</b>",
@@ -527,9 +527,9 @@ async def _send_voice_sample(callback: CallbackQuery, profile: Profile) -> None:
 
     p = await services.persona(profile.telegram_id)
     name = p.name_for(profile.first_name)
-    phrase = (f"Assalomu alaykum, {name}. Men Nuraiman, yordam berishga tayyorman." if p.lang == "uz"
-              else f"Hello, {name}. I'm Nurai, ready to help." if p.lang == "en"
-              else f"Ассалому алайкум, {name}. Я Nurai, готова помочь.")
+    phrase = (f"Assalomu alaykum, {name}. Men Zekiman, yordam berishga tayyorman." if p.lang == "uz"
+              else f"Hello, {name}. I'm Zeki, ready to help." if p.lang == "en"
+              else f"Ассалому алайкум, {name}. Я ZEKI, готова помочь.")
     try:
         from .. import qwen_live
 
@@ -564,7 +564,7 @@ async def _call_stats(profile: Profile, uz: bool) -> str | None:
 
 
 async def _important_now(profile: Profile) -> list[str]:
-    """Что сейчас важно (то, из-за чего Nurai позвонил бы сам)."""
+    """Что сейчас важно (то, из-за чего ZEKI позвонил бы сам)."""
     import re
 
     from .. import proactive
@@ -578,7 +578,7 @@ async def _important_now(profile: Profile) -> list[str]:
 
 
 async def render_jarvis_hub(target: Message | CallbackQuery, profile: Profile, *, notice: str | None = None) -> None:
-    """Экран «Nurai»: что он сейчас делает для тебя и что помнит + все его настройки."""
+    """Экран «ZEKI»: что он сейчас делает для тебя и что помнит + все его настройки."""
     from .. import agent_tools_extra as extra
     from .. import caller
     from .. import persona as persona_mod
@@ -611,7 +611,7 @@ async def render_jarvis_hub(target: Message | CallbackQuery, profile: Profile, *
         f"🎙 {'Ertalab ovozli' if uz else 'Утро голосом'}: <b>{on if p.morning_voice else off}</b>",
     ]
     text = ui.join(
-        ui.title("🤖", "Nurai" if uz else "Nurai"),
+        ui.title("🤖", "ZEKI" if uz else "ZEKI"),
         ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", now_lines),
         ui.card(f"<b>{'Muhim' if uz else 'Важно сейчас'}</b>", [f"• {h(x)}" for x in important]) if important else None,
         ui.card(f"<b>{'Sen haqingda eslayman' if uz else 'Помню о тебе'}</b> · {len(facts)}", [f"• {h(f[:80])}" for f in facts[-3:]]) if facts else None,
@@ -666,8 +666,8 @@ async def cmd_qwen_key(message: Message, command: CommandObject, state: FSMConte
     qwen_live.save_key(parts[0], parts[1] if len(parts) > 1 else "")
     note = await message.answer("🔑 Ключ Alibaba сохранён (сообщение с ним удалено). Проверяю связь с Qwen…")
     problem = await qwen_live.check()
-    text = ("✅ <b>Qwen отвечает.</b> Выберите его: Nurai → «Голос и характер» → 🧠 Qwen. Сравнить расход — спросите "
-            "Nurai «сколько потратили сегодня?»." if not problem else
+    text = ("✅ <b>Qwen отвечает.</b> Выберите его: ZEKI → «Голос и характер» → 🧠 Qwen. Сравнить расход — спросите "
+            "ZEKI «сколько потратили сегодня?»." if not problem else
             f"⚠️ Qwen не ответил: <code>{problem}</code>\nПроверьте, что ключ из региона Singapore и на счёте Alibaba есть "
             "бесплатная квота или деньги. Если ключ из workspace — пришлите <code>/qwen КЛЮЧ WORKSPACE_ID</code>.")
     try:

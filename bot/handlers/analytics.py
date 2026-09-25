@@ -70,7 +70,7 @@ async def cb_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "dash:deep")
 async def cb_deep(callback: CallbackQuery, state: FSMContext) -> None:
-    """Полный разбор через Nurai: тренды, аномалии, прогноз, «где переплачиваю»."""
+    """Полный разбор через ZEKI: тренды, аномалии, прогноз, «где переплачиваю»."""
     from .agent import handle_command
 
     await answer_now(callback, "🧠")

@@ -1,8 +1,8 @@
 """Экраны «Задачи» (+ заметки) и «Цели»: списки с кнопками, добавление текстом/голосом.
 
 Задача разбирается локально (bot/tasks.py) — без похода в AI; команды и вопросы
-(«удали…», «что у меня на завтра?») уходят Nurai, суммы («такси 25000») — в общий
-маршрутизатор. Цели создаются через Nurai (у него есть add_goal), пополнение —
+(«удали…», «что у меня на завтра?») уходят ZEKI, суммы («такси 25000») — в общий
+маршрутизатор. Цели создаются через ZEKI (у него есть add_goal), пополнение —
 кнопкой «Отложить» + число.
 """
 from __future__ import annotations
@@ -477,7 +477,7 @@ async def cb_goal_delete(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(BotStates.waiting_goal_input, F.text)
 async def msg_goal_text(message: Message, state: FSMContext) -> None:
-    """Текст на экране целей — Nurai (add_goal / update_goal), суммы — в общий маршрут."""
+    """Текст на экране целей — ZEKI (add_goal / update_goal), суммы — в общий маршрут."""
     from . import agent
     from .inbox import route_text
 

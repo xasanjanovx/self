@@ -136,7 +136,7 @@ def test_result_cards():
 
 def test_prompt_does_not_answer_bare_name():
     text = live_call.system_instruction(_profile(), Persona(lang="ru"), mode="phone")
-    assert "Сказал только «Nurai» — молчи" in text and "need_unlock" in text
+    assert "Сказал только «ZEKI» — молчи" in text and "need_unlock" in text
 
 
 @pytest.mark.parametrize("mode", ["assistant", "wake", "phone"])
@@ -160,7 +160,10 @@ def test_clean_announcement(raw, clean):
 
 def test_duplex_lowers_start_sensitivity():
     sess, _ = _session()
-    assert "startOfSpeechSensitivity" not in sess.setup_payload("m", rich=False)["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
+    setup = sess.setup_payload("m", rich=False)["setup"]
+    # без эха — слышит и тихую речь; распознаванию подсказаны его языки и имя
+    assert setup["realtimeInputConfig"]["automaticActivityDetection"]["startOfSpeechSensitivity"] == "START_SENSITIVITY_HIGH"
+    assert setup["inputAudioTranscription"]["languageCodes"] == ["ru-RU", "uz-UZ", "en-US"] and "ZEKI" in setup["inputAudioTranscription"]["customVocabulary"]
     sess.turn.device["duplex"] = True
     vad = sess.setup_payload("m", rich=False)["setup"]["realtimeInputConfig"]["automaticActivityDetection"]
     assert vad["startOfSpeechSensitivity"] == "START_SENSITIVITY_LOW"

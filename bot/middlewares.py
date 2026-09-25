@@ -87,7 +87,7 @@ def lang_from_telegram(code: str | None) -> str:
 
 
 async def _setup_new_member(user) -> str:  # noqa: ANN001
-    """Первый вход по приглашению: профиль, язык бота и Nurai — по языку его Telegram."""
+    """Первый вход по приглашению: профиль, язык бота и ZEKI — по языку его Telegram."""
     from . import cache, services
     from .context import db, settings
 
@@ -105,18 +105,18 @@ async def _setup_new_member(user) -> str:  # noqa: ANN001
 
 
 WELCOME = {
-    "ru": ("👋 <b>Добро пожаловать!</b>\n\nЭто личный помощник с ИИ «Nurai». Просто пиши или говори голосом, как человеку:\n"
+    "ru": ("👋 <b>Добро пожаловать!</b>\n\nЭто личный помощник с ИИ «ZEKI». Просто пиши или говори голосом, как человеку:\n"
            "• «такси 25 000», «обед 40к» — расходы\n• фото еды — калории\n• «напомни завтра в 9 позвонить маме»\n"
-           "• «накопить 5 млн к декабрю» — цели\n• 🤖 Nurai — звонок, будильник, голос\n\n"
-           "Все твои данные видишь только ты.\n\n📞 Nurai написал тебе из своего аккаунта — добавь его в контакты, чтобы его звонки доходили."),
-    "uz": ("👋 <b>Xush kelibsiz!</b>\n\nBu sun'iy intellektli shaxsiy yordamchi — «Nurai». Odamga yozgandek yozing yoki ovozli gapiring:\n"
+           "• «накопить 5 млн к декабрю» — цели\n• 🤖 ZEKI — звонок, будильник, голос\n\n"
+           "Все твои данные видишь только ты.\n\n📞 ZEKI написал тебе из своего аккаунта — добавь его в контакты, чтобы его звонки доходили."),
+    "uz": ("👋 <b>Xush kelibsiz!</b>\n\nBu sun'iy intellektli shaxsiy yordamchi — «ZEKI». Odamga yozgandek yozing yoki ovozli gapiring:\n"
            "• «taksi 25 000», «tushlik 40k» — xarajatlar\n• ovqat rasmi — kaloriya\n• «ertaga 9 da onamga qo'ng'iroq qilishni eslat»\n"
-           "• «dekabrgacha 5 mln yig'ish» — maqsadlar\n• 🤖 Nurai — qo'ng'iroq, budilnik, ovoz\n\n"
-           "Ma'lumotlaringizni faqat siz ko'rasiz.\n\n📞 Nurai o'z akkauntidan sizga yozdi — qo'ng'iroqlari kelishi uchun uni kontaktlarga qo'shing."),
-    "en": ("👋 <b>Welcome!</b>\n\nThis is your personal AI assistant, Nurai. Just write or speak to it like to a person:\n"
+           "• «dekabrgacha 5 mln yig'ish» — maqsadlar\n• 🤖 ZEKI — qo'ng'iroq, budilnik, ovoz\n\n"
+           "Ma'lumotlaringizni faqat siz ko'rasiz.\n\n📞 ZEKI o'z akkauntidan sizga yozdi — qo'ng'iroqlari kelishi uchun uni kontaktlarga qo'shing."),
+    "en": ("👋 <b>Welcome!</b>\n\nThis is your personal AI assistant, ZEKI. Just write or speak to it like to a person:\n"
            "• “taxi 25 000”, “lunch 40k” — expenses\n• a food photo — calories\n• “remind me tomorrow at 9 to call mom”\n"
-           "• “save 5 mln by December” — goals\n• 🤖 Nurai — calls, alarm, voice\n\n"
-           "Only you can see your data.\n\n📞 Nurai has messaged you from its own account — add it to your contacts so its calls come through."),
+           "• “save 5 mln by December” — goals\n• 🤖 ZEKI — calls, alarm, voice\n\n"
+           "Only you can see your data.\n\n📞 ZEKI has messaged you from its own account — add it to your contacts so its calls come through."),
 }
 
 
@@ -170,7 +170,7 @@ class DedupeMiddleware(BaseMiddleware):
 
 
 class TidyMiddleware(BaseMiddleware):
-    """Чистый чат: его сообщение (текст, голос, фото) удаляем, когда бот его обработал; то, что Nurai
+    """Чистый чат: его сообщение (текст, голос, фото) удаляем, когда бот его обработал; то, что ZEKI
     скинул в чат по просьбе, убираем при нажатии любой кнопки. Упал обработчик — сообщение оставляем,
     чтобы было видно, что не сработало."""
 

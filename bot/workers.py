@@ -342,7 +342,7 @@ def important_alerts(alerts: list) -> list:
 
 
 async def _maybe_alert_call(profile, fresh: list) -> bool:  # noqa: ANN001
-    """«Nurai сам звонит, если важное» — только если включено в настройках Nurai,
+    """«ZEKI сам звонит, если важное» — только если включено в настройках ZEKI,
     не чаще раза в день и в разумное время. Тексты подсказок при этом приходят как обычно."""
     import re
 

@@ -147,7 +147,7 @@ _sent: dict[int, list[int]] = defaultdict(list)
 
 
 def track_sent(chat_id: int, message_id: int) -> None:
-    """Текст, который Nurai скинул в чат (из звонка/с телефона): живёт до первой нажатой кнопки
+    """Текст, который ZEKI скинул в чат (из звонка/с телефона): живёт до первой нажатой кнопки
     (или сутки — потом его подберёт sweep, как любое временное сообщение)."""
     _sent[chat_id].append(message_id)
     _spawn(_remember(chat_id, message_id, None))

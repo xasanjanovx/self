@@ -213,7 +213,7 @@ def motivation(day: date, attempt: int = 1, lang: str = "ru") -> str:
 # ------------------------------------------------------------------ тексты
 def call_script(*, name: str, takbir: str | None, minutes_left: int | None, motivation_text: str = "",
                 next_thing: str = "", lang: str = "uz") -> str:
-    """Что «Nurai» говорит в трубку в режиме «просто говорит» (без разговора)."""
+    """Что «ZEKI» говорит в трубку в режиме «просто говорит» (без разговора)."""
     if lang == "uz":
         parts = [f"Assalomu alaykum, {name}."]
         if takbir and minutes_left is not None:

@@ -1,9 +1,10 @@
-"""Быстрая проверка слова «Nurai» на сервере — маленький русский распознаватель вместо Gemini.
+"""Быстрая проверка слова «ZEKI» на сервере — маленький русский распознаватель вместо Gemini.
 
-Телефон решил, что услышал «Nurai», и прислал запись (~1.5 с). Раньше слово проверял Gemini — 1.0–1.6 с на
-каждое срабатывание, и сигнал звучал с заметной задержкой. Теперь — sherpa-onnx zipformer (русский, int8,
-~25 МБ): 20–130 мс на запись на двух ядрах сервера. Проверено на голосах Gemini: «джарвис»/«джервис»
-распознаёт, «Жавохир», «Дарвин», «жарко», «первое, что…» — нет.
+Телефон решил, что услышал «ZEKI» (читается «Зеки»), и прислал запись (~1.5 с). Раньше слово проверял Gemini —
+1.0–1.6 с на каждое срабатывание. Теперь — sherpa-onnx zipformer (русский, int8, ~25 МБ): 20–130 мс на запись.
+Проверено на голосах Edge (ru/uz/en, мужские и женские): «Зеки» слышит как зеки/зеке/зики/зэки/зыки, английское
+«Zeki» — «зи кей»/«зыкий»; «реки», «веки», «зайки», «заки», «секи», «звонки», «Джарвис», «Нурай» — не имя.
+С 26.09.2026 откликается ТОЛЬКО на ZEKI: прежние имена («Джарвис», «Nurai») больше не будят.
 
 Модель — DATA_DIR/models/asr (том, переживает пересборку); нет модели или библиотеки — check() вернёт None,
 и слово, как раньше, проверит Gemini.
@@ -11,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import logging
 import re
 import tarfile
@@ -27,11 +27,8 @@ MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models
 FILES = ("encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt")
 RATE = 16000
 
-# джарвис, джервис, жарвис, джавис, джарвиз, чарвис, jarvis — но не «Жавохир», «Дарвин», «жарко»
-_NAME = re.compile(r"(?:дж|ж|ч|дз|j)[аеэяa][рr]?[вv][иеыэi][сзs]")
-_START = re.compile(r"^(?:дж|ж|ч|дз|j)")
-# Nurai (новое имя с 25.09.2026): нурай, нураи, нурой, норай, nurai — но не «Нурлан», «Нуриддин», «нур»
-_NURAI = re.compile(r"^(?:н|n)[уоu][рr][аоa][йиiy]?$")
+# ZEKI: зеки, зеке, зики, зэки, зыки, зыкий, зек, zeki — но не «реки», «веки», «заки», «секи», «звонки»
+_ZEKI = re.compile(r"^(?:з|z)[еэиыie][кk](?:и|е|ий|ы|i|e|y)?$")
 
 _recognizer: Any = None
 _load_error: str | None = None
@@ -86,18 +83,17 @@ async def recognizer() -> Any | None:
 
 
 def match(text: str) -> tuple[bool, str]:
-    """(есть ли «Nurai», что сказано после имени)."""
+    """(есть ли «ZEKI», что сказано после имени)."""
     words = re.findall(r"[a-zа-яё]+", text.lower().replace("ё", "е"))
     for i, word in enumerate(words):
-        close = bool(_START.match(word)) and difflib.SequenceMatcher(None, word, "джарвис").ratio() >= 0.72
-        if _NAME.search(word) or close or _NURAI.match(word):
+        if _ZEKI.match(word):
             return True, " ".join(words[i + 1:])
-        # «ну рай» — распознаватель разбил «Нурай» на два слова
-        if i + 1 < len(words) and word in {"ну", "но"} and words[i + 1] in {"рай", "раи", "рой"}:
+        # английское «Zeki» распознаватель слышит как «зи кей»
+        if i + 1 < len(words) and word in {"зи", "зе", "zi"} and words[i + 1] in {"кей", "ки", "кий", "key", "ki"}:
             return True, " ".join(words[i + 2:])
-        # «эй джарвис» склеилось в одно слово
-        if i + 1 < len(words) and _NAME.search(word + words[i + 1]):
-            return True, " ".join(words[i + 2:])
+        # «эй зеки» склеилось в одно слово
+        if word.startswith(("эй", "хей")) and _ZEKI.match(word[2:] if word.startswith("эй") else word[3:]):
+            return True, " ".join(words[i + 1:])
     return False, ""
 
 
