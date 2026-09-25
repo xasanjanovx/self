@@ -20,6 +20,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -48,6 +49,9 @@ TAIL_S = 0.3              # тишины после речи оставляем 
 HISTORY_MESSAGES = 16
 HISTORY_CHARS = 12000
 FREE_CHUNK = 9600         # бесплатный голос: кусками по 0.2 с (24 кГц), телефон начинает играть сразу
+# «размышления» агента: без них Flash-Lite путался в простом («17×23» → «тридцать девять»), он жаловался «тупо»;
+# 512 = thinkingLevel low (~+0.3 с и доли цента). PHONE_AGENT_THINKING=0 — как было
+AGENT_THINKING = int(os.getenv("PHONE_AGENT_THINKING") or 512)
 STT_WAIT_S = 5.0          # расшифровка (субтитр и история) обычно готова раньше ответа; дольше не ждём
 
 
@@ -74,7 +78,8 @@ CHEAP_RULES = (
     "• Команда — вызови инструмент и НЕ пиши текст: телефон сам покажет карточку. Текст — только если он спросил то, на что нужен "
     "ответ, инструмент вернул ошибку или нужно подтверждение (ask_exactly — дословно).\n"
     "• Ответ — одна-две короткие разговорные фразы, без списков, эмодзи, markdown и ссылок. Числа, суммы и время пиши цифрами "
-    "(«391», «25 000 сум», «6:30») — голос прочитает их сам; так не ошибёшься в счёте.\n"
+    "(«391», «25 000 сум», «6:30») — голос прочитает их сам; так не ошибёшься в счёте. По-узбекски — ТОЛЬКО латиницей "
+    "(«Ertaga havo ochiq boʻladi»), никогда кириллицей.\n"
     "• В записи нет просьбы к тебе (тишина, шум, разговор с кем-то рядом, телевизор, только имя) — ответь ровно «-».\n"
     "• look, screen_look и gallery здесь нет: камера, экран, галерея, «давай поговорим», долгая беседа — live_mode "
     "(дальше разговор идёт вживую).\n"
@@ -542,7 +547,7 @@ class PhoneCheap:
         text = ""
         calls: list[str] = []
         for _ in range(MAX_STEPS):
-            step = await ai.agent_step(self.contents, system=self.system, tools=self.decls, thinking_budget=0)
+            step = await ai.agent_step(self.contents, system=self.system, tools=self.decls, thinking_budget=AGENT_THINKING)
             self.contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "-"}]})
             if not step.calls:
                 text = step.text

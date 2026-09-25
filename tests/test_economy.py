@@ -255,7 +255,7 @@ def _cheap(monkeypatch, steps: list[AgentStep]) -> tuple[phone_cheap.PhoneCheap,
     queue = list(steps)
 
     async def agent_step(contents, **kw):
-        assert kw["system"] == sess.system and kw["thinking_budget"] == 0
+        assert kw["system"] == sess.system and kw["thinking_budget"] == phone_cheap.AGENT_THINKING
         return queue.pop(0)
 
     spoken: list[str] = []
@@ -367,6 +367,8 @@ def test_free_voice_language_by_text():
     assert free_voice.lang_of("Ertaga havo ochiq boʻladi, shef.") == "uz"
     assert free_voice.lang_of("Bugun siz 205 000 so'm sarfladingiz.") == "uz"
     assert free_voice.lang_of("Done, I don't know yet.") == "en"
+    text, lang = free_voice.prepare("Эртага Андижанда ҳаво очиқ бўлади, Шеф.")
+    assert lang == "uz" and text == "Ertaga Andijanda havo ochiq boʻladi, Shef."
 
 
 def test_speaker_streams_tts_and_stops_on_barge_in(monkeypatch):

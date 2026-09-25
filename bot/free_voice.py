@@ -32,8 +32,39 @@ def available() -> bool:
     return time.monotonic() - _failed_at > _FAIL_PAUSE_S or _failed_at == 0.0
 
 
+_UZ_CYR = re.compile(r"[ўқғҳЎҚҒҲ]")
+_CYR2LAT = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo", "ж": "j", "з": "z", "и": "i", "й": "y",
+            "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+            "х": "x", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sh", "ъ": "ʼ", "ы": "i", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+            "ў": "oʻ", "қ": "q", "ғ": "gʻ", "ҳ": "h"}
+
+
+def uz_latin(text: str) -> str:
+    """Узбекский кириллицей → латиница (модель иногда пишет кириллицей — русский голос прочитал бы это криво)."""
+    out = []
+    for i, ch in enumerate(text):
+        low = ch.lower()
+        lat = _CYR2LAT.get(low)
+        if lat is None:
+            out.append(ch)
+            continue
+        if low == "е" and (i == 0 or not text[i - 1].isalpha()):
+            lat = "ye"  # в начале слова узбекское «е» — это «ye» («ер» → «yer»)
+        out.append(lat.capitalize() if ch != low and lat else lat)
+    return "".join(out)
+
+
+def prepare(text: str) -> tuple[str, str]:
+    """(текст для голоса, язык). Узбекская кириллица → латиница и узбекский голос."""
+    if _UZ_CYR.search(text):
+        return uz_latin(text), "uz"
+    return text, lang_of(text)
+
+
 def lang_of(text: str) -> str:
     """ru — есть кириллица; uz — латиница с узбекскими словами/апострофами; иначе en."""
+    if _UZ_CYR.search(text):
+        return "uz"
     if re.search(r"[а-яё]", text, re.I):
         return "ru"
     if _UZ_MARKERS.search(text):
@@ -48,7 +79,8 @@ async def synthesize(text: str, lang: str | None = None) -> bytes | None:
         return None
     import edge_tts
 
-    voice = VOICES.get(lang or lang_of(text), VOICES["ru"])
+    text, detected = prepare(text)
+    voice = VOICES.get(lang or detected, VOICES["ru"])
     started = time.monotonic()
     try:
         mp3 = bytearray()
