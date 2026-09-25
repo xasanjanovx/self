@@ -369,6 +369,9 @@ def test_free_voice_language_by_text():
     assert free_voice.lang_of("Done, I don't know yet.") == "en"
     text, lang = free_voice.prepare("Эртага Андижанда ҳаво очиқ бўлади, Шеф.")
     assert lang == "uz" and text == "Ertaga Andijanda havo ochiq boʻladi, Shef."
+    text, lang = free_voice.prepare("Ertaga havo ochiq va iliq boʻladi, Шеф, kunduzi 28 daraja.")
+    assert lang == "uz" and "Shef" in text
+    assert free_voice.prepare("Готово, шеф.") == ("Готово, шеф.", "ru")
 
 
 def test_speaker_streams_tts_and_stops_on_barge_in(monkeypatch):

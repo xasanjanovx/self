@@ -58,6 +58,10 @@ def prepare(text: str) -> tuple[str, str]:
     """(текст для голоса, язык). Узбекская кириллица → латиница и узбекский голос."""
     if _UZ_CYR.search(text):
         return uz_latin(text), "uz"
+    cyr = len(re.findall(r"[а-яё]", text, re.I))
+    lat = len(re.findall(r"[a-z]", text, re.I))
+    if cyr and lat > cyr and _UZ_MARKERS.search(text):
+        return uz_latin(text), "uz"  # узбекский ответ со словом-другим кириллицей («…, Шеф, …»)
     return text, lang_of(text)
 
 
