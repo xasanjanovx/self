@@ -175,6 +175,34 @@ def test_clean_reply_silence_marks():
     assert phone_cheap.clean_reply("Готово, **сэр**.").startswith("Готово")
 
 
+def test_lite_live_has_core_tools_and_phone_task_has_the_rest():
+    core = {d["name"] for d in live_call.tool_declarations("phone")}
+    rest = {d["name"] for d in live_call.phone_task_declarations()}
+    full = {d["name"] for d in live_call.tool_declarations("phone", full=True)}
+    assert "phone_task" in core and not core & rest - {"phone_task"}
+    assert (core - {"phone_task"}) | rest == full  # ничего не потерялось
+    assert {"flashlight", "send_sms", "taxi", "whatsapp_send", "undo_last", "currency_rates"} <= rest
+
+
+def test_phone_task_runs_rare_command_with_flash_lite(monkeypatch):
+    sess, phone_ws = _live_session()
+    steps = [_call("flashlight", on=True)]
+
+    async def agent_step(contents, **kw):
+        assert "flashlight" in {d["name"] for d in kw["tools"]} and "phone_call" not in {d["name"] for d in kw["tools"]}
+        return steps.pop(0)
+
+    monkeypatch.setattr(phone_live.ai, "agent_step", agent_step)
+    result = asyncio.run(phone_live.exec_tool(sess, "phone_task", {"request": "включи фонарик"}))
+    assert result == {"ok": True, "done": ["flashlight"]}
+    assert {"type": "action", "action": {"type": "flashlight", "on": True}} in phone_ws.sent
+
+
+def _live_session():
+    ws = _PhoneWS()
+    return phone_live.PhoneLive(_profile(), Persona(lang="ru"), system="", phone_ws=ws, device={}), ws
+
+
 # ------------------------------------------------------------------ фразы из потока микрофона
 RATE = phone_live.INPUT_RATE
 

@@ -462,6 +462,8 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
     elif name == "bot_task":
         await sess.to_phone({"type": "status", "text": "Делаю…"})
         result = await live_call.delegate(sess.profile, str(args.get("request") or ""))
+    elif name == "phone_task":
+        result = await phone_task(sess, str(args.get("request") or ""))
     else:
         before = len(sess.turn.actions)
         result = await sess.runner(name, args, sess.ctx)
@@ -475,6 +477,52 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
         if (card := result_card(name, args, result)) is not None:
             await sess.to_phone({"type": "card", "card": card})
     return result
+
+
+# ------------------------------------------------------------------ phone_task: редкое на телефоне — делает Flash-Lite
+PHONE_TASK_SYSTEM = (
+    "Ты исполнитель команд на Android-телефоне владельца для голосового ассистента Джарвиса. Выполни просьбу своими инструментами "
+    "сразу, без уточнений: кому звонить/писать — инструмент сам выбирает лучшее совпадение, в variants — другие написания и "
+    "родственные слова (мама → ойи, онам, ona, oyijon). Текст сообщения — от первого лица владельца, как он продиктовал "
+    "(узбекский — латиницей). Если инструмент вернул ask_exactly — больше ничего не делай. В конце — одна короткая фраза-итог "
+    "для ассистента (что сделано или что не вышло), без списков и markdown; на вопросы («кто звонил», «что написали», «курс») — "
+    "ответ по существу одной-двумя фразами."
+)
+PHONE_TASK_SILENT = {"remember_about_me", "remember_contact"}
+
+
+async def phone_task(sess, request: str) -> dict[str, Any]:  # noqa: ANN001
+    """Облегчённый Live передал редкую просьбу: Flash-Lite выполняет её телефонными инструментами (действия уходят на телефон
+    тем же exec_tool) и возвращает итог — Live его перескажет или промолчит."""
+    request = request.strip()
+    if not request:
+        return {"error": "пустая просьба"}
+    decls = live_call.phone_task_declarations()
+    allowed = {d["name"] for d in decls}
+    stamp = f"[{live_call.now_line(sess.profile)}.{phone.device_prompt(sess.turn.device)}]"
+    contents: list[dict[str, Any]] = [{"role": "user", "parts": [{"text": f"{stamp}\n{request}"}]}]
+    done: list[str] = []
+    for _ in range(4):
+        step = await ai.agent_step(contents, system=PHONE_TASK_SYSTEM, tools=decls, thinking_budget=0)
+        contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "-"}]})
+        if not step.calls:
+            return {"ok": True, "done": done, "reply": step.text or ""}
+        responses, results = [], []
+        for name, args in step.calls:
+            result = await exec_tool(sess, name, args) if name in allowed else {"error": f"{name} здесь недоступен"}
+            done.append(name)
+            results.append(result if isinstance(result, dict) else {})
+            responses.append({"functionResponse": {"name": name, "response": _jsonable(result)}})
+        contents.append({"role": "user", "parts": responses})
+        ask = next((r["ask_exactly"] for r in results if r.get("ask_exactly")), None)
+        if ask:
+            return {"ok": True, "done": done, "ask_exactly": ask}
+        need_unlock = next((r for r in results if r.get("need_unlock")), None)
+        if need_unlock:
+            return need_unlock
+        if not any(r.get("error") for r in results) and all(n in phone.QUICK_TOOLS | PHONE_TASK_SILENT for n, _ in step.calls):
+            return {"ok": True, "done": done}  # фонарик, громкость, маршрут — молча, второй запрос к модели не нужен
+    return {"ok": True, "done": done}
 
 
 # ------------------------------------------------------------------ заготовка разговора
@@ -524,7 +572,7 @@ def prewarm(uid: int) -> None:
     """Начать собирать разговор, пока проверяется «Джарвис». Телефон ещё ни разу не подключался — не с чем.
     Экономный режим начинается без Gemini Live — заготовка не нужна."""
     device = _last_device.get(uid)
-    if device is None or _modes.get(uid, "economy") != "live" or not billing.live_allowed("phone"):
+    if device is None or _modes.get(uid, "live") != "live" or not billing.live_allowed("phone"):
         return
     discard(uid)
     task = asyncio.create_task(_build(uid, device), name="phone-prewarm")
@@ -570,9 +618,9 @@ async def _take(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any, 
 
 # ------------------------------------------------------------------ точка входа
 async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN001
-    """Экономный режим (по умолчанию): команды и короткие ответы — Flash-Lite (bot/phone_cheap.py); попросил камеру,
-    экран, галерею или поговорить — разговор продолжается в Gemini Live по тому же соединению. «Всегда Live» в
-    настройках — сразу Live. После дневного лимита — только экономный режим."""
+    """По умолчанию — облегчённый Gemini Live (он выбрал 25.09: быстро и понимает речь; частые инструменты, редкое —
+    phone_task). «Экономно» в настройках и после дневного лимита — Flash-Lite (bot/phone_cheap.py): команды и короткие
+    ответы; камера, экран или «поговорим» — разговор продолжается в Live по тому же соединению."""
     from . import phone_cheap
 
     device = hello.get("device") if isinstance(hello.get("device"), dict) else {}

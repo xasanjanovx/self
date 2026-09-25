@@ -147,9 +147,10 @@ def test_prewarm_is_taken_by_the_phone_and_expires_otherwise(monkeypatch):
         phone_live.prewarm(5)  # телефон ещё ни разу не подключался — заготовки нет
         assert 5 not in phone_live._warm
         phone_live._last_device[5] = {"duplex": True}
-        phone_live.prewarm(5)  # экономный режим (по умолчанию) начинается без Live — заготовка не нужна
+        phone_live._modes[5] = "economy"
+        phone_live.prewarm(5)  # экономный режим начинается без Live — заготовка не нужна
         assert 5 not in phone_live._warm
-        phone_live._modes[5] = "live"
+        phone_live._modes[5] = "live"  # по умолчанию — облегчённый Live
         phone_live.prewarm(5)
         taken = await phone_live._take(5, {"duplex": True})
         assert taken == built[0] and not taken[2].closed
@@ -389,8 +390,9 @@ def test_phone_prompt_and_tools_are_short(monkeypatch):
     decls = live_call.tool_declarations("phone")
     size = len(json.dumps(decls, ensure_ascii=False))
     assert len(text) < 7500 and "x" * 100 not in text and "О СЕБЕ" not in text     # было ~14.5 тысяч знаков
-    assert size < 18500                                                           # было ~25 тысяч
+    assert size < 10000                                                           # было ~25, потом ~18 тысяч
     assert "КОМАНДЫ — МОЛЧА" in text and "{year}" not in text
     names = {d["name"] for d in decls}
-    assert {"phone_call", "bot_task", "screen_look", "undo_last"} <= names and not {"expect_photo", "complete_tasks", "ai_status"} & names
+    assert {"phone_call", "bot_task", "screen_look", "phone_task"} <= names and not {"expect_photo", "complete_tasks", "ai_status"} & names
+    assert "undo_last" in {d["name"] for d in live_call.phone_task_declarations()}
     assert all(len(d["description"]) <= 172 for d in decls)

@@ -216,7 +216,8 @@ def test_phone_system_and_camera_actions():
 def test_new_phone_tools_need_unlock_and_are_declared():
     from bot import live_call, phone_live
 
-    names = {d["name"] for d in live_call.tool_declarations("phone")}
+    # облегчённый Live: редкое — через phone_task, полный набор — в экономном режиме и в самом phone_task
+    names = {d["name"] for d in live_call.tool_declarations("phone", full=True)}
     for n in ("recent_calls", "call_back", "call_forwarding", "phone_status", "brightness", "do_not_disturb", "ringer_mode",
               "settings_panel", "look", "bot_task", "whatsapp_send", "screen_look", "gallery",
               "play_media", "youtube_search", "telegram_search", "taxi", "remember_contact"):

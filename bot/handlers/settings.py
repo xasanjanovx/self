@@ -421,9 +421,10 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
         f"🧠 {'Jonli ovoz modeli' if uz else 'Модель живого голоса'}: <b>"
         + ("Qwen3.8 Omni (Alibaba)" + f" · {p.qwen_voice}" if p.voice_model == "qwen" else "Gemini 3.8 Live") + "</b>",
         f"💸 {'Telefonda' if uz else 'На телефоне'}: <b>"
-        + (profile.tr("экономно — команды и короткие ответы без Live, камера и беседа — вживую",
-                      "tejamkor — buyruqlar Live'siz, kamera va suhbat — jonli")
-           if p.voice_mode == "economy" else profile.tr("всегда Gemini Live (дороже)", "doim Gemini Live (qimmatroq)")) + "</b>",
+        + (profile.tr("экономно — без Live, медленнее; камера и беседа — вживую",
+                      "tejamkor — Live'siz, sekinroq; kamera va suhbat — jonli")
+           if p.voice_mode == "economy" else profile.tr("живой голос, облегчённый (после дневного лимита — экономно)",
+                                                        "jonli ovoz, yengil (kunlik limitdan keyin — tejamkor)")) + "</b>",
     ]
     from .. import qwen_live
 

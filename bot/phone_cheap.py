@@ -84,14 +84,14 @@ CHEAP_RULES = (
     "• Здесь ты слышишь ТОЛЬКО его (чужие голоса уже отсеяны): отвечай на КАЖДУЮ реплику — вопрос, просьбу, «алло», "
     "обрывок (переспроси коротко). Правило «не отвечай на речь не к тебе» здесь не действует. Ровно «-» — только если "
     "в записи нет слов вовсе (тишина, шум) или прозвучало одно имя «Джарвис».\n"
-    "• look, screen_look и gallery здесь нет: камера, экран, галерея, «давай поговорим», долгая беседа — live_mode "
+    "• phone_task здесь нет — все телефонные инструменты у тебя напрямую. look, screen_look и gallery здесь нет: камера, экран, галерея, «давай поговорим», долгая беседа — live_mode "
     "(дальше разговор идёт вживую).\n"
 )
 
 
 def declarations() -> list[dict[str, Any]]:
     """Те же инструменты, что в Live (короткие описания), без кадров — вместо них live_mode."""
-    return [d for d in live_call.tool_declarations("phone") if d["name"] not in LIVE_TOOLS] + [_LIVE_MODE]
+    return [d for d in live_call.tool_declarations("phone", full=True) if d["name"] not in LIVE_TOOLS] + [_LIVE_MODE]
 
 
 def system_prompt(profile, persona, memory: str) -> str:  # noqa: ANN001

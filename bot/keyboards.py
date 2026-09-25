@@ -364,7 +364,7 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
 
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
                              honorific: str = "mix", voice_model: str = "gemini", qwen_voice: str = "Tina",
-                             voice_mode: str = "economy") -> InlineKeyboardMarkup:
+                             voice_mode: str = "live") -> InlineKeyboardMarkup:
     """«Голос и характер» Джарвиса: режим телефона, модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
     from .persona import HONORIFICS, VOICES
     from .qwen_live import VOICES as QWEN_VOICES
@@ -375,9 +375,9 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
         return _btn(label + (" ✓" if on else ""), data, style="primary" if on else None)
 
     rows: list[list[InlineKeyboardButton]] = []
-    # телефон: экономно (команды без Live) или всегда Live
-    rows.append([pick("💸 " + ("Tejamkor" if uz else "Экономно"), "jarvis:vmode:economy", voice_mode == "economy"),
-                 pick("⚡ " + ("Doim Live" if uz else "Всегда Live"), "jarvis:vmode:live", voice_mode == "live")])
+    # телефон: облегчённый Live (быстро, понимает речь) или экономно (без Live, медленнее)
+    rows.append([pick("⚡ " + ("Jonli (yengil)" if uz else "Живой (облегчённый)"), "jarvis:vmode:live", voice_mode == "live"),
+                 pick("💸 " + ("Tejamkor" if uz else "Экономно"), "jarvis:vmode:economy", voice_mode == "economy")])
     # модель живого голоса — чтобы сравнить: Gemini (как было) или Qwen (Alibaba, в 3–6 раз дешевле)
     rows.append([pick("🧠 Gemini", "jarvis:vmodel:gemini", voice_model == "gemini"),
                  pick("🧠 Qwen · " + ("arzon" if uz else "дешевле"), "jarvis:vmodel:qwen", voice_model == "qwen")])
