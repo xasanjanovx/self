@@ -38,6 +38,8 @@ from .phone_live import INPUT_RATE, VAD_SILENCE_MS, exec_tool, pcm_to_wav
 logger = logging.getLogger(__name__)
 
 LIVE_TOOLS = {"look", "screen_look", "gallery"}   # им нужны кадры в разговоре — это только Live
+# записи «молча» (он так выбрал): удалось — ответ модели не нужен, на экране карточка (phone_live.result_card)
+SILENT_DONE = {"add_finance_entries", "add_calorie_logs", "add_task", "add_reminder", "complete_tasks", "add_note", "remember_about_me"}
 MAX_STEPS = 4
 PREROLL_S = 0.3           # до начала речи — чтобы не съесть первый слог
 MIN_SPEECH_S = 0.25       # короче — щелчок, кашель: не фраза
@@ -548,6 +550,10 @@ class PhoneCheap:
                 # звонок, будильник, «отправлено» — молча (карточка на экране); «Отправить Алишеру: …?» — вопрос, его произносим
                 self.contents.append({"role": "model", "parts": [{"text": quick}]})
                 text = quick if any(r.get("ask_exactly") for r in results) else ""
+                break
+            if all(n in SILENT_DONE | phone.QUICK_TOOLS for n, _ in step.calls) and not any(r.get("error") for r in results):
+                # записал трату/еду/задачу — он просил молча: второй запрос к модели ради пустого ответа не делаем
+                self.contents.append({"role": "model", "parts": [{"text": "(сделано)"}]})
                 break
         # в историю — расшифровка вместо звука: дешевле и не ломает кэш
         transcript = ""

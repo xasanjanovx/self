@@ -385,3 +385,25 @@ def test_voice_agent_turn_is_billed_as_agent():
     assert _usage_kind("gemini-3.5-flash-lite", audio) == "stt"
     assert _usage_kind("gemini-3.5-flash-lite", {**audio, "tools": [{}]}) == "agent"
     assert _usage_kind("gemini-3.8-flash-lite-tts", audio) == "tts"
+
+
+def test_expense_is_recorded_silently_in_one_step(monkeypatch):
+    sess, ws, spoken = _cheap(monkeypatch, [_call("add_finance_entries", items=[{"kind": "expense", "amount": 40000, "category": "Еда"}])])
+    ran: list[str] = []
+
+    async def fake_exec(s, name, args):
+        ran.append(name)
+        return {"added": [{"id": 1}]}
+
+    monkeypatch.setattr(phone_cheap, "exec_tool", fake_exec)
+    asyncio.run(sess._on_text("запиши обед сорок тысяч", visible=True))  # второй шаг модели вызвал бы IndexError
+    assert ran == ["add_finance_entries"] and spoken == [] and ws.sent[-1] == {"type": "turn_complete"}
+
+
+def test_cards_for_silent_records():
+    card = phone_live.result_card("add_finance_entries", {"items": [{"kind": "expense", "amount": 40000, "category": "Еда"}]},
+                                  {"added": [{"id": 1}]})
+    assert card == {"icon": "💸", "title": "Записала", "subtitle": "40 000 сум · Еда"}
+    card = phone_live.result_card("add_calorie_logs", {"items": [{"meal": "плов", "calories": 650}]}, {"added": [{}]})
+    assert card["subtitle"] == "плов · 650 ккал"
+    assert phone_live.result_card("add_finance_entries", {"items": []}, {"error": "x"}) is None

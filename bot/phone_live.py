@@ -187,6 +187,23 @@ def result_card(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict
         return {"icon": "🔔", "title": "Напомню", "subtitle": " ".join(str(r.get(k) or "") for k in ("time", "text") if r.get(k)).strip()[:120]}
     if name == "add_task" and args.get("text"):
         return {"icon": "📝", "title": "Задача", "subtitle": str(args.get("text"))[:120]}
+    items = [i for i in (args.get("items") or []) if isinstance(i, dict)]
+    if name == "add_finance_entries" and result.get("added") and items:
+        def money(i: dict[str, Any]) -> str:
+            try:
+                amount = f"{round(float(i.get('amount') or 0)):,}".replace(",", " ") + " сум"
+            except (TypeError, ValueError):
+                amount = str(i.get("amount") or "")
+            return " · ".join(x for x in (amount, str(i.get("category") or i.get("note") or "")) if x)
+
+        income = all(i.get("kind") == "income" for i in items)
+        return {"icon": "💰" if income else "💸", "title": "Доход записан" if income else "Записала",
+                "subtitle": "; ".join(money(i) for i in items)[:160]}
+    if name == "add_calorie_logs" and result.get("added") and items:
+        return {"icon": "🍽", "title": "Записала еду", "subtitle": "; ".join(
+            f"{i.get('meal') or 'еда'}" + (f" · {i.get('calories')} ккал" if i.get("calories") else "") for i in items)[:160]}
+    if name == "complete_tasks" and not result.get("error"):
+        return {"icon": "✅", "title": "Отмечено", "subtitle": ""}
     return None
 
 
