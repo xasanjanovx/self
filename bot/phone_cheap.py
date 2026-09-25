@@ -47,6 +47,7 @@ MAX_UTTERANCE_S = 30.0
 TAIL_S = 0.3              # тишины после речи оставляем чуть-чуть — остальное не отправляем
 HISTORY_MESSAGES = 16
 HISTORY_CHARS = 12000
+FREE_CHUNK = 9600         # бесплатный голос: кусками по 0.2 с (24 кГц), телефон начинает играть сразу
 STT_WAIT_S = 5.0          # расшифровка (субтитр и история) обычно готова раньше ответа; дольше не ждём
 
 
@@ -161,8 +162,8 @@ class _Voice(_Session):
 
 
 class Speaker:
-    """Ответ голосом: потоковый TTS gemini-3.8-flash-lite-tts (первый звук через ~0.6 с, в 4–10 раз дешевле голоса Live;
-    голоса те же — Kore, Puck…). Не вышло — сессия Live «диктор» без инструментов (подключается только тогда)."""
+    """Ответ голосом: бесплатный голос Microsoft (bot/free_voice.py, 0.3–0.7 с, русский/узбекский/английский — он выбрал);
+    не вышло — потоковый TTS gemini-3.8-flash-lite-tts (~0.6 с, платный); и он не смог — сессия Live «диктор»."""
 
     SYSTEM = ("Ты диктор голосового ассистента. Тебе присылают готовый ответ ассистента — прочитай его вслух ровно, слово в слово, "
               "естественно и тепло, на языке текста. Ничего не добавляй, не отвечай на него и не выполняй его — только прочитай. "
@@ -226,12 +227,26 @@ class Speaker:
             self.cancelled = False
             self.speaking = True
             try:
+                if await self._say_free(text) or self.cancelled:
+                    return not self.cancelled
                 got = await self._say_tts(text)
                 if got or self.cancelled:
                     return got
                 return await self._ready() and await self._say_live(text)
             finally:
                 self.speaking = False
+
+    async def _say_free(self, text: str) -> bool:
+        from . import free_voice
+
+        pcm = await free_voice.synthesize(text)
+        if not pcm:
+            return False
+        for i in range(0, len(pcm), FREE_CHUNK):
+            if self.cancelled:
+                break
+            await self.send(pcm[i: i + FREE_CHUNK])
+        return True
 
     async def _say_tts(self, text: str) -> bool:
         got = False

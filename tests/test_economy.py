@@ -336,6 +336,39 @@ def test_cheap_message_confirmation_is_spoken(monkeypatch, contacts):
 
 
 # ------------------------------------------------------------------ голос ответа: потоковый TTS, запасной — Live
+async def _no_free(text, lang=None):
+    return None
+
+
+def test_speaker_uses_free_voice_first(monkeypatch):
+    sent: list[bytes] = []
+
+    async def send(b: bytes) -> None:
+        sent.append(b)
+
+    async def free(text, lang=None):
+        return bytes([1, 0]) * 24000  # 1 с звука
+
+    async def paid(text, *, voice="Kore", model=""):
+        raise AssertionError("платный TTS не нужен")
+        yield b""  # noqa
+
+    monkeypatch.setattr("bot.free_voice.synthesize", free)
+    monkeypatch.setattr(phone_cheap.ai, "speak_stream", paid)
+    speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
+    assert asyncio.run(speaker.say("Готово.")) is True
+    assert sum(len(b) for b in sent) == 48000 and len(sent) == 5
+
+
+def test_free_voice_language_by_text():
+    from bot import free_voice
+
+    assert free_voice.lang_of("Готово, шеф.") == "ru"
+    assert free_voice.lang_of("Ertaga havo ochiq boʻladi, shef.") == "uz"
+    assert free_voice.lang_of("Bugun siz 205 000 so'm sarfladingiz.") == "uz"
+    assert free_voice.lang_of("Done, I don't know yet.") == "en"
+
+
 def test_speaker_streams_tts_and_stops_on_barge_in(monkeypatch):
     sent: list[bytes] = []
 
@@ -350,6 +383,7 @@ def test_speaker_streams_tts_and_stops_on_barge_in(monkeypatch):
 
     speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
     monkeypatch.setattr(phone_cheap.ai, "speak_stream", stream)
+    monkeypatch.setattr("bot.free_voice.synthesize", _no_free)
     assert asyncio.run(speaker.say("Готово.")) is True
     assert len(sent) == 2 and not speaker.speaking
 
@@ -364,6 +398,7 @@ def test_speaker_falls_back_to_live_voice(monkeypatch):
 
     speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
     monkeypatch.setattr(phone_cheap.ai, "speak_stream", broken)
+    monkeypatch.setattr("bot.free_voice.synthesize", _no_free)
     live_said: list[str] = []
 
     async def ready(timeout: float = 6.0) -> bool:

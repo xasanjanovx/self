@@ -8,3 +8,5 @@ openpyxl==3.1.5
 # «только мой голос»: отпечаток голоса (CAM++), bot/voiceprint.py
 sherpa-onnx==1.12.40
 numpy>=1.26
+# бесплатный голос Джарвиса (Microsoft Edge), bot/free_voice.py
+edge-tts==7.2.8
