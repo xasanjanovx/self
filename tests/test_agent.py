@@ -297,7 +297,7 @@ def test_add_reminder_tool_parses_time_days_links(monkeypatch):
 
 def test_system_prompt_mentions_rules_and_snapshot():
     text = agent.system_prompt(_profile(), "Балансы: карта 1")
-    assert "Джарвис" in text and "Балансы: карта 1" in text and "hand_off" in text and "transport" in text
+    assert "Nurai" in text and "Балансы: карта 1" in text and "hand_off" in text and "transport" in text
 
 
 def test_compact_message_leaves_model_parts_untouched():

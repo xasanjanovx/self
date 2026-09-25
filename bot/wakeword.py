@@ -1,6 +1,6 @@
-"""Быстрая проверка слова «Джарвис» на сервере — маленький русский распознаватель вместо Gemini.
+"""Быстрая проверка слова «Nurai» на сервере — маленький русский распознаватель вместо Gemini.
 
-Телефон решил, что услышал «Джарвис», и прислал запись (~1.5 с). Раньше слово проверял Gemini — 1.0–1.6 с на
+Телефон решил, что услышал «Nurai», и прислал запись (~1.5 с). Раньше слово проверял Gemini — 1.0–1.6 с на
 каждое срабатывание, и сигнал звучал с заметной задержкой. Теперь — sherpa-onnx zipformer (русский, int8,
 ~25 МБ): 20–130 мс на запись на двух ядрах сервера. Проверено на голосах Gemini: «джарвис»/«джервис»
 распознаёт, «Жавохир», «Дарвин», «жарко», «первое, что…» — нет.
@@ -30,6 +30,8 @@ RATE = 16000
 # джарвис, джервис, жарвис, джавис, джарвиз, чарвис, jarvis — но не «Жавохир», «Дарвин», «жарко»
 _NAME = re.compile(r"(?:дж|ж|ч|дз|j)[аеэяa][рr]?[вv][иеыэi][сзs]")
 _START = re.compile(r"^(?:дж|ж|ч|дз|j)")
+# Nurai (новое имя с 25.09.2026): нурай, нураи, нурой, норай, nurai — но не «Нурлан», «Нуриддин», «нур»
+_NURAI = re.compile(r"^(?:н|n)[уоu][рr][аоa][йиiy]?$")
 
 _recognizer: Any = None
 _load_error: str | None = None
@@ -84,12 +86,15 @@ async def recognizer() -> Any | None:
 
 
 def match(text: str) -> tuple[bool, str]:
-    """(есть ли «Джарвис», что сказано после имени)."""
+    """(есть ли «Nurai», что сказано после имени)."""
     words = re.findall(r"[a-zа-яё]+", text.lower().replace("ё", "е"))
     for i, word in enumerate(words):
         close = bool(_START.match(word)) and difflib.SequenceMatcher(None, word, "джарвис").ratio() >= 0.72
-        if _NAME.search(word) or close:
+        if _NAME.search(word) or close or _NURAI.match(word):
             return True, " ".join(words[i + 1:])
+        # «ну рай» — распознаватель разбил «Нурай» на два слова
+        if i + 1 < len(words) and word in {"ну", "но"} and words[i + 1] in {"рай", "раи", "рой"}:
+            return True, " ".join(words[i + 2:])
         # «эй джарвис» склеилось в одно слово
         if i + 1 < len(words) and _NAME.search(word + words[i + 1]):
             return True, " ".join(words[i + 2:])

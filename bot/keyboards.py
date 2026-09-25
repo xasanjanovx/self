@@ -62,8 +62,8 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "brief_morning_off": "🌅 Утро 08:00: выкл",
         "brief_evening_on": "🌙 Вечер 21:00: вкл",
         "brief_evening_off": "🌙 Вечер 21:00: выкл",
-        "proactive_on": "💡 Подсказки Джарвиса: вкл",
-        "proactive_off": "💡 Подсказки Джарвиса: выкл",
+        "proactive_on": "💡 Подсказки Nurai: вкл",
+        "proactive_off": "💡 Подсказки Nurai: выкл",
         "voice_on": "🎙 Голосовые ответы: вкл",
         "voice_off": "🎙 Голосовые ответы: выкл",
         "rec_add": "Добавить платёж",
@@ -139,8 +139,8 @@ TEXTS: dict[Lang, dict[str, str]] = {
         "brief_morning_off": "🌅 Ertalab 08:00: o'chiq",
         "brief_evening_on": "🌙 Kechqurun 21:00: yoq",
         "brief_evening_off": "🌙 Kechqurun 21:00: o'chiq",
-        "proactive_on": "💡 Jarvis maslahatlari: yoniq",
-        "proactive_off": "💡 Jarvis maslahatlari: o'chiq",
+        "proactive_on": "💡 Nurai maslahatlari: yoniq",
+        "proactive_off": "💡 Nurai maslahatlari: o'chiq",
         "voice_on": "🎙 Ovozli javoblar: yoniq",
         "voice_off": "🎙 Ovozli javoblar: o'chiq",
         "rec_add": "To'lov qo'shish",
@@ -226,7 +226,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
-                _btn("Jarvis" if lang == "uz" else "Джарвис", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
+                _btn("Nurai" if lang == "uz" else "Nurai", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
             [
@@ -238,8 +238,8 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
 
 
 def settings_keyboard(lang: str = "ru", *, owner: bool = False) -> InlineKeyboardMarkup:
-    """Главный экран настроек — только разделы бота. Всё про Джарвиса (голос, будильник, звонки) —
-    отдельно, в кнопке «Джарвис» главного меню. «Пользователи» — только владельцу."""
+    """Главный экран настроек — только разделы бота. Всё про Nurai (голос, будильник, звонки) —
+    отдельно, в кнопке «Nurai» главного меню. «Пользователи» — только владельцу."""
     uz = lang == "uz"
     rows = [
         [_btn("🔔 " + ("Bildirishnomalar" if uz else "Уведомления"), "settings:notify", style="primary"),
@@ -265,7 +265,7 @@ def invite_keyboard(lang: str, link: str) -> InlineKeyboardMarkup:
 
     uz = lang == "uz"
     share = "https://t.me/share/url?url=" + quote(link, safe="") + "&text=" + quote(
-        "Shaxsiy yordamchi Jarvis — kirish uchun bosing" if uz else "Личный помощник Джарвис — нажми, чтобы войти")
+        "Shaxsiy yordamchi Nurai — kirish uchun bosing" if uz else "Личный помощник Nurai — нажми, чтобы войти")
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("📤 " + ("Yuborish" if uz else "Отправить"), url=share, style="success")],
         [_btn("📋 " + ("Havolani nusxalash" if uz else "Скопировать ссылку"), copy_text=link)],
@@ -292,7 +292,7 @@ def notify_keyboard(lang: str, *, morning: bool, morning_wake: bool, evening: bo
          _btn("⌨️ " + ("Vaqt" if uz else "Время"), "notify:time:morning", style=None if morning_wake else "primary")],
         [toggle(evening, "🌙 " + ("Kechki xulosa" if uz else "Вечерняя сводка"), "settings:brief:evening"),
          _btn("⌨️ " + ("Vaqt" if uz else "Время"), "notify:time:evening")],
-        [toggle(proactive, "💡 " + ("Jarvis maslahatlari" if uz else "Подсказки Джарвиса"), "settings:toggle:proactive")],
+        [toggle(proactive, "💡 " + ("Nurai maslahatlari" if uz else "Подсказки Nurai"), "settings:toggle:proactive")],
         [toggle(voice, "🎙 " + ("Ovozli javoblar" if uz else "Голосовые ответы"), "settings:toggle:voice_reply")],
         [pick("📊 " + ("Haftalik" if uz else "Отчёт: неделя"), "report:set:weekly", weekly),
          pick("Oylik" if uz else "месяц", "report:set:monthly", monthly),
@@ -309,7 +309,7 @@ def reminders_keyboard(lang: str, reminders: list[tuple[str, str]]) -> InlineKey
 
 def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: bool = False,
                         photo_intent: bool = False) -> InlineKeyboardMarkup:
-    """Кнопка «Джарвис» в главном меню: всё про Джарвиса в одном месте."""
+    """Кнопка «Nurai» в главном меню: всё про Nurai в одном месте."""
     uz = lang == "uz"
 
     def toggle(on: bool, label: str, data: str) -> InlineKeyboardButton:
@@ -331,7 +331,7 @@ def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
                            mode: str, days: list[int]) -> InlineKeyboardMarkup:
     """Экран «Будильник»: всё, что чаще всего меняют, — кнопками. Заданий и упражнений нет —
-    Джарвис будит мотивирующими словами и сам по голосу убеждается, что встал."""
+    Nurai будит мотивирующими словами и сам по голосу убеждается, что встал."""
     uz = lang == "uz"
     weekdays = {1, 2, 3, 4, 5}
     only_weekdays = set(days) == weekdays
@@ -365,7 +365,7 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
                              honorific: str = "mix", voice_model: str = "gemini", qwen_voice: str = "Tina",
                              voice_mode: str = "live") -> InlineKeyboardMarkup:
-    """«Голос и характер» Джарвиса: режим телефона, модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
+    """«Голос и характер» Nurai: режим телефона, модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
     from .persona import HONORIFICS, VOICES
     from .qwen_live import VOICES as QWEN_VOICES
 

@@ -10,7 +10,7 @@
   custom    — свободная цель в % к сроку: темп, отставание, еженедельный вопрос о прогрессе.
 
 `status()` — чистая функция над `GoalData` (всё, что нужно, уже загружено), возвращает
-словарь с цифрами (для Джарвиса и экрана) и `flags`. Тексты — `lines()`, `morning_line()`,
+словарь с цифрами (для Nurai и экрана) и `flags`. Тексты — `lines()`, `morning_line()`,
 `evening_line()`, `midday_alert()`. Асинхронный загрузчик — `statuses_for(profile)` внизу.
 """
 from __future__ import annotations
@@ -508,7 +508,7 @@ def plan_lines(statuses: list[dict[str, Any]], lang: str, *, meals: dict[str, An
 
 
 def prompt_summary(statuses: list[dict[str, Any]]) -> str:
-    """Компактная строка для системного промпта Джарвиса."""
+    """Компактная строка для системного промпта Nurai."""
     parts = []
     for st in statuses:
         k = st.get("kind")

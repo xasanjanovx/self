@@ -1,6 +1,6 @@
-"""Голосовой Джарвис на телефоне: тот же агент, что в боте, плюс руки на телефоне.
+"""Голосовой Nurai на телефоне: тот же агент, что в боте, плюс руки на телефоне.
 
-Приложение (jarvis-android) слышит «Эй, Джарвис», записывает фразу и шлёт её сюда
+Приложение (jarvis-android) слышит «Эй, Nurai», записывает фразу и шлёт её сюда
 (см. bot/phone_api.py). Агент получает все обычные инструменты бота (траты, задачи,
 напоминания, цели, поиск…) и дополнительные — телефонные. Ответ — текст для озвучки
 и список действий, которые выполнит само приложение: звонок, SMS, будильник, таймер,
@@ -271,7 +271,7 @@ async def _telegram_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
     if not text:
         return {"error": "нет текста — спроси, что написать"}
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении Джарвис → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении Nurai → раздел Telegram → «Подключить»"}
     queries = [a.get("who")] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
     found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
     if "match" not in found:
@@ -302,7 +302,7 @@ async def _cancel_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> 
        {"who": P("STRING", "с кем переписка (необязательно)"), "variants": VARIANTS, "limit": P("INTEGER", "сколько сообщений, по умолчанию 5")})
 async def _telegram_read(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении Джарвис → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении Nurai → раздел Telegram → «Подключить»"}
     who = _str(a.get("who"))
     if not who:
         chats = await tg_user.unread()
@@ -328,7 +328,7 @@ async def _set_alarm(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
         return {"error": "время нужно в формате HH:MM"}
     days = [_WEEKDAY_KEYS[d] for d in (a.get("days") or []) if d in _WEEKDAY_KEYS]
-    return _action(turn, "alarm", hour=int(m.group(1)), minute=int(m.group(2)), label=_str(a.get("label")) or "Джарвис", days=days or None)
+    return _action(turn, "alarm", hour=int(m.group(1)), minute=int(m.group(2)), label=_str(a.get("label")) or "Nurai", days=days or None)
 
 
 @ptool("set_timer", "Таймер на телефоне («засеки 10 минут»).",
@@ -337,7 +337,7 @@ async def _set_timer(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     seconds = int(a.get("seconds") or 0)
     if not 1 <= seconds <= 24 * 3600:
         return {"error": "таймер от 1 секунды до 24 часов"}
-    return _action(turn, "timer", seconds=seconds, label=_str(a.get("label")) or "Джарвис")
+    return _action(turn, "timer", seconds=seconds, label=_str(a.get("label")) or "Nurai")
 
 
 @ptool("open_app", "Открыть приложение на телефоне («открой ютуб», «камеру», «настройки», «Click»).",
@@ -436,7 +436,7 @@ async def _recent_calls(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) ->
     calls = recent_calls(turn.device)
     if not calls:
         if turn.device.get("calls_denied"):
-            return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении Джарвис выдать «Журнал звонков»"}
+            return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении Nurai выдать «Журнал звонков»"}
         return {"calls": [], "note": "журнал пуст"}
     return {"calls": calls}
 
@@ -610,7 +610,7 @@ async def _play_media(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
        {"query": P("STRING", "слова для поиска"), "limit": P("INTEGER", "сколько сообщений, по умолчанию 6")}, ("query",))
 async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении Джарвис → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении Nurai → раздел Telegram → «Подключить»"}
     query = _str(a.get("query"))
     if not query:
         return {"error": "что искать?"}
@@ -679,7 +679,7 @@ def device_prompt(device: dict[str, Any]) -> str:
     if d.get("battery") is not None:
         parts.append(f"батарея {d.get('battery')}%" + (", заряжается" if d.get("charging") else ""))
     if d.get("app_version"):
-        parts.append(f"приложение Джарвис v{d.get('app_version')}")
+        parts.append(f"приложение Nurai v{d.get('app_version')}")
     if d.get("model"):
         parts.append(str(d.get("model"))[:40])
     missed = [c for c in recent_calls(d) if c["kind"] == "пропущенный"][:3]
@@ -802,7 +802,7 @@ def system_extra(turn: PhoneTurn, pending: dict[str, Any] | None) -> str:
     if d.get("model"):
         device.append(str(d.get("model"))[:40])
     lines = [
-        "\n\nРЕЖИМ ТЕЛЕФОНА. С тобой говорят ГОЛОСОМ через приложение «Джарвис» на Android-телефоне владельца; твой ответ будет ПРОИЗНЕСЁН вслух.",
+        "\n\nРЕЖИМ ТЕЛЕФОНА. С тобой говорят ГОЛОСОМ через приложение «Nurai» на Android-телефоне владельца; твой ответ будет ПРОИЗНЕСЁН вслух.",
         "• Ответ — 1–2 коротких разговорных предложения. Без эмодзи, списков, markdown, ссылок и id. Длинные данные — только итог "
         "(«за сентябрь 3,2 миллиона, больше всего на еду»). Это главнее правила 8.",
         "• Экранов бота здесь нет: hand_off, open_screen, call_me недоступны. Трату/доход записывай сразу add_finance_entries (категорию выбери сам), "
@@ -811,7 +811,7 @@ def system_extra(turn: PhoneTurn, pending: dict[str, Any] | None) -> str:
         "если не сказано куда — по умолчанию Telegram. В variants всегда передавай другие написания и родственные слова.",
         "• Сообщения уходят только после подтверждения: send_sms/telegram_send вернут ask_exactly — произнеси его. "
         "Согласие («да», «отправь», «ha») → confirm_send; отказ → cancel_send; просит изменить текст — снова telegram_send/send_sms с новым текстом.",
-        "• Текст сообщения — от первого лица владельца, как он продиктовал, без приписок от Джарвиса; язык — как диктовал (узбекский — латиницей).",
+        "• Текст сообщения — от первого лица владельца, как он продиктовал, без приписок от Nurai; язык — как диктовал (узбекский — латиницей).",
         "• Несколько кандидатов (candidates) → ask_user, а в вопросе назови варианты голосом («Какой маме: Ойижон или Мама Билайн?»).",
         "• «Что мне написали», «новые сообщения», «что пишет Алишер» → telegram_read и перескажи коротко: кто и о чём.",
         "• Будильник («разбуди в 7», «будильник на 6:30») → set_alarm; подъём на фаджр со звонком — set_wake, как раньше. "
@@ -880,7 +880,7 @@ async def _snapshot(profile: Any) -> str:
 
 
 async def prefetch(uid: int) -> None:
-    """Телефон услышал «Джарвис» — пока человек договаривает, прогреваем кэши профиля и данных для промпта."""
+    """Телефон услышал «Nurai» — пока человек договаривает, прогреваем кэши профиля и данных для промпта."""
     from .handlers.common import profile_by_id
 
     try:
@@ -897,9 +897,9 @@ WARM_EVERY = 120.0
 
 
 async def keep_warm(uid: int) -> None:
-    """Держим данные владельца свежими в памяти: «Джарвис» → разговор готов за ~0.4 с (подключение к Gemini),
+    """Держим данные владельца свежими в памяти: «Nurai» → разговор готов за ~0.4 с (подключение к Gemini),
     а не 1.5–5 с. Раз в 2 минуты обновляем то, что истечёт до следующего раза; изменения данных
-    сбрасывают кэш как раньше, так что устаревшего Джарвис не видит."""
+    сбрасывают кэш как раньше, так что устаревшего Nurai не видит."""
     while True:
         try:
             cache.drop_expiring(uid, WARM_EVERY + 15, WARM_KEYS)

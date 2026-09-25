@@ -4,7 +4,7 @@
   Telegram-звонок (pytgcalls)  ──входящий звук 24 кГц──▶  Gemini Live (websocket)
                                ◀──голос модели 24 кГц───
   Модель сама слышит паузы и перебивания (VAD на стороне Gemini), отвечает голосом
-  и вызывает те же инструменты, что Джарвис в чате: добавить цель, удалить операцию,
+  и вызывает те же инструменты, что Nurai в чате: добавить цель, удалить операцию,
   записать калории, ответить по данным. Всё, что изменено в звонке, после разговора
   приходит в чат одним сообщением с кнопкой «Отменить».
 
@@ -89,7 +89,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     не менялась каждую минуту и Gemini брал её из кэша (10% цены)."""
     now = profile.now
     name = p.name_for(profile.first_name) or "пользователь"
-    channel = ("Он позвал тебя голосом («Джарвис») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
+    channel = ("Он позвал тебя голосом («Nurai») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
                "говоришь через динамик телефона и управляешь телефоном своими инструментами. "
                if mode == "phone" else "Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). ")
     where = f"{now_line(profile)}, Андижан, Узбекистан" if with_time else "Он живёт в Андижане, Узбекистан (время — в его репликах)"
@@ -98,12 +98,12 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         # эта инструкция оплачивается в КАЖДОМ ответе Live
         from . import billing
 
-        return (f"Ты — Джарвис, голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
+        return (f"Ты — Nurai, голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang_rule(p)}\n{style_rules(p, spoken=True)}\n"
                 + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
                 + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
     base = (
-        f"Ты — Джарвис, личный помощник {name}. {channel}"
+        f"Ты — Nurai, личный помощник {name}. {channel}"
         "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
         f"{where}. Валюта — сум.\n\n"
         f"{lang_rule(p)}\n\n{human_rules(p)}\n{style_rules(p, spoken=True)}\n"
@@ -153,7 +153,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Узнал о нём что-то важное и надолго (люди, планы, предпочтения) — сохрани remember_about_me, не говоря об этом. "
         "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила.\n"
         "ЧЕСТНОСТЬ: не обещай того, чего не сделаешь инструментами. Договорились о фото («пришлю фото челленджа — отмечай», «буду слать чеки») — "
-        "СРАЗУ вызови expect_photo с подробной инструкцией и сроком: тогда его фото в чате придут Джарвису с этой инструкцией, а не в подсчёт калорий. "
+        "СРАЗУ вызови expect_photo с подробной инструкцией и сроком: тогда его фото в чате придут Nurai с этой инструкцией, а не в подсчёт калорий. "
         "Хочет что-то сложное — ищи способ своими инструментами; по-настоящему невозможное — честно одной фразой и ближайшая замена.\n"
         "Когда он прощается («всё», «пока», «rahmat», «xayr», «bo'ldi») — тепло и коротко попрощайся и вызови end_call.\n"
     )
@@ -168,7 +168,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
 # Телефон: Gemini Live заново оплачивает инструкцию и описания инструментов в КАЖДОМ ответе — поэтому здесь коротко
 # (раньше ~40 тысяч знаков вместе с блоком «О себе» и данными бота; данные теперь — через инструменты и bot_task).
 PHONE_RULES = (
-    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Ты РАБОТАЕШЬ, а не разговариваешь. Не здоровайся. Сказал только «Джарвис» — молчи: "
+    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Ты РАБОТАЕШЬ, а не разговариваешь. Не здоровайся. Сказал только «Nurai» — молчи: "
     "телефон уже ответил «Да, сэр» твоим голосом.\n"
     "КОМАНДЫ — МОЛЧА: сразу вызови инструмент и НИЧЕГО не говори — ни «делаю», ни «сейчас», ни «открываю», ни «готово»: "
     "телефон сам покажет карточку. Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или "
@@ -253,7 +253,7 @@ def compact_declaration(decl: dict[str, Any]) -> dict[str, Any]:
 
 
 def _control_tools(mode: str) -> list[dict[str, Any]]:
-    end = ("Закончить разговор (панель Джарвиса закроется) — когда он попрощался или сказал, что больше ничего не нужно."
+    end = ("Закончить разговор (панель Nurai закроется) — когда он попрощался или сказал, что больше ничего не нужно."
            if mode == "phone" else "Положить трубку — когда разговор окончен или человек попрощался.")
     tools = [{"name": "end_call", "description": end,
               "parameters": {"type": "OBJECT", "properties": {}}}]
@@ -294,7 +294,7 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
         snapshot, memory = await asyncio.gather(agent_tools.snapshot(profile), extra.memory_prompt(profile.telegram_id))
     except Exception:
         snapshot, memory = "", ""
-    hint = "[голосовая просьба через Джарвиса: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
+    hint = "[голосовая просьба через Nurai: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
     res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
     return {"ok": True, "reply": res.text, "done": res.ctx.calls}
@@ -846,7 +846,7 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
 
 
 async def answer(profile: Profile) -> LiveResult:
-    """Он сам позвонил Джарвису в Telegram: сначала Gemini (приветствие готовится ~1 с), потом берём
+    """Он сам позвонил Nurai в Telegram: сначала Gemini (приветствие готовится ~1 с), потом берём
     трубку — он слышит голос сразу, а не тишину после ответа."""
     from . import billing
 

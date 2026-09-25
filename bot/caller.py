@@ -1,6 +1,6 @@
 """Звонок в Telegram от аккаунта-помощника (userbot) — Telethon + pytgcalls.
 
-Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «Джарвис»: у тебя
+Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «Nurai»: у тебя
 на экране обычный входящий Telegram-звонок, в трубке — синтезированный голос.
 
 Включается, только если в .env заданы TG_CALLER_API_ID / TG_CALLER_API_HASH /
@@ -76,12 +76,29 @@ async def start() -> bool:
             helper_username = getattr(me, "username", None)
             _hook_updates()  # сразу: входящие звонки Джарвису и «положили трубку» — с первой секунды
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
+            await _ensure_display_name(me)
             return True
         except Exception as exc:
             _import_error = f"{type(exc).__name__}: {exc}"
             logger.exception("caller start failed")
             _client = _calls = None
             return False
+
+
+ASSISTANT_NAME = "Nurai"  # он переименовал ассистента 25.09.2026 (раньше «Jarvis»); юзернейм аккаунта не меняем
+
+
+async def _ensure_display_name(me: Any) -> None:
+    """Имя аккаунта помощника в Telegram — как у ассистента (он видит его, когда тот звонит на фаджр)."""
+    if (getattr(me, "first_name", "") or "") == ASSISTANT_NAME and not getattr(me, "last_name", None):
+        return
+    try:
+        from telethon.tl.functions.account import UpdateProfileRequest  # type: ignore
+
+        await _client(UpdateProfileRequest(first_name=ASSISTANT_NAME, last_name=""))
+        logger.info("caller: имя аккаунта «%s» → «%s»", getattr(me, "first_name", ""), ASSISTANT_NAME)
+    except Exception:
+        logger.warning("caller: не смог сменить имя аккаунта", exc_info=True)
 
 
 async def resolve_peer(user_id: int, username: str | None = None) -> Any:
@@ -243,7 +260,7 @@ def _hook_updates() -> None:
 
 
 def _answer_or_decline(chat_id: int) -> None:
-    """Кто-то звонит аккаунту Джарвиса. Владелец — берём трубку (разговор ведёт call_assistant),
+    """Кто-то звонит аккаунту Nurai. Владелец — берём трубку (разговор ведёт call_assistant),
     остальным — сбрасываем: это личный помощник, а не общий номер."""
     async def run() -> None:
         taken = False
@@ -381,7 +398,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
 def classify_error(exc: Exception) -> str | None:
     """Почему звонок не состоялся — чтобы сказать человеку, ЧТО сделать, а не «не удалось».
 
-    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт Джарвиса;
+    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт Nurai;
     no_answer — звонило, но трубку не взяли (часто: звонящего нет в контактах → телефон глушит);
     None      — отклонил / занято (сам решил не брать)."""
     name = type(exc).__name__.lower()
@@ -509,7 +526,7 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
 
 
 async def send_message(user_id: int, text: str) -> bool:
-    """Сообщение от лица «Джарвиса» (например, если звонок не прошёл)."""
+    """Сообщение от лица «Nurai» (например, если звонок не прошёл)."""
     if not await start():
         return False
     try:

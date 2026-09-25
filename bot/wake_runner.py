@@ -96,7 +96,7 @@ async def plan_for(profile: Profile, day: date | None = None) -> tuple[wake_mod.
 
 # ------------------------------------------------------------------ голос
 async def _say(text: str) -> bytes | None:
-    """Фраза Джарвиса → PCM (24 кГц, моно) для проигрывания в звонке."""
+    """Фраза Nurai → PCM (24 кГц, моно) для проигрывания в звонке."""
     if not text.strip():
         return None
     try:

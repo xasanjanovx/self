@@ -1,7 +1,7 @@
 """Свободный ввод без выбранного раздела: сам определяем, куда отправить.
 
 Порядок: быстрые правила (регулярки/ключевые слова — дёшево и мгновенно) →
-всё остальное отдаём агенту «Джарвис», который сам решает: выполнить команду,
+всё остальное отдаём агенту «Nurai», который сам решает: выполнить команду,
 ответить на вопрос по данным, передать запись парсеру или просто поговорить.
 Голос транскрибируется один раз."""
 from __future__ import annotations
@@ -43,12 +43,12 @@ def _is_question(text: str) -> bool:
 
 
 async def _not_understood(message: Message, profile: Profile, transcript: str | None = None) -> None:
-    """Сюда попадаем только если Джарвис недоступен (ошибка AI) или сообщение без текста."""
+    """Сюда попадаем только если Nurai недоступен (ошибка AI) или сообщение без текста."""
     if transcript:
-        notice = profile.tr(f"Джарвис сейчас недоступен, не смог обработать: «{h(transcript[:80])}». Повтори через минуту.",
-                            f"Jarvis hozir ishlamayapti: «{h(transcript[:80])}». Bir daqiqadan so'ng qaytaring.")
+        notice = profile.tr(f"Nurai сейчас недоступен, не смог обработать: «{h(transcript[:80])}». Повтори через минуту.",
+                            f"Nurai hozir ishlamayapti: «{h(transcript[:80])}». Bir daqiqadan so'ng qaytaring.")
     else:
-        notice = profile.tr("Джарвис сейчас недоступен — повтори через минуту.", "Jarvis hozir ishlamayapti — bir daqiqadan so'ng qaytaring.")
+        notice = profile.tr("Nurai сейчас недоступен — повтори через минуту.", "Nurai hozir ishlamayapti — bir daqiqadan so'ng qaytaring.")
     # возвращаем главный экран (мог остаться «⏳ …») и показываем короткую подсказку
     await send_main_menu(message, profile)
     await screen_mod.send_ephemeral(message.bot, message.chat.id, f"{pe.CROSS} {notice}", keep_previous=True)
@@ -105,11 +105,11 @@ async def route_text(
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:
-    """Фото: вакансия по подписи → договорённость с Джарвисом
+    """Фото: вакансия по подписи → договорённость с Nurai
     (expect_photo) → еда или «другое».
 
-    Раньше любое фото считалось едой: пообещал Джарвис «пришли фото челленджа — отмечу», а фото ушло
-    в калории. Теперь Джарвис видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
+    Раньше любое фото считалось едой: пообещал Nurai «пришли фото челленджа — отмечу», а фото ушло
+    в калории. Теперь Nurai видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
     caption = message_text(message)
     if caption and vac.looks_like_vacancy(caption):
         await vacancy_h.process_vacancy(message, state, profile, caption)

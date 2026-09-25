@@ -1,4 +1,4 @@
-"""Версия Джарвиса: номер выпуска + коммит и время обновления сервера (из .git внутри образа)."""
+"""Версия Nurai: номер выпуска + коммит и время обновления сервера (из .git внутри образа)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone

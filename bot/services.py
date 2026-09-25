@@ -291,7 +291,7 @@ async def uncheck(uid: int, *, goal_id: Any, day: date) -> None:
 
 # ------------------------------------------------------------------ 009: характер Джарвиса
 async def persona(uid: int):
-    """Настройки характера Джарвиса (голос, язык звонков, обращение, тон, длина ответов)."""
+    """Настройки характера Nurai (голос, язык звонков, обращение, тон, длина ответов)."""
     from .persona import Persona
 
     if not db.available("assistant_settings"):

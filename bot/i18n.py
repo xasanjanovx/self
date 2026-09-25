@@ -8,7 +8,7 @@
   цифры и эмодзи остаются как есть);
 - числа заменяются заглушками ⟦0⟧, ⟦1⟧…, поэтому «Потрачено 25 000» и «Потрачено 40 000» — одна
   фраза; перевод фразы делается ОДИН раз (Gemini) и хранится в памяти и в базе (ui_translations);
-- <pre>/<code> и куски в маркерах KEEP не трогаем: ответы Джарвиса уже на выбранном языке Джарвиса.
+- <pre>/<code> и куски в маркерах KEEP не трогаем: ответы Nurai уже на выбранном языке Nurai.
 
 Если перевод не удался — уходит исходный текст (лучше по-русски, чем ничего).
 """
@@ -64,7 +64,7 @@ def callback_user(callback_id: str) -> int | None:
 
 
 def keep(text: str) -> str:
-    """Пометить текст как «не переводить» (ответ Джарвиса уже на языке, выбранном для Джарвиса)."""
+    """Пометить текст как «не переводить» (ответ Nurai уже на языке, выбранном для Nurai)."""
     return f"{KEEP}{text}{KEEP}" if text else text
 
 
@@ -137,7 +137,7 @@ async def _fetch(templates: list[str], lang: str) -> dict[str, str]:
         chunk = missing[i:i + BATCH]
         prompt = (
             "Translate these Telegram bot interface strings into natural, concise English (they are Russian, some mixed with Uzbek). "
-            "It is a personal assistant bot: finance, nutrition, tasks, goals, reminders, prayer-time alarm, AI assistant «Jarvis» (Джарвис → Jarvis). "
+            "It is a personal assistant bot: finance, nutrition, tasks, goals, reminders, prayer-time alarm, AI assistant «Nurai» (Nurai → Nurai). "
             "Rules: keep every HTML tag, emoji and placeholder like ⟦0⟧ exactly (move placeholders only if English word order needs it); "
             "«сум» → «UZS»; keep proper names, brands, @usernames, links; button-length strings stay short; do not add anything. "
             "Return ONLY a JSON array of strings, same order and same length as the input.\n\n" + json.dumps(chunk, ensure_ascii=False)

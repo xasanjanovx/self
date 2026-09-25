@@ -84,6 +84,7 @@ def test_clean_transcript():
     assert clean_transcript("Hey Jarvis what time") == "what time"
     assert clean_transcript("<пусто>") == ""
     assert clean_transcript("Джарвис") == ""
+    assert clean_transcript("Нурай, позвони маме") == "позвони маме" and clean_transcript("ну рай открой ютуб") == "открой ютуб"
 
 
 # ------------------------------------------------------------------ declarations
@@ -153,7 +154,7 @@ def test_call_without_contacts_asks_phone_to_upload(uid):
 def test_alarm_and_bad_alarm(uid):
     turn = phone.PhoneTurn(uid=uid)
     _run(turn, "разбуди в 6:30 по будням", _call("set_alarm", time="6:30", days=["mon", "fri"]), _say("Поставил."))
-    assert turn.actions == [{"type": "alarm", "hour": 6, "minute": 30, "label": "Джарвис", "days": [2, 6]}]
+    assert turn.actions == [{"type": "alarm", "hour": 6, "minute": 30, "label": "Nurai", "days": [2, 6]}]
     turn2 = phone.PhoneTurn(uid=uid)
     _run(turn2, "будильник", _call("set_alarm", time="25:00"), _say("Во сколько?"))
     assert turn2.actions == []
