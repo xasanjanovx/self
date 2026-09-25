@@ -597,7 +597,6 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
 
 async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, Any]) -> None:  # noqa: ANN001
     from . import agent_tools_extra as extra
-    from . import voiceprint
 
     started = time.monotonic()
     device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
@@ -616,7 +615,7 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
     profile = sess.profile
     sess.phone_ws = phone_ws
     sess.frames_on_request = bool(device.get("frames_on_request"))
-    sess.owner.enabled = voiceprint.enrolled(uid)
+    sess.owner.enabled = False  # отсекал его самого (см. phone_cheap.OWNER_CHECK); чужих отсекает wake_check
     if warm:
         # заготовка собрана с прошлыми данными телефона — свежие (заряд, пропущенные, блокировка) пометкой
         stale = phone.device_prompt(sess.turn.device)
