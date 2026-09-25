@@ -39,6 +39,14 @@ DRAIN_SECONDS = 8.0          # после «до связи» даём дого�
 SILENCE_NUDGE_SECONDS = 7.0  # подъём: столько тишины — и Джарвис снова зовёт по имени
 COMPRESS_ABOVE = 8000        # разговор (сверх инструкции и инструментов) вырос до ~8 тыс. токенов (~4 мин речи) — сжимаем…
 COMPRESS_KEEP = 3000         # …до последних ~3 тыс. (минута-две разговора)
+# телефон (он выбрал экономнее): каждый ответ Live заново оплачивает весь разговор, звук — вчетверо дороже текста;
+# 155 с разговора стоили $0.16, из них $0.06 — его же голос в памяти. Держим последние ~20–30 с.
+PHONE_COMPRESS_ABOVE = 2500
+PHONE_COMPRESS_KEEP = 800
+# «тихие» команды (behavior NON_BLOCKING + scheduling SILENT): после действия модель не тратит второй ответ —
+# проверено на gemini-3.8-live 25.09: «позвони маме» $0.0021 → $0.0009. Ошибка/вопрос — модель говорит (WHEN_IDLE).
+SILENT_TOOLS = {"phone_call", "set_alarm", "set_timer", "open_app", "media", "add_finance_entries", "add_calorie_logs", "add_task",
+                "add_reminder", "confirm_send", "cancel_send", "phone_task", "send_to_chat", "end_call"}
 # экономные настройки сессии, которые модель приняла: 2 — «размышления» minimal + сжатие, 1 — только сжатие, 0 — ничего
 _extras_level: dict[str, int] = {}
 
@@ -70,6 +78,11 @@ def now_line(profile: Profile) -> str:
     return f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}"
 
 
+def facts_only(memory: str) -> str:
+    """Память о нём без «недавних реплик» прошлых дней — для команд на телефоне они не нужны, а оплачиваются в каждом ответе."""
+    return str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
+
+
 def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str = "", memory: str = "",
                        wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True) -> str:
     """with_time=False — без текущего времени: экономный режим телефона кладёт его в реплику, чтобы инструкция
@@ -80,6 +93,15 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
                "говоришь через динамик телефона и управляешь телефоном своими инструментами. "
                if mode == "phone" else "Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). ")
     where = f"{now_line(profile)}, Андижан, Узбекистан" if with_time else "Он живёт в Андижане, Узбекистан (время — в его репликах)"
+    if mode == "phone":
+        # он просил: работать, а не разговаривать, и экономно — без «характера» (шутки, «ого!», «хм») и прошлых реплик;
+        # эта инструкция оплачивается в КАЖДОМ ответе Live
+        from . import billing
+
+        return (f"Ты — Джарвис, голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
+                f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang_rule(p)}\n{style_rules(p, spoken=True)}\n"
+                + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
+                + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
     base = (
         f"Ты — Джарвис, личный помощник {name}. {channel}"
         "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
@@ -135,12 +157,6 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Хочет что-то сложное — ищи способ своими инструментами; по-настоящему невозможное — честно одной фразой и ближайшая замена.\n"
         "Когда он прощается («всё», «пока», «rahmat», «xayr», «bo'ldi») — тепло и коротко попрощайся и вызови end_call.\n"
     )
-    if mode == "phone":
-        # коротко: без общего блока правил, «О себе» и данных — всё это оплачивалось бы в каждом ответе
-        from . import billing
-
-        return (base + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
-                + (f"\n{memory}\n" if memory else ""))
     if topic:
         opening = f"Начни разговор с темы, которую он попросил: «{topic}». Поздоровайся одной фразой и сразу к делу.\n"
     else:
@@ -152,30 +168,24 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
 # Телефон: Gemini Live заново оплачивает инструкцию и описания инструментов в КАЖДОМ ответе — поэтому здесь коротко
 # (раньше ~40 тысяч знаков вместе с блоком «О себе» и данными бота; данные теперь — через инструменты и bot_task).
 PHONE_RULES = (
-    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Он уже позвал тебя — не здоровайся и не представляйся. "
-    "Если он сказал только «Джарвис» — НИЧЕГО не отвечай: телефон уже откликнулся «Да, сэр» твоим голосом; молча жди команду.\n"
-    "КОРОТКО: одна-две фразы, если не просит подробнее. Не спрашивай «что-то ещё?».\n"
-    "КОМАНДЫ — МОЛЧА: звонок, приложение, будильник, таймер, музыка, запись траты/еды/задачи/напоминания и всё через phone_task — "
-    "вызови инструмент и НИЧЕГО не говори ни до, ни после: телефон сам покажет карточку. "
-    "Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или нужно подтверждение.\n"
-    "Любые вопросы (жизнь, религия, техника, советы, перевод, посчитать) — отвечай как умный знающий человек, без «не могу». "
-    "Свежие факты — web_search, погода — weather. Сейчас {year} год: всё, что могло измениться (новости, цены, версии), проверь поиском.\n"
-    "ДАННЫЕ: трата — add_finance_entries, еда — add_calorie_logs, напоминание, задача, «сколько потратил» — get_finance_stats; "
-    "всё остальное с его данными (исправить, удалить, найти, цели, долги, бюджеты, отчёты, подъём на фаджр, заметки, баланс Gemini) — "
-    "bot_task: передай просьбу целиком с числами и датами и перескажи ответ одной фразой.\n"
-    "ОСТАЛЬНОЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком: SMS, «что мне написали», фонарик, громкость, маршрут, такси, WhatsApp, "
-    "YouTube, галерея, яркость, не беспокоить, беззвучный, журнал звонков, перезвонить, переадресация, настройки, системные кнопки, "
-    "курс валют, время намаза, «запомни обо мне», «ошиблась человеком», «отмени последнее». Вернёт итог: ask_exactly — произнеси "
-    "дословно; иначе молчи, если он не спрашивал.\n"
-    "ЛЮДИ: кому звонить/писать — НЕ переспрашивай, инструмент сам выбирает лучшее совпадение; в variants — другие написания и "
-    "родственные слова (мама → ойи, онам, ona, oyijon). Сообщения уходят после подтверждения: произнеси ask_exactly; «да» → "
-    "confirm_send, «нет» → cancel_send.\n"
-    "ВИДЕТЬ: камера — look, экран — screen_look. Кадры придут в разговор — отвечай коротко по делу. Нажимать внутри других "
-    "приложений ты не умеешь — скажи честно одной фразой. need_unlock — одной фразой попроси разблокировать; придёт "
-    "«[Телефон разблокирован…]» — сразу сделай.\n"
-    "Разговор НЕ закрывается сам (как Gemini Live): после ответа молча жди. Слышишь речь, обращённую не к тебе (он говорит с кем-то "
-    "рядом, телевизор, видео), — НЕ отвечай, промолчи. Прощается («всё», «хватит», «пока», «bo'ldi») — end_call без лишних слов. "
-    "«Скинь в чат» — send_to_chat.\n"
+    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Ты РАБОТАЕШЬ, а не разговариваешь. Не здоровайся. Сказал только «Джарвис» — молчи: "
+    "телефон уже ответил «Да, сэр» твоим голосом.\n"
+    "КОМАНДЫ — МОЛЧА: сразу вызови инструмент и НИЧЕГО не говори — ни «делаю», ни «сейчас», ни «открываю», ни «готово»: "
+    "телефон сам покажет карточку. Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или "
+    "ask_exactly (произнеси дословно).\n"
+    "Ответ — одна короткая фраза, без «что-то ещё?». На любые вопросы отвечай по существу, без «не могу»; свежие факты — "
+    "web_search, погода — weather; сейчас {year} год.\n"
+    "ДАННЫЕ: трата — add_finance_entries, еда — add_calorie_logs, задача, напоминание, «сколько потратил» — get_finance_stats; "
+    "прочее с его данными (исправить, удалить, цели, долги, бюджеты, отчёты, подъём, баланс Gemini) — bot_task, просьбой целиком.\n"
+    "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком и с конкретикой: SMS, «что мне написали», фонарик, громкость, маршрут, "
+    "такси, WhatsApp, YouTube, галерея, яркость, не беспокоить, звонки, настройки, курс, намаз, запомнить, отменить. "
+    "Адрес или место — словами; если он показывает место на экране или камерой — прочитай его с кадра и передай.\n"
+    "ЛЮДИ: не переспрашивай — инструмент сам выберет; в variants — другие написания (мама → ойи, ona, oyijon). "
+    "Сообщения уходят после «да» — confirm_send, «нет» — cancel_send.\n"
+    "ВИДЕТЬ: камера — look, экран — screen_look; кадр придёт с результатом — сразу ответь по нему. Нажимать в других "
+    "приложениях не умеешь. need_unlock — одной фразой попроси разблокировать.\n"
+    "Разговор НЕ закрывается сам: после ответа молча жди. Речь, обращённую не к тебе (кто-то рядом, телевизор), — не отвечай. "
+    "Прощается («всё», «пока», «bo'ldi») — end_call молча. «Скинь в чат» — send_to_chat.\n"
 )
 PHONE_ECONOMY = (
     "\nЭКОНОМНЫЙ РЕЖИМ (дневной лимит расходов достигнут): отвечай ОДНОЙ короткой фразой, команды — строго молча, "
@@ -311,6 +321,7 @@ def tool_declarations(mode: str, *, full: bool = False) -> list[dict[str, Any]]:
             decls = [d for d in decls if d["name"] not in PHONE_SKIP_TOOLS]
             if not full:
                 decls = [d for d in decls if d["name"] in PHONE_LIVE_CORE] + [_PHONE_TASK]
+                decls = [{**d, "behavior": "NON_BLOCKING"} if d["name"] in SILENT_TOOLS else d for d in decls]
         # голос: описания короткие — они оплачиваются в каждом ответе Gemini Live
         decls = [compact_declaration(d) for d in decls]
     else:
@@ -322,7 +333,7 @@ def _extras_rejected(error: str) -> bool:
     """Отказ похож на «не знаю такую настройку» (или безликое invalid argument) — стоит попробовать без экономных настроек."""
     low = str(error or "").lower()
     return any(k in low for k in ("thinking", "compression", "context_window", "contextwindow", "sliding", "invalid argument",
-                                  "unknown name", "cannot find field"))
+                                  "unknown name", "cannot find field", "behavior", "non_blocking"))
 
 
 def phone_task_declarations() -> list[dict[str, Any]]:
@@ -353,6 +364,7 @@ class _Session:
         self.pre_answer = False                # идут гудки: модель уже готовит приветствие, закрытие сессии — не конец разговора
         self.greeting = ""                     # что модель сказала, пока шли гудки (для переподключения)
         self.heard_user = False                # он уже что-то сказал (подъём: не толкать каждые 7 секунд)
+        self.nonblocking = False               # модель приняла «тихие» инструменты (SILENT_TOOLS) — ставит setup_payload
 
     async def send(self, ws, payload: dict[str, Any]) -> bool:  # noqa: ANN001
         try:
@@ -461,7 +473,12 @@ class _Session:
         if level >= 1:
             # ~3 знака на токен: инструкция + описания инструментов — постоянная часть; разговор сверху — до ~8 тыс. токенов
             base = (len(self.system) + len(json.dumps(decls, ensure_ascii=False))) // 3
-            setup["contextWindowCompression"] = {"triggerTokens": base + COMPRESS_ABOVE, "slidingWindow": {"targetTokens": base + COMPRESS_KEEP}}
+            above, keep = (PHONE_COMPRESS_ABOVE, PHONE_COMPRESS_KEEP) if self.mode == "phone" else (COMPRESS_ABOVE, COMPRESS_KEEP)
+            setup["contextWindowCompression"] = {"triggerTokens": base + above, "slidingWindow": {"targetTokens": base + keep}}
+        self.nonblocking = level >= 1 and self.mode == "phone"
+        if not self.nonblocking and tools:
+            # модель не приняла «тихие» инструменты — объявляем их обычными
+            tools[0]["functionDeclarations"] = [{k: v for k, v in d.items() if k != "behavior"} for d in decls]
         return {"setup": setup}
 
     def declarations(self) -> list[dict[str, Any]]:

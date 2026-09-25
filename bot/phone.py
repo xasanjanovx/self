@@ -558,7 +558,7 @@ async def _screen_look(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> 
     on = _bool(a.get("on"))
     res = _action(turn, "screen", on=on is not False)
     if on is not False:
-        res["note"] = "кадры экрана придут через секунду-две (если разрешения ещё нет — телефон спросит его); пока скажи коротко «Смотрю»"
+        res["note"] = "кадр экрана — в разговоре (если разрешения ещё нет — телефон спросит его)"
     return res
 
 
@@ -618,6 +618,10 @@ async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any])
     return {"messages": found} if found else {"messages": [], "note": "ничего не нашлось"}
 
 
+_VAGUE_PLACE = re.compile(r"^\s*(на |в |до |к )?(эт[уоа]\w*|ту|сюда|туда|здесь|там|текущ\w*|мою|моё|мое|shu|bu|u)?\s*"
+                          r"(геолокац\w*|локац\w*|мест\w*|точк\w*|адрес\w*|location|joy\w*)?\s*$", re.IGNORECASE)
+
+
 @ptool("taxi", "Такси через Яндекс Go: «вызови такси до Чорсу», «сколько до вокзала на такси». Откроется Яндекс Go с готовым маршрутом "
        "от того места, где он сейчас, — цену и время подачи видно сразу, «Заказать» он нажимает сам.",
        {"to": P("STRING", "куда ехать: адрес или место"), "tariff": P("STRING", "econom | comfort | business", enum=["econom", "comfort", "business"])},
@@ -626,8 +630,9 @@ async def _taxi(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[st
     from . import media
 
     to = _str(a.get("to"))
-    if not to:
-        return {"error": "куда ехать?"}
+    if not to or _VAGUE_PLACE.search(to):
+        # «на эту геолокацию», «сюда» — адреса нет: пусть спросит, а не открывает пустой маршрут (25.09 — дважды)
+        return {"error": "куда ехать? Нужен адрес или место словами (улица, район, заведение)"}
     loc = turn.device.get("location") if isinstance(turn.device.get("location"), dict) else None
     near = (float(loc["lat"]), float(loc["lon"])) if loc and loc.get("lat") is not None else None
     place = await media.geocode(to, near)
@@ -663,7 +668,7 @@ async def _look(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[st
     if on is False:
         return _action(turn, "camera", on=False)
     res = _action(turn, "camera", on=True, facing=_str(a.get("camera")) or "back")
-    res["note"] = "камера открывается — через секунду начнут приходить кадры; пока скажи коротко «Смотрю»"
+    res["note"] = "камера включена — кадр в разговоре"
     return res
 
 

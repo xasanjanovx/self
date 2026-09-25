@@ -49,6 +49,7 @@ GREET = "[Он позвал тебя по имени и ждёт. Откликн
 IDLE_END_S = 15.0        # он выбрал: 15 с тишины — разговор закрывается
 IDLE_END_ECONOMY = 8.0   # после дневного лимита — быстрее
 FRAME_EVERY_S = 3.0      # камера/экран: пока он говорит — не чаще кадра в 3 с
+FIRST_FRAME_WAIT_S = 4.0  # «посмотри»: результат инструмента отдаём, когда первый кадр уже в разговоре
 
 
 class SpeechGate:
@@ -440,8 +441,22 @@ class PhoneLive(_Session):
         for call in calls:
             name, args, cid = str(call.get("name")), call.get("args") or {}, call.get("id")
             result = await exec_tool(self, name, args)
-            responses.append({"id": cid, "name": name, "response": _jsonable(result)})
+            if name in {"look", "screen_look"} and isinstance(result, dict) and not result.get("error") and args.get("on") is not False:
+                await self._wait_frame(FIRST_FRAME_WAIT_S)  # «посмотри» — модель отвечает, уже видя кадр
+            response: dict[str, Any] = {"id": cid, "name": name, "response": _jsonable(result)}
+            if self.nonblocking and name in live_call.SILENT_TOOLS:
+                # удалось — молча (второй ответ модели не оплачиваем); ошибка, вопрос «Отправить?», ответ phone_task — пусть скажет
+                speak = isinstance(result, dict) and any(result.get(k) for k in ("error", "ask_exactly", "need_unlock", "reply"))
+                response["scheduling"] = "WHEN_IDLE" if speak else "SILENT"
+            responses.append(response)
         await self.to_gemini(ws, {"toolResponse": {"functionResponses": responses}})
+
+    async def _wait_frame(self, timeout: float) -> None:
+        since = time.monotonic()
+        while time.monotonic() - since < timeout and not self.stop.is_set():
+            if self._frame_tx >= since:
+                return
+            await asyncio.sleep(0.1)
 
 
 async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN001

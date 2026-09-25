@@ -136,7 +136,7 @@ def test_result_cards():
 
 def test_prompt_does_not_answer_bare_name():
     text = live_call.system_instruction(_profile(), Persona(lang="ru"), mode="phone")
-    assert "НИЧЕГО не отвечай" in text and "need_unlock" in text
+    assert "Сказал только «Джарвис» — молчи" in text and "need_unlock" in text
 
 
 @pytest.mark.parametrize("mode", ["assistant", "wake", "phone"])

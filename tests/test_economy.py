@@ -475,3 +475,49 @@ def test_cards_for_silent_records():
     card = phone_live.result_card("add_calorie_logs", {"items": [{"meal": "плов", "calories": 650}]}, {"added": [{}]})
     assert card["subtitle"] == "плов · 650 ккал"
     assert phone_live.result_card("add_finance_entries", {"items": []}, {"error": "x"}) is None
+
+
+# ------------------------------------------------------------------ «работай, а не разговаривай» (25.09)
+def test_phone_prompt_is_short_and_without_chatter():
+    mem = "ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n• Онажоним — это мама\n\nНЕДАВНИЕ РЕПЛИКИ (прошлые дни):\n24.09 · я: привет → бот: здравствуйте"
+    text = live_call.system_instruction(_profile(), Persona(lang="ru"), mode="phone", memory=mem)
+    assert "Онажоним" in text and "НЕДАВНИЕ РЕПЛИКИ" not in text and "ХАРАКТЕР" not in text
+    assert "ни «делаю»" in text and "Gemini 3.8 Live" in text and len(text) < 4800
+
+
+def test_silent_tools_answer_without_second_model_turn(monkeypatch):
+    sess, phone_ws = _live_session()
+    sess.nonblocking = True
+    gem = _PhoneWS()
+    results = {"phone_call": {"ok": True}, "telegram_send": {"ask_exactly": "Отправить?"}, "phone_task": {"ok": True, "reply": "Вам писал Алишер."},
+               "open_app": {"error": "нет такого приложения"}, "weather": {"now": {}}}
+
+    async def fake_exec(s, name, args):
+        return results[name]
+
+    monkeypatch.setattr(phone_live, "exec_tool", fake_exec)
+    calls = [{"id": str(i), "name": n, "args": {}} for i, n in enumerate(results)]
+    asyncio.run(sess._run_tools(gem, calls))
+    sched = {r["name"]: r.get("scheduling") for r in gem.sent[-1]["toolResponse"]["functionResponses"]}
+    assert sched == {"phone_call": "SILENT", "telegram_send": None, "phone_task": "WHEN_IDLE", "open_app": "WHEN_IDLE", "weather": None}
+
+
+def test_live_phone_declares_silent_tools_and_strong_compression(monkeypatch):
+    monkeypatch.setattr(live_call, "_extras_level", {})
+    sess = live_call._Session(_profile(), Persona(lang="ru"), mode="phone", system="x" * 3000)
+    setup = sess.setup_payload("gemini-3.8-live", rich=False)["setup"]
+    decls = {d["name"]: d for d in setup["tools"][0]["functionDeclarations"]}
+    assert decls["phone_call"]["behavior"] == "NON_BLOCKING" and "behavior" not in decls["weather"] and sess.nonblocking
+    cw = setup["contextWindowCompression"]
+    assert cw["triggerTokens"] - cw["slidingWindow"]["targetTokens"] == live_call.PHONE_COMPRESS_ABOVE - live_call.PHONE_COMPRESS_KEEP
+    live_call._extras_level["gemini-3.8-live"] = 0  # модель не приняла — обычные инструменты
+    setup = sess.setup_payload("gemini-3.8-live", rich=False)["setup"]
+    assert not any("behavior" in d for d in setup["tools"][0]["functionDeclarations"]) and not sess.nonblocking
+
+
+def test_taxi_needs_a_real_place():
+    turn = phone.PhoneTurn(uid=1)
+    for vague in ("эту геолокацию", "текущая геолокация", "сюда", "shu joy"):
+        res = asyncio.run(phone.PHONE_TOOLS["taxi"].handler(turn, None, {"to": vague}))
+        assert "куда ехать" in res["error"], vague
+    assert not turn.actions
