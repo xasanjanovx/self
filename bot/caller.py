@@ -85,18 +85,21 @@ async def start() -> bool:
             return False
 
 
-ASSISTANT_NAME = "ZEKI"  # он переименовал ассистента 25.09.2026 (раньше «Jarvis»); юзернейм аккаунта не меняем
+ASSISTANT_NAME = "ZEKI"  # ассистент переименован 26.09.2026 (раньше «Jarvis», «Nurai»)
+_OLD_NAMES = ("jarvis", "джарвис", "nurai", "нурай")
 
 
 async def _ensure_display_name(me: Any) -> None:
-    """Имя аккаунта помощника в Telegram — как у ассистента (он видит его, когда тот звонит на фаджр)."""
-    if (getattr(me, "first_name", "") or "") == ASSISTANT_NAME and not getattr(me, "last_name", None):
+    """Имя аккаунта помощника в Telegram не должно остаться старым («Jarvis»/«Nurai»): он видит его, когда тот звонит.
+    Своё имя он ставит сам (26.09 — «Zeki | AI», @zeki_AI) — такое не трогаем."""
+    current = " ".join(x for x in (getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or "") if x)
+    if not any(old in current.lower() for old in _OLD_NAMES):
         return
     try:
         from telethon.tl.functions.account import UpdateProfileRequest  # type: ignore
 
         await _client(UpdateProfileRequest(first_name=ASSISTANT_NAME, last_name=""))
-        logger.info("caller: имя аккаунта «%s» → «%s»", getattr(me, "first_name", ""), ASSISTANT_NAME)
+        logger.info("caller: имя аккаунта «%s» → «%s»", current, ASSISTANT_NAME)
     except Exception:
         logger.warning("caller: не смог сменить имя аккаунта", exc_info=True)
 
