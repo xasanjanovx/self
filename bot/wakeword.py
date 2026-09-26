@@ -31,6 +31,8 @@ RATE = 16000
 # 4 минуты) — тоже имя (чужие голоса отсекает проверка голоса). Не имя: «жесть», «есть», «джек», «чес», «здесь».
 _JES = re.compile(r"^(?:дж|ж|дз|j)(?:е|э|а|ей|эй|e|a|ey|ei)(?:с|сс|з|s|ss|z)т?$")
 
+NAME_MAX_POS = 2  # перед именем в записи может остаться хвост прошлых слов — не больше двух
+
 _recognizer: Any = None
 _load_error: str | None = None
 _lock = asyncio.Lock()
@@ -87,6 +89,8 @@ def match(text: str) -> tuple[bool, str]:
     """(есть ли «JES», что сказано после имени)."""
     words = re.findall(r"[a-zа-яё]+", text.lower().replace("ё", "е"))
     for i, word in enumerate(words):
+        if i > NAME_MAX_POS:
+            break  # имя — в начале фразы («Джес, позвони…»), а не посреди разговора («…вот такой жест…»)
         if _JES.match(word):
             return True, " ".join(words[i + 1:])
         # «эй джес» склеилось в одно слово

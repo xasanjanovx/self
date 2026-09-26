@@ -57,6 +57,14 @@ _KIN_GROUPS = [{norm(w) for w in group} for group in _KIN]
 _KIN_ROOTS = [norm(group[0]) for group in _KIN]
 
 
+def kin_word(root: str) -> str | None:
+    """«brat» → «брат» (как сказать вслух)."""
+    for r, group in zip(_KIN_ROOTS, _KIN):
+        if r == root:
+            return group[0]
+    return None
+
+
 def kin_root(value: Any) -> str | None:
     """«брату», «akamga», «Акам» → «brat» (корень группы); не родство → None."""
     n = norm(value)

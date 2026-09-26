@@ -226,7 +226,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
-                _btn("JES", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
+                _btn("JES" if lang == "uz" else "Джес", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
                 _btn("Budilnik" if lang == "uz" else "Будильник", "settings:wake", style=P, icon=_pe.ID_ALARM),
             ],
             [

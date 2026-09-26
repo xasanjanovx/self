@@ -85,6 +85,15 @@ def now_line(profile: Profile) -> str:
     return f"Сейчас {_WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}"
 
 
+def recent_lines(memory: str, n: int = 4) -> str:
+    """Последние реплики (чат и телефон — одна память, 26.09 «один и тот же ИИ»): коротко, чтобы не дорожало."""
+    part = str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ", 1)
+    if len(part) < 2:
+        return ""
+    lines = [line for line in part[1].splitlines()[1:] if line.strip() and not line.startswith("ФОТО")][-n:]
+    return ("НЕДАВНО (чат и телефон — это всё ты, JES):\n" + "\n".join(line[:160] for line in lines)) if lines else ""
+
+
 def facts_only(memory: str) -> str:
     """Память о нём без «недавних реплик» прошлых дней — для команд на телефоне они не нужны, а оплачиваются в каждом ответе."""
     return str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
@@ -109,6 +118,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang_rule(p)}\n{style_rules(p, spoken=True)}\n"
                 + PHONE_VOICE + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
                 + (f"\n{people}\n" if people else "")
+                + (f"\n{recent_lines(memory)}\n" if recent_lines(memory) else "")
                 + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
     base = (
         f"Ты — JES (читается «Джес»), личный помощник {name}. {channel}"

@@ -57,7 +57,10 @@ async def next_plan(profile) -> dict[str, Any]:  # noqa: ANN001
     """Ближайший подъём: сегодня (если ещё впереди и не встал) или завтра."""
     from . import services, wake_runner
 
+    from . import places
+
     now = datetime.now(timezone.utc)
+    s = None
     for day in (profile.today, profile.today + timedelta(days=1)):
         s, plan = await wake_runner.plan_for(profile, day)
         if not plan.active or plan.wake_at is None or plan.wake_at <= now:
@@ -66,8 +69,10 @@ async def next_plan(profile) -> dict[str, Any]:  # noqa: ANN001
         if log.get("woke_at"):
             continue
         return {"enabled": True, "day": day.isoformat(), "at_ms": int(plan.wake_at.timestamp() * 1000), "wake_at": plan.wake_at.strftime("%H:%M"),
-                "takbir": plan.takbir, "fajr": plan.fajr, "window": list(plan.window) if plan.window else None}
-    return {"enabled": False}
+                "takbir": plan.takbir, "fajr": plan.fajr, "window": list(plan.window) if plan.window else None,
+                "offset_min": s.offset_min, "place": places.label(profile.telegram_id, profile.lang)}
+    return {"enabled": False, "on": bool(s and s.enabled), "offset_min": s.offset_min if s else None,
+            "place": places.label(profile.telegram_id, profile.lang)}
 
 
 def morning_note(profile, persona) -> str:  # noqa: ANN001

@@ -144,9 +144,57 @@ def parse(text: str) -> Command | None:
     return None
 
 
+# Простые вопросы — отвечаем сами (время, дата, заряд, будильник) или агентом бота (погода, «сколько потратил»);
+# команды бота («запиши обед 40 тысяч», «напомни…», «добавь задачу…») — агент бота молча, телефон вибрирует.
+# Дешевле Live в 2–10 раз (26.09, его выбор). Только русские фразы — узбекские идут в Gemini Live, как раньше.
+_Q_TIME = re.compile(r"^(?:сколько|который)\s+(?:сейчас\s+)?(?:времени|час)|^(?:какое\s+)?время\s+сейчас$|^сколько\s+время$")
+_Q_DATE = re.compile(r"^(?:какое|какой)\s+(?:сегодня\s+)?(?:число|день\s+недели|день|дата)(?:\s+сегодня)?$|^какой\s+сегодня\s+день")
+_Q_BATTERY = re.compile(r"^(?:сколько|какой)\s+(?:у\s+меня\s+)?(?:заряд|зарядки|заряда|батареи)|^заряд\s+батареи")
+_Q_ALARM = re.compile(r"^(?:на\s+сколько|во\s+сколько|когда)\s+(?:у\s+меня\s+)?(?:стоит\s+)?будильник|^(?:какой|когда)\s+(?:завтра\s+)?будильник")
+_Q_BOT = re.compile(r"^(?:какая|какой)\s+(?:сейчас\s+|сегодня\s+|завтра\s+)?погода|^погода(?:\s+(?:сегодня|завтра))?$|"
+                    r"^сколько\s+(?:я\s+)?(?:потратил|заработал|съел|калорий|осталось)|^какой\s+(?:у\s+меня\s+)?(?:баланс|курс)|"
+                    r"^(?:какие|что)\s+(?:у\s+меня\s+)?(?:задачи|дела|планы)")
+_C_BOT = re.compile(r"^(?:запиши|добавь|внеси|напомни|отметь|потратил|купил|заплатил|получил|съел|выпил|создай\s+задачу|"
+                    r"поставь\s+задачу|удали\s+последн)")
+
+
+def quick(text: str) -> str | None:
+    """Вид простой фразы: time | date | battery | alarm (отвечаем сами), ask (агент бота + голос), do (агент бота молча)."""
+    t = _clean(text)
+    if not t or len(t.split()) > 14:
+        return None
+    for rx, kind in ((_Q_TIME, "time"), (_Q_DATE, "date"), (_Q_BATTERY, "battery"), (_Q_ALARM, "alarm"), (_Q_BOT, "ask"), (_C_BOT, "do")):
+        if rx.search(t):
+            return kind
+    return None
+
+
+_MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
+_DAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def local_answer(kind: str, now: Any, device: dict[str, Any], alarm: dict[str, Any] | None = None) -> str | None:
+    """Ответ без модели: время, дата, заряд, будильник."""
+    if kind == "time":
+        return f"Сейчас {now:%H:%M}."
+    if kind == "date":
+        return f"Сегодня {_DAYS[now.weekday()]}, {now.day} {_MONTHS[now.month - 1]}."
+    if kind == "battery":
+        level = device.get("battery")
+        if level is None:
+            return None
+        return f"Заряд {int(level)} процентов" + (", заряжается." if device.get("charging") else ".")
+    if kind == "alarm":
+        if not alarm or not alarm.get("enabled"):
+            return "Будильник выключен."
+        when = "завтра" if alarm.get("day") != now.date().isoformat() else "сегодня"
+        return f"Будильник {when} в {alarm.get('wake_at')}" + (f", такбир в {alarm['takbir']}." if alarm.get("takbir") else ".")
+    return None
+
+
 def succeeded(result: Any) -> bool:
     """Инструмент сделал своё (не ошибка, не «спроси», не «разблокируй») — Gemini не нужен."""
     return isinstance(result, dict) and not (result.get("error") or result.get("ask_exactly") or result.get("need_unlock"))
 
 
-__all__ = ["Command", "parse", "numbers", "succeeded"]
+__all__ = ["Command", "parse", "numbers", "succeeded", "quick", "local_answer"]

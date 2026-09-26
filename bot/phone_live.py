@@ -351,7 +351,8 @@ class PhoneLive(_Session):
         if cmd is None and rest and first[:1] in {"д", "ж", "ч"}:
             cmd = instant.parse(rest)  # имя расслышано как «джаз»/«жест» — команда после него
         if cmd is None:
-            return False
+            kind = instant.quick(text)
+            return bool(kind) and await self._quick(gem, heard["text"], text, kind)
         if self.turn.device.get("locked") and cmd.tool in NEED_UNLOCK:
             return False  # после разблокировки Gemini сам доделает — ему нужна фраза
         logger.info("phone live: мгновенная команда «%s» → %s %s (%s мс)", heard["text"], cmd.tool,
@@ -367,6 +368,39 @@ class PhoneLive(_Session):
         # если разговор продолжится — Gemini знает, что уже сделано (текст без ответа: ничего не стоит, пока он молчит)
         note = f"[Он сказал: «{heard['text']}» — уже выполнено ({cmd.tool}). Не повторяй и не комментируй.]"
         await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
+        return True
+
+    async def _quick(self, gem, said: str, text: str, kind: str) -> bool:  # noqa: ANN001
+        """Простой вопрос или команда бота — без Gemini Live: ответ сами / агентом бота, голос — дешёвым TTS тем же голосом."""
+        from . import app_alarm, instant
+
+        started = time.monotonic()
+        try:
+            if kind in {"ask", "do"}:
+                res = await live_call.delegate(self.profile, text)
+                answer = str(res.get("reply") or "").strip()
+            else:
+                alarm = await app_alarm.next_plan(self.profile) if kind == "alarm" else None
+                answer = instant.local_answer(kind, self.profile.now, self.turn.device, alarm) or ""
+        except Exception:
+            logger.warning("quick: не вышло — фразу решает Gemini", exc_info=True)
+            return False
+        if not answer:
+            return False
+        self.instant_done += 1
+        self.user_lines.append(said)
+        self.jarvis_lines.append(answer)
+        await self.to_phone({"type": "user", "text": said, "final": True})
+        await self.to_phone({"type": "jarvis", "text": answer})
+        if kind == "do":
+            await self.to_phone({"type": "done"})  # сделал — телефон вибрирует, без слов
+        else:
+            async for pcm in ai.speak_stream(answer, voice=self.persona.voice):
+                await self.to_phone(pcm)
+        await self.to_phone({"type": "turn_complete"})
+        note = f"[Он сказал: «{said}» — уже отвечено/сделано: «{answer[:200]}». Не повторяй.]"
+        await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
+        logger.info("phone live: без Live (%s) «%s» → «%s» за %.1f с", kind, said, answer[:80], time.monotonic() - started)
         return True
 
     async def pump_phone(self, gem) -> None:  # noqa: ANN001
@@ -826,7 +860,7 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
                 f", чужой голос не пропущен {sess.owner.dropped} раз" if sess.owner.dropped else "")
     if said:
         phone._later(services.log_agent(uid, text=said, kind="phone_live", tools=",".join(sess.result.actions), reply=answered, ok=True))
-        phone._later(extra.remember_exchange(uid, said, answered, when=profile.now.strftime("%d.%m %H:%M")))
+        phone._later(extra.remember_exchange(uid, "📱 " + said, answered, when=profile.now.strftime("%d.%m %H:%M")))
 
 
 # ------------------------------------------------------------------ «Да, слушаю» голосом бота — мгновенно, без ожидания Gemini
@@ -838,7 +872,15 @@ _GREETINGS = {
     "en": ["Yes, {hon}."],
 }
 _GREETINGS_PLAIN = {"ru": ["Да?", "Слушаю."], "uz": ["Labbay?"], "en": ["Yes?"]}
-GREETINGS_VERSION = 4
+# 26.09 (5): много разных откликов на «Джес» — и по-русски, и по-узбекски (он говорит на обоих); записаны один раз
+# голосом Live и лежат на телефоне — каждый раз бесплатно. Телефон берёт язык его последней фразы.
+_GREETINGS_MANY = {
+    "ru": ["Да, {hon}.", "Слушаю, {hon}.", "Да, слушаю.", "Я здесь, {hon}.", "Слушаю вас.", "Да?", "На связи, {hon}.",
+           "Говорите, {hon}.", "Да, {hon}, слушаю.", "Слушаю внимательно."],
+    "uz": ["Labbay, {hon}.", "Eshitaman, {hon}.", "Ha, {hon}.", "Labbay.", "Eshitaman.", "Xizmatingizdaman, {hon}.",
+           "Gapiring, {hon}.", "Shu yerdaman, {hon}."],
+}
+GREETINGS_VERSION = 5
 _HON = {"shef": [("шеф", "shef", "boss")], "ser": [("сэр", "ser", "sir")], "boss": [("босс", "boss", "boss")],
         "mix": [("сэр", "ser", "sir"), ("шеф", "shef", "boss"), ("босс", "boss", "boss")]}
 
@@ -854,6 +896,20 @@ def greeting_texts(lang: str, honorific: str) -> list[str]:
             text = t.format(hon=h[col])
             texts.append(text[0].upper() + text[1:])
     return list(dict.fromkeys(texts))
+
+
+def greeting_items(persona) -> list[tuple[str, str]]:  # noqa: ANN001
+    """[(текст, язык)]: говорит на нескольких языках (mirror) — по-русски и по-узбекски, много разных; иначе как раньше."""
+    if not persona.mirror:
+        return [(t, persona.lang) for t in greeting_texts(persona.lang, persona.honorific)]
+    # одно обращение везде (26.09 он выбрал «один характер и обращение»): «mix» (сэр/шеф/босс вперемешку) → «шеф»
+    hon = (_HON.get(persona.honorific if persona.honorific != "mix" else "shef") or _HON["shef"])[0]
+    out: list[tuple[str, str]] = []
+    for lang, col in (("ru", 0), ("uz", 1)):
+        for t in _GREETINGS_MANY[lang]:
+            text = t.format(hon=hon[col])
+            out.append((text[0].upper() + text[1:], lang))
+    return list(dict.fromkeys(out))
 
 
 def trim_clip(pcm: bytes, rate: int = 24000) -> bytes:
@@ -887,7 +943,7 @@ def _same_words(heard: str, text: str) -> bool:
     return norm(heard) == norm(text)
 
 
-async def _live_say(uid: int, persona, text: str) -> bytes | None:  # noqa: ANN001
+async def _live_say(uid: int, persona, text: str, lang: str | None = None) -> bytes | None:  # noqa: ANN001
     """Фраза тем же голосом, что и в разговоре (Gemini Live), слово в слово — проверяем по расшифровке."""
     import aiohttp
 
@@ -921,7 +977,7 @@ async def _live_say(uid: int, persona, text: str) -> bytes | None:  # noqa: ANN0
             continue
         if out and (not said or _same_words("".join(said), text)):
             clip = trim_clip(bytes(out))
-            if await _clear(clip, text, persona.lang):
+            if await _clear(clip, text, lang or persona.lang):
                 return clip
             said = ["(нечётко после обрезки)"]
         logger.info("greeting: сказала «%s» вместо «%s» — ещё раз", "".join(said), text)
@@ -972,7 +1028,9 @@ async def greetings(uid: int) -> dict[str, Any]:
     from . import qwen_live
 
     persona = await services.persona(uid)
-    texts = greeting_texts(persona.lang, persona.honorific)
+    items = greeting_items(persona)
+    texts = [t for t, _ in items]
+    langs = dict(items)
     # разговор идёт голосом Qwen — и «Да, сэр» его голосом, чтобы голос не менялся посреди разговора
     use_qwen = persona.voice_model == "qwen" and qwen_live.available()
     voice_key = f"qwen-{persona.qwen_voice}" if use_qwen else persona.voice
@@ -990,15 +1048,27 @@ async def greetings(uid: int) -> dict[str, Any]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
     if all(t in ready for t in texts):
-        out = {"key": key, "clips": [{"text": t, "wav": ready[t]} for t in texts]}
+        out = {"key": key, "clips": [{"text": t, "wav": ready[t], "lang": langs[t]} for t in texts]}
         try:
             cache_file.write_text(json.dumps(out), encoding="utf-8")
         except OSError:
             logger.warning("greetings not cached", exc_info=True)
         return out
-    say = (lambda t: _qwen_say(persona, t)) if use_qwen else (lambda t: _live_say(uid, persona, t))
-    pcms = await asyncio.gather(*(say(t) for t in texts), return_exceptions=True)
-    clips = [{"text": t, "wav": base64.b64encode(pcm_to_wav(pcm)).decode()} for t, pcm in zip(texts, pcms) if isinstance(pcm, bytes) and pcm]
+    say = (lambda t: _qwen_say(persona, t)) if use_qwen else (lambda t: _live_say(uid, persona, t, langs.get(t)))
+    todo = [t for t in texts if t not in ready]
+    sem = asyncio.Semaphore(4)  # не 18 сессий Live разом
+
+    async def one(t: str) -> bytes | None:
+        async with sem:
+            return await say(t)
+
+    pcms = dict(zip(todo, await asyncio.gather(*(one(t) for t in todo), return_exceptions=True)))
+    clips = []
+    for t in texts:
+        if t in ready:
+            clips.append({"text": t, "wav": ready[t], "lang": langs[t]})
+        elif isinstance(pcms.get(t), bytes) and pcms[t]:
+            clips.append({"text": t, "wav": base64.b64encode(pcm_to_wav(pcms[t])).decode(), "lang": langs[t]})
     out = {"key": key, "clips": clips}
     if len(clips) == len(texts):
         try:
@@ -1012,6 +1082,25 @@ async def greetings(uid: int) -> dict[str, Any]:
 _LANG_NAMES = {"ru": "русском", "uz": "узбекском (латиница)", "en": "английском"}
 _ANNOUNCE_FALLBACK = {"ru": ("Звонит {name}", "Вам звонят"), "uz": ("{name} qo'ng'iroq qilyapti", "Sizga qo'ng'iroq"),
                       "en": ("{name} is calling", "Incoming call")}
+
+
+_KIN_UZ = {"мама": "Onangiz", "папа": "Dadangiz", "брат": "Akangiz", "братишка": "Ukangiz", "сестра": "Opangiz",
+           "сестрёнка": "Singlingiz", "жена": "Rafiqangiz", "муж": "Turmush o'rtog'ingiz", "бабушка": "Buvingiz", "дедушка": "Bobongiz"}
+
+
+async def prefetch_announcements(uid: int) -> int:
+    """«Звонит мама/брат…» и 20 самых частых — голосом заранее (один раз ~$0.0006 на человека): при звонке — сразу и бесплатно."""
+    people = [v for k, v in (phone.aliases(uid).get("phone") or {}).items() if phone.names.kin_root(k) == k]
+    people += [n for n in phone.frequent_contacts(uid) if n not in people]
+    done = 0
+    for name in [*people, ""]:  # "" — незнакомый номер
+        try:
+            await announce(uid, name, "")
+            done += 1
+        except Exception:
+            logger.warning("prefetch announce failed: %s", name, exc_info=True)
+    logger.info("announce: заранее записано %s фраз", done)
+    return done
 
 
 def announce_prompt(name: str, app: str, lang: str, memory: str = "") -> str:
@@ -1053,10 +1142,24 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
         pass
     one, anon = _ANNOUNCE_FALLBACK.get(persona.lang, _ANNOUNCE_FALLBACK["ru"])
     text = ""
+    uz = persona.lang == "uz"
+    messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
+    kin = phone.kin_of(uid, name) if name else None
+    if not name or phone.names.as_phone_number(name):
+        # 26.09: несохранённый номер — так и сказать
+        text = ("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + (f" ({messenger})" if uz and messenger else
+                                                                                           f" в {messenger}" if messenger else "")
+    elif kin:
+        # свои (он сказал, кто брат/мама) — «Звонит брат», без модели
+        text = (f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + (f" в {messenger}" if messenger and not uz else "")
     try:
+        if text:
+            raise LookupError("готовая фраза")
         memory = await extra.memory_prompt(uid)
         text = clean_announcement(await ai.generate([{"text": announce_prompt(name, app, persona.lang, memory)}],
                                                     temperature=0.2, json_mode=False, max_tokens=60))
+    except LookupError:
+        pass
     except Exception:
         logger.warning("announce text failed", exc_info=True)
     text = text or (one.format(name=name) if name else anon)

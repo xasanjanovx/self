@@ -197,8 +197,10 @@ async def wake_check(request: web.Request) -> web.Response:
                     voice.get("threshold"), voice.get("bank"), took, (heard or {}).get("text", ""))
         _reject(uid)
         return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
-    if heard is not None and (heard["text"] or data.get("confident")):
-        ok = heard["name"] or (not heard["text"] and bool(data.get("confident")))
+    if heard is not None:
+        # 26.09: пустая запись (кашель, стук) при «уверенном» телефоне тоже пропускалась — JES открывался сам по себе.
+        # Теперь — только если распознаватель услышал имя
+        ok = bool(heard["name"])
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
             if voice.get("sure"):
@@ -233,6 +235,34 @@ async def wake_plan(request: web.Request) -> web.Response:
     if uid is None:
         return web.json_response({"enabled": False})
     return web.json_response(await app_alarm.next_plan(await profile_by_id(uid)))
+
+
+async def wake_settings(request: web.Request) -> web.Response:
+    """Будильник из приложения (26.09 «чтобы и в боте менялся»): {"enabled": bool} | {"offset_delta": ±5} — те же настройки,
+    что в боте (одна таблица), с той же проверкой окна фаджра. Ответ — как wake_plan."""
+    from . import app_alarm, places, services, wake_runner
+    from . import wake as wake_mod
+    from .handlers.common import profile_by_id
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    profile = await profile_by_id(uid)
+    s = wake_mod.WakeSettings.from_row(await services.wake_settings(uid))
+    fields: dict[str, Any] = {}
+    if "enabled" in data:
+        if data["enabled"] and not places.has_place(uid):
+            return web.json_response({"error": "Сначала место: в боте Будильник → 📍 Место"}, status=400)
+        fields["enabled"] = bool(data["enabled"])
+    if data.get("offset_delta"):
+        offset = max(0, min(180, s.offset_min + int(data["offset_delta"])))
+        if (err := await wake_runner.window_error(profile, s, offset=offset)):
+            return web.json_response({"error": err}, status=400)
+        fields["offset_min"] = offset
+    if fields:
+        await services.save_wake_settings(uid, fields)
+    return web.json_response(await app_alarm.next_plan(profile))
 
 
 async def wake_event(request: web.Request) -> web.Response:
@@ -343,7 +373,11 @@ async def contacts(request: web.Request) -> web.Response:
     raw = data.get("contacts")
     if uid is None or not isinstance(raw, list):
         return web.json_response({"error": "contacts list required"}, status=400)
-    return web.json_response({"ok": True, "count": phone.save_contacts(uid, raw)})
+    count = phone.save_contacts(uid, raw)
+    from . import phone_live
+
+    phone._later(phone_live.prefetch_announcements(uid))
+    return web.json_response({"ok": True, "count": count})
 
 
 async def tg_login(request: web.Request) -> web.Response:
@@ -432,6 +466,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
     app.router.add_get("/jarvis/v1/wake_plan", wake_plan)
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
+    app.router.add_post("/jarvis/v1/wake_settings", wake_settings)
     app.router.add_post("/jarvis/v1/announce", announce)
     app.router.add_post("/jarvis/v1/call_command", call_command)
     app.router.add_post("/jarvis/v1/contacts", contacts)

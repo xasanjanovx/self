@@ -103,20 +103,21 @@ def test_wake_check_foreign_voice_is_rejected_first(wake):
     assert calls["discard"] == 1
 
 
-def test_wake_check_asks_gemini_only_when_nothing_heard(wake):
+def test_wake_check_asks_gemini_only_without_recognizer(wake):
+    """Пустая запись (кашель, стук) — не имя и без Gemini (26.09: из-за неё JES открывался сам); Gemini — только без распознавателя."""
     calls, setup = wake
     setup(heard={"text": "", "name": False, "after": "", "ms": 20})
-    assert _check()["ok"] is True
-    assert calls["gemini"] == 1
+    assert _check()["ok"] is False
+    assert calls["gemini"] == 0
     setup(heard=None)  # распознавателя нет
     _check()
-    assert calls["gemini"] == 2
+    assert calls["gemini"] == 1
 
 
-def test_wake_check_confident_detector_and_silence_passes(wake):
+def test_wake_check_confident_detector_with_silence_is_rejected(wake):
     calls, setup = wake
     setup(heard={"text": "", "name": False, "after": "", "ms": 20})
-    assert _check(confident=True)["ok"] is True
+    assert _check(confident=True)["ok"] is False
     assert calls["gemini"] == 0
 
 
@@ -211,7 +212,7 @@ def test_short_greetings_reuse_already_recorded_clips(tmp_path, monkeypatch):
     monkeypatch.setattr(phone_live, "_live_say", no_live)
     out = asyncio.run(phone_live.greetings(1))
     assert [c["text"] for c in out["clips"]] == ["Да, сэр.", "Да, шеф.", "Да, босс."]
-    assert out["key"].startswith("v4_")
+    assert out["key"].startswith("v5_")
 
 
 def test_depleted_prepay_is_a_billing_error():
@@ -401,3 +402,18 @@ def test_phone_prompt_and_tools_are_short(monkeypatch):
     assert {"phone_call", "bot_task", "screen_look", "phone_task"} <= names and not {"expect_photo", "complete_tasks", "ai_status"} & names
     assert "undo_last" in {d["name"] for d in live_call.phone_task_declarations()}
     assert all(len(d["description"]) <= 172 for d in decls)
+
+
+def test_name_must_open_the_phrase():
+    """«…и вот такой жест позвони» — посреди разговора; имя засчитываем только в начале (до двух слов перед ним)."""
+    assert wakeword.match("ну джес позвони маме") == (True, "позвони маме")
+    assert wakeword.match("я тебе говорю вот такой жест") == (False, "")
+
+
+def test_many_greetings_in_both_languages_for_mirror():
+    """Говорит на нескольких языках — много разных откликов по-русски и по-узбекски, одним обращением."""
+    items = phone_live.greeting_items(persona_mod.Persona(lang="ru", honorific="shef", mirror=True))
+    langs = {lang for _, lang in items}
+    assert langs == {"ru", "uz"} and len(items) >= 16
+    assert ("Да, шеф.", "ru") in items and ("Labbay, shef.", "uz") in items
+    assert not any("сэр" in t or "босс" in t for t, _ in items)

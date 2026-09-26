@@ -165,6 +165,25 @@ def call_boosts(contacts: list[dict[str, Any]], device: dict[str, Any]) -> dict[
     return out
 
 
+def kin_of(uid: int, contact_name: str) -> str | None:
+    """Контакт — кто-то из родных, которых он назвал («брат» → SIROJBEK AKAM)? → «брат»."""
+    target = names.norm(contact_name)
+    for key, value in (aliases(uid).get("phone") or {}).items():
+        if names.kin_root(key) == key and names.norm(value) == target:
+            return names.kin_word(key)
+    return None
+
+
+def frequent_contacts(uid: int, limit: int = 20) -> list[str]:
+    out: list[str] = []
+    for c in sorted((c for c in load_contacts(uid) if int(c.get("calls") or 0) > 0), key=lambda c: -int(c.get("calls") or 0)):
+        if c["name"] not in out:
+            out.append(c["name"])
+        if len(out) >= limit:
+            break
+    return out
+
+
 def people_line(uid: int, limit: int = 12) -> str:
     """Для промпта телефона: кто у него кто («брат — SIROJBEK AKAM») и кому он чаще звонит — чтобы модель узнавала
     имена в плохо расслышанной речи («Сарочубек акам» → SIROJBEK AKAM)."""
