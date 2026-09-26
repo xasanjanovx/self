@@ -30,8 +30,16 @@ def test_plan_respects_off_days_skip_and_fixed_time():
     assert not weekend_only.active and weekend_only.reason == "day_off"
     skipped = wake.plan_for_day(_s(skip_until=date(2026, 9, 25)), DAY, tz=TZ, timings=TIMINGS)
     assert not skipped.active and skipped.reason == "skip"
-    fixed = wake.plan_for_day(_s(mode="fixed", fixed_time="06:30"), DAY, tz=TZ, timings=TIMINGS)
-    assert fixed.active and fixed.wake_at == datetime(2026, 9, 23, 6, 30, tzinfo=TZ) and fixed.takbir == "04:47"
+    fixed = wake.plan_for_day(_s(mode="fixed", fixed_time="05:10"), DAY, tz=TZ, timings=TIMINGS)
+    assert fixed.active and fixed.wake_at == datetime(2026, 9, 23, 5, 10, tzinfo=TZ) and fixed.takbir == "04:47"
+    assert fixed.window == ("03:57", "05:44") and "clamped" not in fixed.flags
+    # 26.09: только фаджр — 06:30 (после восхода 05:59) сдвигается к концу окна (восход − 15 мин), 02:00 — к началу (азан − 30)
+    late = wake.plan_for_day(_s(mode="fixed", fixed_time="06:30"), DAY, tz=TZ, timings=TIMINGS)
+    assert late.wake_at == datetime(2026, 9, 23, 5, 44, tzinfo=TZ) and "clamped" in late.flags
+    early = wake.plan_for_day(_s(mode="fixed", fixed_time="02:00"), DAY, tz=TZ, timings=TIMINGS)
+    assert early.wake_at == datetime(2026, 9, 23, 3, 57, tzinfo=TZ)
+    assert wake.in_window(datetime(2026, 1, 1, 5, 0).time(), wake.fajr_window(TIMINGS))
+    assert not wake.in_window(datetime(2026, 1, 1, 6, 0).time(), wake.fajr_window(TIMINGS))
     no_times = wake.plan_for_day(_s(), DAY, tz=TZ, timings={})
     assert not no_times.active and no_times.reason == "no_times"
 

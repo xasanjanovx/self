@@ -157,6 +157,10 @@ class Database:
         await self._table("users").upsert(payload, on_conflict="telegram_id").execute()
         return payload
 
+    async def update_user_timezone(self, telegram_id: int, tz_name: str) -> None:
+        """Часовой пояс человека (по его геолокации/городу) — будильник, напоминания и итоги дня по его времени."""
+        await self._table("users").update({"timezone": str(tz_name)[:64]}).eq("telegram_id", telegram_id).execute()
+
     async def update_user_language(self, telegram_id: int, language: str) -> None:
         lang = (language or "ru").strip().lower()
         if lang not in {"ru", "uz", "en"}:

@@ -87,6 +87,33 @@ async def _today_line(profile: Profile) -> str:
         return ""
 
 
+def window_text(lang: str, window: tuple[str, str]) -> str:
+    a, b = window
+    return (f"Budilnik faqat bomdod vaqtiga: {a} dan {b} gacha (quyosh chiqishidan 15 daqiqa oldin)" if lang == "uz"
+            else f"Будильник — только на фаджр: с {a} до {b} (за 15 минут до восхода)")
+
+
+async def window_error(profile: Profile, s: wake_mod.WakeSettings, *, fixed: str | None = None, offset: int | None = None,
+                       takbir_offset: int | None = None) -> str | None:
+    """Время будильника вне окна фаджра (завтра) — текст для него; в окне или времён намаза нет — None."""
+    day = profile.today + timedelta(days=1)
+    rows = await prayer.timings(day, latitude=s.latitude, longitude=s.longitude, method=s.calc_method)
+    window = wake_mod.fajr_window(rows)
+    if window is None:
+        return None
+    if fixed:
+        t = prayer.parse_hhmm(fixed)
+    else:
+        tk = prayer.takbir_time(rows.get("Fajr"), s.takbir_offset_min if takbir_offset is None else takbir_offset)
+        if tk is None:
+            return None
+        minutes = s.offset_min if offset is None else offset
+        t = (datetime.combine(day, tk) - timedelta(minutes=max(0, minutes))).time()
+    if t is None or wake_mod.in_window(t, window):
+        return None
+    return window_text(profile.lang, (window[0].strftime("%H:%M"), window[1].strftime("%H:%M")))
+
+
 async def plan_for(profile: Profile, day: date | None = None) -> tuple[wake_mod.WakeSettings, wake_mod.DayPlan]:
     s = await _settings(profile.telegram_id)
     day = day or profile.today
@@ -151,7 +178,9 @@ LOUD_TIP = {
            "4) JES qo'ng'iroqlariga alohida baland ohang qo'yish mumkin (JES profili → Bildirishnomalar).\n"
            "«Budilnikni tekshir» deb yozing — hozir ertalabgidek qo'ng'iroq qilaman."),
 }
-PREGREET_ATTEMPTS = 2  # первые звонки утра — приветствие готово к моменту «взял трубку»; дальше — без заготовки (экономия)
+# 26.09 его выбор «бесплатно, пока не взяли»: Gemini заранее не готовим ни разу — на «взял трубку» сразу звучит
+# записанное его голосом «Доброе утро, шеф! Проснулись?» (live_call.wake_clip), а Gemini подключается за ~1 с
+PREGREET_ATTEMPTS = 0
 
 
 async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan,

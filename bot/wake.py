@@ -111,6 +111,44 @@ class DayPlan:
     fajr: str | None = None
     takbir: str | None = None
     flags: list[str] = field(default_factory=list)
+    window: tuple[str, str] | None = None  # когда вообще можно будить (фаджр): ("04:21", "06:03")
+    sunrise: str | None = None
+
+
+# 26.09.2026 (он продаёт бота как сервис): будильник — только на фаджр, не на любое время. Окно: за 30 минут до азана
+# (подготовиться) … за 15 минут до восхода (успеть помолиться). Время вне окна подтягивается к его краю.
+WINDOW_BEFORE_AZAN_MIN = 30
+WINDOW_BEFORE_SUNRISE_MIN = 15
+
+
+def fajr_window(timings: dict[str, str] | None) -> tuple[time, time] | None:
+    """(самое раннее, самое позднее) время будильника в этот день; нет времён намаза — None."""
+    from . import prayer
+
+    fajr, sunrise = prayer.parse_hhmm((timings or {}).get("Fajr")), prayer.parse_hhmm((timings or {}).get("Sunrise"))
+    if fajr is None or sunrise is None:
+        return None
+    base = date(2000, 1, 1)
+    earliest = (datetime.combine(base, fajr) - timedelta(minutes=WINDOW_BEFORE_AZAN_MIN)).time()
+    latest = (datetime.combine(base, sunrise) - timedelta(minutes=WINDOW_BEFORE_SUNRISE_MIN)).time()
+    return earliest, latest
+
+
+def in_window(t: time, window: tuple[time, time] | None) -> bool:
+    return window is None or window[0] <= t <= window[1]
+
+
+def _clamp(plan: "DayPlan", day: date, tz: Any, timings: dict[str, str] | None) -> "DayPlan":
+    window = fajr_window(timings)
+    if window is None or plan.wake_at is None:
+        return plan
+    plan.window = (window[0].strftime("%H:%M"), window[1].strftime("%H:%M"))
+    plan.sunrise = (timings or {}).get("Sunrise")
+    lo, hi = _combine(day, window[0], tz), _combine(day, window[1], tz)
+    if plan.wake_at < lo or plan.wake_at > hi:
+        plan.wake_at = min(max(plan.wake_at, lo), hi)
+        plan.flags.append("clamped")
+    return plan
 
 
 def _combine(day: date, t: time, tz: Any) -> datetime:
@@ -142,7 +180,7 @@ def plan_for_day(s: WakeSettings, day: date, *, tz: Any, timings: dict[str, str]
             tk = prayer.takbir_time(plan.fajr, s.takbir_offset_min)
             if tk:
                 plan.takbir, plan.takbir_at = tk.strftime("%H:%M"), _combine(day, tk, tz)
-        return plan
+        return _clamp(plan, day, tz, timings)
     tk = prayer.takbir_time(plan.fajr, s.takbir_offset_min)
     if tk is None:
         plan.reason = "no_times"
@@ -150,7 +188,7 @@ def plan_for_day(s: WakeSettings, day: date, *, tz: Any, timings: dict[str, str]
     plan.takbir, plan.takbir_at = tk.strftime("%H:%M"), _combine(day, tk, tz)
     plan.wake_at = plan.takbir_at - timedelta(minutes=max(0, s.offset_min))
     plan.active = True
-    return plan
+    return _clamp(plan, day, tz, timings)
 
 
 def should_call(plan: DayPlan, log: dict[str, Any] | None, now: datetime, s: WakeSettings) -> tuple[bool, str]:

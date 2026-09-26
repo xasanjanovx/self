@@ -226,12 +226,12 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_goals"), "menu:goals", style=P, icon=_pe.ID_GOAL),
             ],
             [
-                _btn("JES" if lang == "uz" else "JES", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
-                _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
+                _btn("JES", "menu:jarvis", style=P, icon=_pe.ID_JARVIS),
+                _btn("Budilnik" if lang == "uz" else "Будильник", "settings:wake", style=P, icon=_pe.ID_ALARM),
             ],
             [
                 _btn(t(lang, "menu_settings"), "menu:settings", icon=_pe.ID_SETTINGS),
-                _btn(t(lang, "menu_refresh"), "menu:open", icon=_pe.ID_REFRESH),
+                _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
         ]
     )
@@ -329,7 +329,7 @@ def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: 
 
 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
-                           mode: str, days: list[int]) -> InlineKeyboardMarkup:
+                           mode: str, days: list[int], place: str = "") -> InlineKeyboardMarkup:
     """Экран «Будильник»: всё, что чаще всего меняют, — кнопками. Заданий и упражнений нет —
     JES будит мотивирующими словами и сам по голосу убеждается, что встал."""
     uz = lang == "uz"
@@ -356,9 +356,21 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
             _btn(("📅 Har kuni" if uz else "📅 Каждый день") + ("" if only_weekdays else " ✓"), "wakeset:days:all", style=None if only_weekdays else "primary"),
             _btn(("📅 Ish kunlari" if uz else "📅 Будни") + (" ✓" if only_weekdays else ""), "wakeset:days:work", style="primary" if only_weekdays else None),
         ],
+        [_btn(("Joy" if uz else "Место") + (f": {place}" if place else ""), "wakeset:place", icon=_pe.ID_PIN)],
         [_btn("🧪 " + ("Budilnikni hozir sinash" if uz else "Проверить будильник сейчас"), "wakeset:testwake", style="success")],
     ]
-    rows.append([_back(lang, "menu:jarvis")])
+    rows.append([_back(lang, "menu:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def place_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Город для будильника (время фаджра и часовой пояс); точнее — геолокацией (кнопка под полем ввода)."""
+    from .places import CITIES
+
+    uz = lang == "uz"
+    buttons = [_btn(c[2] if uz else c[1], f"wakeplace:{c[0]}") for c in CITIES]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([_back(lang, "settings:wake")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

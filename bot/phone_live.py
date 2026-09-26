@@ -410,6 +410,12 @@ class PhoneLive(_Session):
                     await self.say_text(gem, "[Телефон разблокирован — сразу сделай то, что он просил.]")
                 elif kind == "greet":
                     await self.say_text(gem, GREET)
+                elif kind == "morning":
+                    # встал по будильнику в приложении — доброе утро и вопрос дня, как в утреннем звонке
+                    from . import app_alarm
+
+                    self.gate.last_voice = time.monotonic()
+                    await self.say_text(gem, app_alarm.morning_note(self.profile, self.persona))
                 elif kind == "image" and data.get("data"):
                     await self._on_frame(gem, {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")})
                 elif kind in {"camera", "screen"}:

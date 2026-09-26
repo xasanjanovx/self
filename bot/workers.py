@@ -370,6 +370,7 @@ async def _maybe_alert_call(profile, fresh: list) -> bool:  # noqa: ANN001
 async def _wake_tick(bot: Bot) -> None:
     """Подъём на фаджр: раз в 20 секунд смотрим, не пора ли звонить (и перезванивать)."""
     from . import wake as wake_mod
+    from . import app_alarm
     from . import wake_runner
 
     if not db.available("wake_settings") or not db.available("wake_log"):
@@ -388,6 +389,8 @@ async def _wake_tick(bot: Bot) -> None:
             snoozed = wake_runner.snoozed_until(telegram_id)
             if snoozed and now_utc < snoozed:
                 continue
+            if plan.wake_at and app_alarm.holds_telegram(telegram_id, plan.day.isoformat(), plan.wake_at, now_utc):
+                continue  # будит будильник в приложении; Telegram — запасной, если не встал за 5 минут
             state_last = None
             if log and log.get("attempts"):
                 # последняя попытка держится в памяти процесса; после рестарта считаем, что пауза прошла

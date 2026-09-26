@@ -708,6 +708,43 @@ async def _pregreet(sess: "_Session", http, kick: str):  # noqa: ANN001
     return ws, down
 
 
+_WAKE_TITLES = {"ru": {"shef": "шеф", "ser": "сэр", "boss": "босс"}, "uz": {"shef": "shef", "ser": "ser", "boss": "boss"},
+                "en": {"shef": "chief", "ser": "sir", "boss": "boss"}}
+_WAKE_HELLO = {"ru": "Доброе утро, {t}! Проснулись?", "uz": "Xayrli tong, {t}! Uyg'ondingizmi?", "en": "Good morning, {t}! Are you up?"}
+
+
+def wake_clip_text(persona: Persona, first_name: str) -> str:
+    lang = persona.lang if persona.lang in _WAKE_HELLO else "ru"
+    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "shef") or first_name or _WAKE_TITLES[lang]["shef"]
+    return _WAKE_HELLO[lang].format(t=title)
+
+
+async def wake_clip(profile: Profile, persona: Persona) -> tuple[str, bytes] | None:
+    """«Доброе утро, шеф! Проснулись?» его голосом JES — записано один раз (Gemini TTS, ~$0.0005) и лежит на диске.
+    Будильник (его выбор 26.09 «бесплатно, пока не взяли»): звучит в ту же секунду, как взяли трубку, а Gemini Live
+    подключается только после ответа — пропущенный звонок ничего не стоит."""
+    import hashlib
+
+    from .context import ai
+    from .tg_user import data_dir
+
+    text = wake_clip_text(persona, profile.first_name)
+    folder = data_dir() / "wake_clips"
+    path = folder / (hashlib.sha1(f"{persona.voice}|{text}".encode()).hexdigest()[:16] + ".pcm")
+    try:
+        if path.exists():
+            return text, path.read_bytes()
+        pcm = await ai.synthesize(text, voice=persona.voice)
+        if not pcm:
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(pcm)
+        return text, pcm
+    except Exception:
+        logger.warning("wake clip failed", exc_info=True)
+        return None
+
+
 async def _not_prepared():  # noqa: ANN202
     """Приветствие заранее не готовили — _live_ready подключится, когда возьмут трубку."""
     raise LookupError("приветствие заранее не готовили")
@@ -731,7 +768,7 @@ async def _live_ready(sess: "_Session", http, early: asyncio.Task, kick: str):  
         down.cancel()
     for attempt in (1, 2):
         ws = await sess.connect(http)
-        if sess.out and sess.greeting.strip():
+        if sess.greeting.strip():
             note = f"[Звонок соединён. Ты уже поздоровалась: «{sess.greeting.strip()[:300]}». Дальше слушай его и отвечай.]"
             ok = await sess.send(ws, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
         else:
@@ -774,12 +811,19 @@ async def _converse(sess: "_Session", http, call: dict[str, Any], early: asyncio
     tasks: list[asyncio.Task] = []
     watcher = stopper = None
     try:
+        play = None
+        if sess.out:  # заготовленное приветствие будильника — звучит сразу, пока подключается Gemini
+            await asyncio.sleep(ANSWER_PAUSE)
+            play = asyncio.create_task(sess.playout(), name="live-play")
+            tasks.append(play)
         ws, down = await _live_ready(sess, http, early, kick)
-        await asyncio.sleep(ANSWER_PAUSE)
+        if play is None:
+            await asyncio.sleep(ANSWER_PAUSE)
+            play = asyncio.create_task(sess.playout(), name="live-play")
         tasks = [
             down,
             asyncio.create_task(sess.uplink(ws, call["incoming"]), name="live-up"),
-            asyncio.create_task(sess.playout(), name="live-play"),
+            play,
         ]
         if sess.mode == "wake":
             tasks.append(asyncio.create_task(sess.nudger(ws), name="live-nudge"))
@@ -852,16 +896,29 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
 
     async with aiohttp.ClientSession() as http:
         early = asyncio.create_task(_pregreet(sess, http, KICK) if pregreet else _not_prepared(), name="live-connect")
+        clip = asyncio.create_task(wake_clip(profile, persona), name="wake-clip") if (mode == "wake" and not pregreet) else None
         try:
             call = await dial
         except BaseException:
             await _close_pre(early)
+            if clip is not None:
+                clip.cancel()
             raise
         sess.result.dialed = True
         if not call.get("answered"):
             sess.result.error = call.get("error")
             await _close_pre(early)
+            if clip is not None:
+                clip.cancel()
             return sess.result
+        if clip is not None:
+            try:
+                ready = await asyncio.wait_for(clip, timeout=3)
+            except Exception:
+                ready = None
+            if ready:
+                sess.greeting, pcm = ready
+                sess.out.extend(pcm)
         await _converse(sess, http, call, early, KICK)
     logger.info("call %s: итог — модель %s, реплик %s, действия %s", uid, sess.result.model, len(sess.result.transcript), sess.result.actions)
     return sess.result

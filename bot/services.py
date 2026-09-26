@@ -377,6 +377,11 @@ async def photo_intent(uid: int) -> str | None:
 
 
 # ------------------------------------------------------------------ 008: подъём (wake)
+def forget_profile(uid: int) -> None:
+    """Профиль поменялся в БД (часовой пояс) — перечитать при следующем обращении."""
+    cache.invalidate(uid, "profile")
+
+
 async def wake_settings(uid: int) -> dict[str, Any]:
     if not db.available("wake_settings"):
         return {}

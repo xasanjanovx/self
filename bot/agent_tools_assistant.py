@@ -15,6 +15,7 @@ from . import finance as fin
 from . import goals as goals_mod
 from . import habits
 from . import services
+from . import places
 from . import wake as wake_mod
 from . import undo
 from .agent_tools import ARR, DATE, ID, IDS, P, ToolContext, _bool, _int, _num, _str, _time_arg, parse_day, tool
@@ -437,7 +438,8 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 
 @tool("set_wake", "Изменить подъём словами: «буди за 30 минут до такбира» (offset_min), «такбир в 5:20» (takbir_time — пересчитает поправку), "
       "«буди в 6:30» (mode=fixed + fixed_time), «буди по будням» (days=[1,2,3,4,5]), «выключи будильник» (enabled=false), "
-      "«не звони, пиши» (call_enabled=false), «не буди до понедельника» (skip_until). Заданий и упражнений при подъёме нет — будит словами.",
+      "«не звони, пиши» (call_enabled=false), «не буди до понедельника» (skip_until). Заданий и упражнений при подъёме нет — будит словами. "
+      "Будильник только на время фаджра (за 30 мин до азана … за 15 мин до восхода): другое время инструмент не примет.",
       {"enabled": P("BOOLEAN", "включить/выключить подъём"), "mode": P("STRING", "fajr — до такбира; fixed — фиксированное время", enum=["fajr", "fixed"]),
        "fixed_time": P("STRING", "HH:MM для mode=fixed"), "offset_min": P("NUMBER", "за сколько минут до такбира звонить"),
        "takbir_time": P("STRING", "во сколько такбир (HH:MM) — пересчитает поправку к азану"),
@@ -489,6 +491,15 @@ async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         fields["skip_until"] = day.isoformat() if day else None
     if not fields:
         return {"error": "nothing to change"}
+    if {"fixed_time", "offset_min", "takbir_offset_min", "mode"} & set(fields):
+        # только на фаджр (его правило 26.09 — чтобы будильником не злоупотребляли и не будили после восхода)
+        mode = fields.get("mode", s.mode)
+        err = await wake_runner.window_error(ctx.profile, s, fixed=fields.get("fixed_time", s.fixed_time) if mode == "fixed" else None,
+                                             offset=fields.get("offset_min"), takbir_offset=fields.get("takbir_offset_min"))
+        if err:
+            return {"error": err, "ask_exactly": err}
+    if fields.get("enabled") and not places.has_place(ctx.uid):
+        return {"error": "место не выбрано", "ask_exactly": "Сначала выберите город или отправьте геолокацию: Будильник → 📍 Место."}
     before = {k: current.get(k) for k in fields}
     await services.save_wake_settings(ctx.uid, fields)
     undo.push(ctx.uid, {"type": "wake_settings", "fields": before})

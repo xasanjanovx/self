@@ -224,6 +224,42 @@ async def wake_check(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
 
 
+async def wake_plan(request: web.Request) -> web.Response:
+    """Ближайший подъём на фаджр — приложение ставит по нему будильник Android (bot/app_alarm.py)."""
+    from . import app_alarm
+    from .handlers.common import profile_by_id
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"enabled": False})
+    return web.json_response(await app_alarm.next_plan(await profile_by_id(uid)))
+
+
+async def wake_event(request: web.Request) -> web.Response:
+    """Будильник в приложении: {"event": "scheduled", "day", "at_ms"} | {"event": "awake"} | {"event": "snooze", "minutes"}."""
+    from . import app_alarm, wake_runner
+    from .context import bot_instance
+    from .handlers.common import profile_by_id
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    profile = await profile_by_id(uid)
+    event = str(data.get("event") or "")
+    if event == "scheduled" and data.get("day") and data.get("at_ms"):
+        app_alarm.scheduled(uid, str(data["day"])[:10], int(data["at_ms"]))
+        return web.json_response({"ok": True})
+    if event == "awake":
+        await wake_runner.mark_awake(bot_instance(), profile, source="app")
+        logger.info("app alarm %s: проснулся (кнопка в приложении)", uid)
+        return web.json_response({"ok": True})
+    if event == "snooze":
+        until = await wake_runner.snooze(profile, int(data.get("minutes") or 5))
+        return web.json_response({"ok": True, "until": until.astimezone(profile.tz).strftime("%H:%M")})
+    return web.json_response({"error": "bad event"}, status=400)
+
+
 async def _no_voice() -> dict[str, Any]:
     return {"ok": True}
 
@@ -394,6 +430,8 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/live", live)
     app.router.add_get("/jarvis/v1/greetings", greetings)
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
+    app.router.add_get("/jarvis/v1/wake_plan", wake_plan)
+    app.router.add_post("/jarvis/v1/wake_event", wake_event)
     app.router.add_post("/jarvis/v1/announce", announce)
     app.router.add_post("/jarvis/v1/call_command", call_command)
     app.router.add_post("/jarvis/v1/contacts", contacts)

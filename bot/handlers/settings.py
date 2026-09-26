@@ -293,7 +293,15 @@ async def render_wake(target: Message | CallbackQuery, profile: Profile, *, noti
         reason = {"off": ("o'chirilgan", "выключен"), "day_off": ("dam olish kuni", "выходной"), "skip": ("to'xtatilgan", "пауза"),
                   "no_times": ("namoz vaqti yo'q", "нет времени намаза")}.get(plan.reason, ("", ""))
         head = ("Ertaga uyg'otmayman" if uz else "Завтра не бужу") + (f" — {reason[0] if uz else reason[1]}" if reason[0] else "")
+    from .. import places
+
     lines = [head]
+    if plan.window:
+        lines.append(("🕌 Faqat bomdod vaqtiga" if uz else "🕌 Только на фаджр") + f": <b>{plan.window[0]}–{plan.window[1]}</b>"
+                     + (f" ({'quyosh' if uz else 'восход'} {plan.sunrise})" if plan.sunrise else ""))
+    if "clamped" in plan.flags:
+        lines.append("⚠️ " + ("Vaqt oynadan tashqarida edi — chegarasiga surildi" if uz else "Время было вне окна — сдвинуто к его краю"))
+    lines.append(f"📍 {'Joy' if uz else 'Место'}: <b>{places.label(profile.telegram_id, profile.lang)}</b> · {profile.tz_name}")
     if s.mode == "fajr":
         lines.append(f"{'Takbirdan' if uz else 'За'} {s.offset_min} {'daqiqa oldin' if uz else 'мин до такбира'} · "
                      f"{'takbir' if uz else 'такбир'} <b>{plan.takbir or '—'}</b> ({'azon' if uz else 'азан'} {plan.fajr or '—'} +{s.takbir_offset_min})")
@@ -313,7 +321,79 @@ async def render_wake(target: Message | CallbackQuery, profile: Profile, *, noti
         text += f"\n\n{notice}"
     await _show(target, text, wake_settings_keyboard(
         profile.lang, enabled=s.enabled, call_enabled=s.call_enabled, talk=s.talk, voice_lang=s.voice_lang,
-        mode=s.mode, days=list(s.days_of_week)))
+        mode=s.mode, days=list(s.days_of_week), place=places.label(profile.telegram_id, profile.lang)))
+
+
+# ------------------------------------------------------------------ место (для будильника): геолокация или город
+async def ask_place(target: Message | CallbackQuery, profile: Profile) -> None:
+    """Экран «Место»: города кнопками + отдельное сообщение с кнопкой «📍 Отправить геолокацию» (inline так не умеет)."""
+    from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+    from ..keyboards import place_keyboard
+
+    uz = profile.lang == "uz"
+    text = ("📍 <b>Qayerda yashaysiz?</b>\nBomdod vaqti va soat mintaqasi shunga qarab hisoblanadi.\n"
+            "Aniqroq — pastdagi «📍 Joylashuvni yuborish» tugmasi; yoki shaharni tanlang:" if uz else
+            "📍 <b>Где вы живёте?</b>\nПо этому считаются время фаджра и ваш часовой пояс.\n"
+            "Точнее всего — кнопка «📍 Отправить геолокацию» внизу; или выберите город:")
+    await _show(target, text, place_keyboard(profile.lang))
+    bot = target.bot if isinstance(target, Message) else target.message.bot
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📍 " + ("Joylashuvni yuborish" if uz else "Отправить геолокацию"),
+                                                       request_location=True)]], resize_keyboard=True, one_time_keyboard=True)
+    try:
+        sent = await bot.send_message(profile.telegram_id, "👇", reply_markup=kb)
+        cache.put(profile.telegram_id, ("place_prompt",), sent.message_id, 600)
+    except Exception:
+        logger.warning("place: кнопка геолокации не отправилась", exc_info=True)
+
+
+async def _place_saved(bot, profile: Profile, lat: float, lon: float, *, ru: str, uz: str, tz: str | None) -> str:  # noqa: ANN001
+    from aiogram.types import ReplyKeyboardRemove
+
+    from .. import places
+
+    saved = await places.set_place(profile.telegram_id, lat, lon, ru=ru, uz=uz, tz=tz)
+    prompt = cache.get(profile.telegram_id, ("place_prompt",))
+    try:  # убрать кнопку геолокации из-под поля ввода
+        gone = await bot.send_message(profile.telegram_id, "✅", reply_markup=ReplyKeyboardRemove())
+        await bot.delete_message(profile.telegram_id, gone.message_id)
+        if prompt:
+            await bot.delete_message(profile.telegram_id, int(prompt))
+    except Exception:
+        pass
+    name = saved["uz"] if profile.lang == "uz" else saved["ru"]
+    return profile.tr(f"📍 Место: {name} · часовой пояс {saved['tz']}", f"📍 Joy: {name} · soat mintaqasi {saved['tz']}")
+
+
+@router.callback_query(F.data.startswith("wakeplace:"))
+async def cb_wake_place(callback: CallbackQuery) -> None:
+    from .. import places
+
+    profile = await get_profile(callback.from_user)
+    c = places.city(callback.data.split(":", 1)[1])
+    if c is None:
+        await answer_now(callback)
+        return
+    await answer_now(callback, "✅")
+    notice = await _place_saved(callback.message.bot, profile, c[3], c[4], ru=c[1], uz=c[2], tz=places.CITY_TZ)
+    await render_wake(callback, await get_profile(callback.from_user), notice=notice)
+
+
+@router.message(F.location)
+async def msg_location(message: Message) -> None:
+    """Геолокация — место для будильника (другого применения у бота нет)."""
+    from .. import places
+
+    profile = await get_profile(message.from_user)
+    lat, lon = float(message.location.latitude), float(message.location.longitude)
+    near = places.nearest_city(lat, lon)
+    ru, uz = (near[1], near[2]) if near else (f"{lat:.3f}, {lon:.3f}", f"{lat:.3f}, {lon:.3f}")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    notice = await _place_saved(message.bot, profile, lat, lon, ru=ru, uz=uz, tz=None)
+    await render_wake(message, await get_profile(message.from_user), notice=notice)
 
 
 @router.callback_query(F.data == "settings:wake")
@@ -364,14 +444,34 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
     s = wake_mod.WakeSettings.from_row(await services.wake_settings(profile.telegram_id))
     fields: dict[str, Any] = {}
     notice = None
+    from .. import places
+    from .. import wake_runner
+
+    if action == "place":
+        await answer_now(callback)
+        await ask_place(callback, profile)
+        return
+    if ((action == "toggle" and value == "enabled" and not s.enabled) or action == "mode") and not places.has_place(profile.telegram_id):
+        # сначала — где он живёт: иначе фаджр посчитается по Андижану и не по его часовому поясу
+        await answer_now(callback, profile.tr("Сначала место", "Avval joy"))
+        await ask_place(callback, profile)
+        return
     if action == "toggle" and value in {"enabled", "call_enabled", "talk"}:
         fields[value] = not getattr(s, value)
     elif action == "mode" and value == "fajr":
         fields.update({"mode": "fajr", "enabled": True})
     elif action == "offset":
-        fields["offset_min"] = max(0, min(180, s.offset_min + int(value)))
+        offset = max(0, min(180, s.offset_min + int(value)))
+        if (err := await wake_runner.window_error(profile, s, offset=offset)):
+            await answer_now(callback, err, alert=True)
+            return
+        fields["offset_min"] = offset
     elif action == "takbir":
-        fields["takbir_offset_min"] = max(0, min(120, s.takbir_offset_min + int(value)))
+        takbir = max(0, min(120, s.takbir_offset_min + int(value)))
+        if (err := await wake_runner.window_error(profile, s, takbir_offset=takbir)):
+            await answer_now(callback, err, alert=True)
+            return
+        fields["takbir_offset_min"] = takbir
     elif action == "days":
         fields["days_of_week"] = [1, 2, 3, 4, 5] if value == "work" else [1, 2, 3, 4, 5, 6, 7]
     if fields:
@@ -392,6 +492,13 @@ async def msg_alarm_time(message: Message, state: FSMContext) -> None:
         pass
     if not hhmm:
         await render_wake(message, profile, notice=profile.tr("Не понял время — например, 6:30", "Vaqtni tushunmadim — masalan 6:30"))
+        return
+    from .. import wake as wake_mod
+    from .. import wake_runner
+
+    s = wake_mod.WakeSettings.from_row(await services.wake_settings(profile.telegram_id))
+    if (err := await wake_runner.window_error(profile, s, fixed=hhmm)):
+        await render_wake(message, profile, notice="⚠️ " + err)  # ждём другое время
         return
     await state.clear()
     if await db.ensure_available("wake_settings"):

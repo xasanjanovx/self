@@ -59,6 +59,19 @@ async def timings(day: date, *, latitude: float = ANDIJAN[0], longitude: float =
         return out
 
 
+async def timezone_at(latitude: float, longitude: float) -> str | None:
+    """Часовой пояс места («Asia/Tashkent», «Europe/Moscow») — Aladhan отдаёт его вместе со временем намаза."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(f"{API}/{date.today():%d-%m-%Y}", params={"latitude": latitude, "longitude": longitude, "method": 3})
+            res.raise_for_status()
+            tz = str(((res.json().get("data") or {}).get("meta") or {}).get("timezone") or "")
+            return tz or None
+    except Exception:
+        logger.warning("prayer: часовой пояс не получил", exc_info=True)
+        return None
+
+
 def takbir_time(fajr: str | None, takbir_offset_min: int) -> time | None:
     """Начало джамоата = азан фаджра + поправка мечети."""
     t = parse_hhmm(fajr)
