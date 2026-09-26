@@ -345,7 +345,11 @@ class PhoneLive(_Session):
             return False
         if not heard or not heard.get("text"):
             return False
-        cmd = instant.parse(heard["after"] if heard.get("name") else heard["text"])
+        text = heard["after"] if heard.get("name") else heard["text"]
+        cmd = instant.parse(text)
+        first, _, rest = text.partition(" ")
+        if cmd is None and rest and first[:1] in {"д", "ж", "ч"}:
+            cmd = instant.parse(rest)  # имя расслышано как «джаз»/«жест» — команда после него
         if cmd is None:
             return False
         if self.turn.device.get("locked") and cmd.tool in NEED_UNLOCK:

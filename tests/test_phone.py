@@ -311,3 +311,14 @@ def test_action_phrases():
     assert phone.action_phrase({"type": "timer", "seconds": 180}) == "Таймер на 3 минуты."
     assert phone.action_phrase({"type": "timer", "seconds": 3600}) == "Таймер на 1 час."
     assert phone.action_phrase({"type": "call", "name": "Ойижон"}) == "Звоню: Ойижон."
+
+
+def test_honorific_aka_does_not_decide(uid):
+    """«Срачбек ака» (плохо расслышанное «Сирожбек акам») не должно уводить к «ABDULATIF AKA» по слову «aka»."""
+    phone.save_contacts(uid, [{"n": "ABDULATIF AKA", "p": ["1"]}, {"n": "AKBARJON AKA", "p": ["2"]},
+                              {"n": "SIROJBEK AKAM", "p": ["3"], "c": 12}, {"n": "Sirojiddin Aka", "p": ["4"]}, {"n": "SIROJIDDIN", "p": ["5"]}])
+    for who in ("Срачбек ака", "Сарочубек акам", "Сирожбек"):
+        found = phone.find_contact(uid, who, [])
+        assert found.get("match", {}).get("name") == "SIROJBEK AKAM", (who, found)
+    assert phone.find_contact(uid, "Абдулатиф ака", [])["match"]["name"] == "ABDULATIF AKA"
+    assert phone.find_contact(uid, "Сирожиддин ака", [])["match"]["name"] == "Sirojiddin Aka"

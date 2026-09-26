@@ -102,8 +102,10 @@ def score(query: str, name: str) -> float:
                 return 0.86
     whole = SequenceMatcher(None, query, name).ratio()
     q_tokens = query.split()
+    # «ака», «опа» — вежливость, а не имя: «Срачбек ака» не должен совпадать с «ABDULATIF AKA» по слову «aka»
+    named = [qt for qt in q_tokens if qt not in HONORIFICS] or q_tokens
     best_tok = 0.0
-    for qt in q_tokens:
+    for qt in named:
         for t in tokens:
             best_tok = max(best_tok, SequenceMatcher(None, qt, t).ratio())
     # однословный запрос против многословного имени сравниваем по лучшему слову
@@ -111,6 +113,7 @@ def score(query: str, name: str) -> float:
     return max(whole, tok_score)
 
 
+HONORIFICS = {"aka", "akam", "akajon", "opa", "opam", "opajon", "uka", "ukam", "xon", "xonim", "domla", "ustoz", "janob"}
 MIN_SCORE = 0.72
 CLEAR_GAP = 0.08
 
