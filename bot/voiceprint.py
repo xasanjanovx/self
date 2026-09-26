@@ -205,6 +205,10 @@ async def enroll(uid: int, wake_wavs: list[bytes], reading_wav: bytes | None) ->
         full /= np.linalg.norm(full) + 1e-9
         data = {"vp": [round(float(v), 6) for v in full], "threshold": threshold, "z_threshold": z_threshold, "created": time.time(),
                 "short": len(short_emb), "reading_s": round(sum(len(x) for x in long_parts) / RATE, 1)}
+        try:
+            data["bank"] = json.loads(_file(uid).read_text(encoding="utf-8")).get("bank") or []
+        except (OSError, ValueError):
+            pass
         _file(uid).write_text(json.dumps(data), encoding="utf-8")
         return {"ok": True, "threshold": threshold, "z_threshold": z_threshold, "scores": [round(s, 3) for s in scores],
                 "z": [round(z, 2) for z in zs], "short": len(short_emb), "reading_s": data["reading_s"]}
@@ -244,12 +248,49 @@ async def verify(uid: int, wav: bytes) -> dict[str, Any]:
     e = await asyncio.to_thread(_embed_sync, ext, x)
     score, z = zscore(vp, e)
     z_thr = data.get("z_threshold")
+    bank = [np.array(b, dtype=np.float32) for b in data.get("bank") or []]
+    near = round(max(float(b @ e) for b in bank), 3) if bank else None
     if z is not None and z_thr is not None:
-        ok = score >= MIN_THRESHOLD and z >= float(z_thr)
+        strict = score >= MIN_THRESHOLD and z >= float(z_thr)
+        # 26.09: его «Джес, позвони…» отсекалось 7 раз за 4 минуты — z 1.9–3.1 («точно он»), а сырая похожесть 0.14–0.25
+        # (тихо / далеко от телефона). Одна из двух мер уверенно «за» — это он; и похожесть на его же подтверждённые
+        # фразы с этого телефона (банк) — главное: там те же микрофон, комната и манера.
+        ok = (strict or (z >= float(z_thr) + Z_SURE_MARGIN and score >= RAW_FLOOR) or score >= RAW_SURE
+              or (near is not None and near >= BANK_SAME))
+        sure = strict and score >= BANK_ADD_SCORE
     else:
-        ok = score >= float(data["threshold"])
-    return {"ok": ok, "score": round(score, 3), "z": None if z is None else round(z, 2),
+        ok = score >= float(data["threshold"]) or (near is not None and near >= BANK_SAME)
+        sure = ok and score >= BANK_ADD_SCORE
+    return {"ok": ok, "score": round(score, 3), "z": None if z is None else round(z, 2), "bank": near, "sure": sure,
             "threshold": z_thr if z is not None and z_thr is not None else data["threshold"], "_emb": e}
+
+
+# «Банк» — его голос в жизни: уверенно подтверждённые «Джес» и фразы разговора с этого телефона (не больше 24,
+# не чаще раза в 30 с). Растёт сам — проверка подстраивается под то, как он звучит на самом деле, а не только на записи.
+Z_SURE_MARGIN = 0.5      # нормированная выше порога на столько — это он, даже при низкой сырой похожести…
+RAW_FLOOR = 0.12         # …но не совсем непохожий звук
+RAW_SURE = 0.55          # сырая похожесть такая — он, как бы ни вышла нормировка
+BANK_SAME = 0.55         # похоже на его подтверждённые фразы — он
+BANK_ADD_SCORE = 0.40    # в банк — только уверенные (чтобы чужой голос туда не попал)
+BANK_MAX = 24
+BANK_EVERY_S = 30.0
+_bank_at: dict[int, float] = {}
+
+
+def bank_add(uid: int, emb: Any) -> bool:
+    """Добавить уверенно его запись в банк (файл отпечатка). True — добавили."""
+    if emb is None or time.monotonic() - _bank_at.get(uid, -1e9) < BANK_EVERY_S:
+        return False
+    try:
+        data = json.loads(_file(uid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    bank = list(data.get("bank") or [])
+    bank.append([round(float(v), 5) for v in emb])
+    data["bank"] = bank[-BANK_MAX:]
+    _file(uid).write_text(json.dumps(data), encoding="utf-8")
+    _bank_at[uid] = time.monotonic()
+    return True
 
 
 OTHER_Z_MARGIN = 0.15    # посреди разговора мягче, чем на «JES»: его самого лучше лишний раз пропустить, чем не услышать
@@ -300,8 +341,11 @@ async def is_other(uid: int, wav: bytes) -> dict[str, Any]:
     anchor = round(max(near), 3) if near else None
     strong = bool(res.get("ok")) or (anchor is not None and anchor >= ANCHOR_SAME)
     if strong or score >= SAME_SCORE or (z is not None and z >= thr):
-        if strong:
+        # образцом разговора становится только уверенное (не «пропустили на всякий случай»)
+        if res.get("sure") or (anchor is not None and anchor >= ANCHOR_SAME):
             remember(uid, emb)
+            if res.get("sure") or (anchor is not None and anchor >= 0.85 and score >= BANK_ADD_SCORE):
+                bank_add(uid, emb)
         return {**res, "other": False, "anchor": anchor}
     if anchor is not None:
         other = anchor < ANCHOR_OTHER and score < SAME_SCORE - 0.05
@@ -315,4 +359,4 @@ async def warm() -> None:
     await extractor()
 
 
-__all__ = ["enroll", "verify", "status", "forget", "calibrate", "warm", "available", "is_other", "remember", "anchors"]
+__all__ = ["enroll", "verify", "status", "forget", "calibrate", "warm", "available", "is_other", "remember", "anchors", "bank_add"]

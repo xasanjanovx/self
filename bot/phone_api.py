@@ -193,16 +193,18 @@ async def wake_check(request: web.Request) -> web.Response:
     took = time.monotonic() - started
     if not voice.get("ok"):
         # чужой голос и телевизор отсекаем сразу
-        logger.info("wake check: чужой голос (сходство %s, z %s, порог %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
-                    voice.get("threshold"), took, (heard or {}).get("text", ""))
+        logger.info("wake check: чужой голос (сходство %s, z %s, порог %s, банк %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
+                    voice.get("threshold"), voice.get("bank"), took, (heard or {}).get("text", ""))
         _reject(uid)
         return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
     if heard is not None and (heard["text"] or data.get("confident")):
         ok = heard["name"] or (not heard["text"] and bool(data.get("confident")))
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
-        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
-                    voice.get("score"), voice.get("z"), heard["ms"])
+            if voice.get("sure"):
+                voiceprint.bank_add(uid, voice.get("_emb"))  # уверенно он — в банк его настоящих записей
+        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
+                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"])
         if not ok:
             _reject(uid)
         return web.json_response({"ok": ok, "text": heard["text"], "command": bool(heard["after"]), "voice": voice.get("score"), "fast": True})

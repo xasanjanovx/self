@@ -27,8 +27,9 @@ MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models
 FILES = ("encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt")
 RATE = 16000
 
-# JES: джес, джесс, джейс, джез, жес, jes, jess — но не «жест», «жесть», «есть», «джек», «джаз», «чес»
-_JES = re.compile(r"^(?:дж|ж|дз|j)(?:е|э|ей|эй|e|ey|ei)(?:с|сс|з|s|ss|z)$")
+# JES: джес, джесс, джейс, джез, жес, jes, jess; 26.09 его «Джес» распознавалось и как «джест», «джаз», «джас» (5 отказов за
+# 4 минуты) — тоже имя (чужие голоса отсекает проверка голоса). Не имя: «жесть», «есть», «джек», «чес», «здесь».
+_JES = re.compile(r"^(?:дж|ж|дз|j)(?:е|э|а|ей|эй|e|a|ey|ei)(?:с|сс|з|s|ss|z)т?$")
 
 _recognizer: Any = None
 _load_error: str | None = None
