@@ -364,7 +364,17 @@ class AIService:
 
     async def synthesize(self, text: str, *, voice: str = "Kore") -> bytes | None:
         """Текст → речь (PCM s16le, 24 kHz, mono). None, если TTS-модель недоступна."""
-        if not self.tts_model or not text.strip():
+        if not text.strip():
+            return None
+        # сначала основная модель (не preview): 26.09 у preview-TTS кончилась дневная квота (429) — «Звонит мама»
+        # и приветствие будильника не записывались; она же дешевле. Preview — запасная.
+        try:
+            pcm = b"".join([chunk async for chunk in self.speak_stream(text, voice=voice)])
+            if pcm:
+                return pcm
+        except Exception as exc:
+            logger.warning("TTS (%s) failed: %s", FAST_TTS_MODEL, str(exc)[:200])
+        if not self.tts_model:
             return None
         payload = {
             "contents": [{"role": "user", "parts": [{"text": text}]}],
