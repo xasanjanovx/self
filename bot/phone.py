@@ -1,6 +1,6 @@
-"""Голосовой ZEKI на телефоне: тот же агент, что в боте, плюс руки на телефоне.
+"""Голосовой JES на телефоне: тот же агент, что в боте, плюс руки на телефоне.
 
-Приложение (jarvis-android) слышит «Эй, ZEKI», записывает фразу и шлёт её сюда
+Приложение (jarvis-android) слышит «Эй, JES», записывает фразу и шлёт её сюда
 (см. bot/phone_api.py). Агент получает все обычные инструменты бота (траты, задачи,
 напоминания, цели, поиск…) и дополнительные — телефонные. Ответ — текст для озвучки
 и список действий, которые выполнит само приложение: звонок, SMS, будильник, таймер,
@@ -64,7 +64,14 @@ def save_contacts(uid: int, raw: list[Any]) -> int:
         name = str(item.get("n") or item.get("name") or "").strip()
         phones = [str(p).strip() for p in (item.get("p") or item.get("phones") or []) if str(p).strip()]
         if name and phones:
-            clean.append({"name": name[:80], "phones": phones[:4]})
+            entry: dict[str, Any] = {"name": name[:80], "phones": phones[:4]}
+            try:
+                calls = int(item.get("c") or item.get("calls") or 0)
+            except (TypeError, ValueError):
+                calls = 0
+            if calls > 0:
+                entry["calls"] = calls  # звонков с ним за 90 дней — кто «свой» (приложение 2.1+)
+            clean.append(entry)
     _contacts[uid] = clean
     try:
         _contacts_file(uid).write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
@@ -83,11 +90,20 @@ def load_contacts(uid: int) -> list[dict[str, Any]]:
 
 
 def find_contact(uid: int, who: Any, variants: Any, device: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Лучший контакт сразу, без «кому именно?»: выученное имя («мама» → ONAJONIM), потом похожесть
-    с поправкой на то, кому он чаще звонит."""
+    """Выученное имя («брат» → SIROJBEK AKAM) — сразу; иначе похожесть с поправкой на то, кому он чаще звонит.
+    Двое почти одинаковых и оба редкие — {"ask": [первый, второй]}: переспросить коротко (его выбор 26.09)."""
     queries = [who] + [v for v in (variants or []) if isinstance(v, str)]
     contacts = load_contacts(uid)
-    return names.pick(queries, contacts, boosts=call_boosts(contacts, device or {}), alias=alias_for(uid, "phone", queries))
+    found = names.pick(queries, contacts, boosts=call_boosts(contacts, device or {}), alias=alias_for(uid, "phone", queries))
+    if found.get("ambiguous") and not names.as_phone_number(who):
+        return {"ask": [found["match"]["name"], found["ambiguous"]["name"]]}
+    return found
+
+
+def ask_which(found: dict[str, Any]) -> dict[str, Any]:
+    first, second = found["ask"][:2]
+    return {"ask_exactly": f"{first} или {second}?",
+            "hint": "спроси коротко ровно это и жди ответа; потом вызови инструмент снова с точным именем, которое он выбрал"}
 
 
 # ------------------------------------------------------------------ как он называет людей («мама» → ONAJONIM)
@@ -106,15 +122,15 @@ def aliases(uid: int) -> dict[str, dict[str, str]]:
 def alias_for(uid: int, kind: str, queries: list[Any]) -> str | None:
     known = aliases(uid).get(kind) or {}
     for q in queries:
-        hit = known.get(names.norm(q))
+        hit = known.get(names.kin_root(q) or names.norm(q))
         if hit:
             return hit
     return None
 
 
 def learn_alias(uid: int, kind: str, who: Any, name: str) -> None:
-    """Запомнить, кого он имел в виду, — в следующий раз сразу этот человек."""
-    key = names.norm(who)
+    """Запомнить, кого он имел в виду, — в следующий раз сразу этот человек («брату», «akamga» → по корню «brat»)."""
+    key = names.kin_root(who) or names.norm(who)
     if not key or not name or names.as_phone_number(who) or key == names.norm(name):
         return
     data = aliases(uid)
@@ -140,10 +156,44 @@ def call_boosts(contacts: list[dict[str, Any]], device: dict[str, Any]) -> dict[
             counts[d] = counts.get(d, 0) + 1
     out: dict[str, float] = {}
     for contact in contacts:
-        n = max((counts.get(_digits(p), 0) for p in contact.get("phones") or []), default=0)
+        recent = max((counts.get(_digits(p), 0) for p in contact.get("phones") or []), default=0)
+        # за 90 дней (приложение 2.1+) + последние звонки из журнала
+        n = int(contact.get("calls") or 0) + recent
         if n:
-            out[names.norm(contact.get("name"))] = 0.03 * min(n, 3)
+            key = names.norm(contact.get("name"))
+            out[key] = max(out.get(key, 0.0), names.frequency_boost(n))
     return out
+
+
+def people_line(uid: int, limit: int = 12) -> str:
+    """Для промпта телефона: кто у него кто («брат — SIROJBEK AKAM») и кому он чаще звонит — чтобы модель узнавала
+    имена в плохо расслышанной речи («Сарочубек акам» → SIROJBEK AKAM)."""
+    known = aliases(uid).get("phone") or {}
+    kin = [f"{k} — {v}" for k, v in known.items() if names.kin_root(k) == k]
+    contacts = sorted((c for c in load_contacts(uid) if int(c.get("calls") or 0) > 0), key=lambda c: -int(c.get("calls") or 0))
+    frequent: list[str] = []
+    for c in contacts:
+        if c["name"] not in frequent:
+            frequent.append(c["name"])
+        if len(frequent) >= limit:
+            break
+    parts = []
+    if kin:
+        parts.append("Родные: " + "; ".join(kin) + ".")
+    if frequent:
+        parts.append("Чаще всего звонит: " + ", ".join(frequent) + ".")
+    return ("ЛЮДИ (имена — как в его контактах): " + " ".join(parts)) if parts else ""
+
+
+def people_vocabulary(uid: int, limit: int = 20) -> list[str]:
+    """Имена родных и частых — подсказка распознаванию речи Live (customVocabulary)."""
+    known = list((aliases(uid).get("phone") or {}).values())
+    contacts = sorted((c for c in load_contacts(uid) if int(c.get("calls") or 0) > 0), key=lambda c: -int(c.get("calls") or 0))
+    out: list[str] = []
+    for name in known + [c["name"] for c in contacts]:
+        if name not in out:
+            out.append(name)
+    return out[:limit]
 
 
 # ------------------------------------------------------------------ pending messages
@@ -179,7 +229,7 @@ _YES = {"да", "ага", "угу", "давай", "отправь", "отпра�
         "ha", "xa", "ҳа", "ха", "майли", "mayli", "yubor", "юбор", "albatta", "албатта", "bopti", "ok", "okay", "yes", "yep", "sure", "да да"}
 _NO = {"нет", "не", "не надо", "не отправляй", "отмена", "отмени", "стоп", "не нужно", "yoq", "йок", "йўқ", "kerak emas", "керак эмас",
        "bekor", "бекор", "no", "nope", "cancel"}
-_FILLER = {"зеки", "зэки", "зеке", "zeki", "пожалуйста", "please", "iltimos", "илтимос"}
+_FILLER = {"джес", "джесс", "jes", "jess", "пожалуйста", "please", "iltimos", "илтимос"}
 
 
 def _short_answer(text: str) -> str:
@@ -233,9 +283,12 @@ async def _phone_call(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
         turn.need_contacts = True
         return {"error": "Контакты с телефона ещё не загружены — попроси повторить через пару секунд"}
     found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
+    if "ask" in found:
+        return ask_which(found)
     if "match" in found:
         c = found["match"]
-        learn_alias(turn.uid, "phone", a.get("who"), c["name"])
+        if found.get("clear"):  # 26.09: запоминал и ошибочный выбор («брат» → случайный «… Aka») — теперь только уверенный
+            learn_alias(turn.uid, "phone", a.get("who"), c["name"])
         return _action(turn, "call", number=c["phones"][0], name=c["name"])
     return {"error": f"В контактах нет «{a.get('who')}»", "hint": "скажи, что не нашёл, и попроси назвать, как записан контакт"}
 
@@ -253,6 +306,8 @@ async def _send_sms(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dic
             turn.need_contacts = True
             return {"error": "Контакты с телефона ещё не загружены"}
         found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
+        if "ask" in found:
+            return ask_which(found)
         if "match" not in found:
             return {"error": f"В контактах нет «{a.get('who')}»"}
         number, name = found["match"]["phones"][0], found["match"]["name"]
@@ -271,7 +326,7 @@ async def _telegram_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
     if not text:
         return {"error": "нет текста — спроси, что написать"}
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении ZEKI → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     queries = [a.get("who")] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
     found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
     if "match" not in found:
@@ -302,7 +357,7 @@ async def _cancel_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> 
        {"who": P("STRING", "с кем переписка (необязательно)"), "variants": VARIANTS, "limit": P("INTEGER", "сколько сообщений, по умолчанию 5")})
 async def _telegram_read(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении ZEKI → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     who = _str(a.get("who"))
     if not who:
         chats = await tg_user.unread()
@@ -328,7 +383,7 @@ async def _set_alarm(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
         return {"error": "время нужно в формате HH:MM"}
     days = [_WEEKDAY_KEYS[d] for d in (a.get("days") or []) if d in _WEEKDAY_KEYS]
-    return _action(turn, "alarm", hour=int(m.group(1)), minute=int(m.group(2)), label=_str(a.get("label")) or "ZEKI", days=days or None)
+    return _action(turn, "alarm", hour=int(m.group(1)), minute=int(m.group(2)), label=_str(a.get("label")) or "JES", days=days or None)
 
 
 @ptool("set_timer", "Таймер на телефоне («засеки 10 минут»).",
@@ -337,7 +392,7 @@ async def _set_timer(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     seconds = int(a.get("seconds") or 0)
     if not 1 <= seconds <= 24 * 3600:
         return {"error": "таймер от 1 секунды до 24 часов"}
-    return _action(turn, "timer", seconds=seconds, label=_str(a.get("label")) or "ZEKI")
+    return _action(turn, "timer", seconds=seconds, label=_str(a.get("label")) or "JES")
 
 
 @ptool("open_app", "Открыть приложение на телефоне («открой ютуб», «камеру», «настройки», «Click»).",
@@ -436,7 +491,7 @@ async def _recent_calls(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) ->
     calls = recent_calls(turn.device)
     if not calls:
         if turn.device.get("calls_denied"):
-            return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении ZEKI выдать «Журнал звонков»"}
+            return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении JES выдать «Журнал звонков»"}
         return {"calls": [], "note": "журнал пуст"}
     return {"calls": calls}
 
@@ -542,10 +597,13 @@ async def _whatsapp(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dic
             turn.need_contacts = True
             return {"error": "Контакты с телефона ещё не загружены"}
         found = find_contact(turn.uid, a.get("who"), a.get("variants"), turn.device)
+        if "ask" in found:
+            return ask_which(found)
         if "match" not in found:
             return {"error": f"В контактах нет «{a.get('who')}»"}
         number, name = found["match"]["phones"][0], found["match"]["name"]
-        learn_alias(turn.uid, "phone", a.get("who"), name)
+        if found.get("clear"):
+            learn_alias(turn.uid, "phone", a.get("who"), name)
     return _action(turn, "whatsapp", number=number, text=text, name=name)
 
 
@@ -610,7 +668,7 @@ async def _play_media(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
        {"query": P("STRING", "слова для поиска"), "limit": P("INTEGER", "сколько сообщений, по умолчанию 6")}, ("query",))
 async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
-        return {"error": "Telegram не подключён: в приложении ZEKI → раздел Telegram → «Подключить»"}
+        return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     query = _str(a.get("query"))
     if not query:
         return {"error": "что искать?"}
@@ -650,7 +708,10 @@ async def _remember_contact(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]
     who, contact = _str(a.get("who")), _str(a.get("contact"))
     if not who or not contact:
         return {"error": "нужно: как называет и кто это"}
-    found = names.pick([contact], load_contacts(turn.uid))
+    contacts = load_contacts(turn.uid)
+    found = names.pick([contact], contacts, boosts=call_boosts(contacts, turn.device))
+    if found.get("ambiguous"):
+        return ask_which({"ask": [found["match"]["name"], found["ambiguous"]["name"]]})
     name = found["match"]["name"] if "match" in found else contact
     learn_alias(turn.uid, "phone", who, name)
     learn_alias(turn.uid, "tg", who, contact)
@@ -679,7 +740,7 @@ def device_prompt(device: dict[str, Any]) -> str:
     if d.get("battery") is not None:
         parts.append(f"батарея {d.get('battery')}%" + (", заряжается" if d.get("charging") else ""))
     if d.get("app_version"):
-        parts.append(f"приложение ZEKI v{d.get('app_version')}")
+        parts.append(f"приложение JES v{d.get('app_version')}")
     if d.get("model"):
         parts.append(str(d.get("model"))[:40])
     missed = [c for c in recent_calls(d) if c["kind"] == "пропущенный"][:3]
@@ -802,7 +863,7 @@ def system_extra(turn: PhoneTurn, pending: dict[str, Any] | None) -> str:
     if d.get("model"):
         device.append(str(d.get("model"))[:40])
     lines = [
-        "\n\nРЕЖИМ ТЕЛЕФОНА. С тобой говорят ГОЛОСОМ через приложение «ZEKI» на Android-телефоне владельца; твой ответ будет ПРОИЗНЕСЁН вслух.",
+        "\n\nРЕЖИМ ТЕЛЕФОНА. С тобой говорят ГОЛОСОМ через приложение «JES» на Android-телефоне владельца; твой ответ будет ПРОИЗНЕСЁН вслух.",
         "• Ответ — 1–2 коротких разговорных предложения. Без эмодзи, списков, markdown, ссылок и id. Длинные данные — только итог "
         "(«за сентябрь 3,2 миллиона, больше всего на еду»). Это главнее правила 8.",
         "• Экранов бота здесь нет: hand_off, open_screen, call_me недоступны. Трату/доход записывай сразу add_finance_entries (категорию выбери сам), "
@@ -811,7 +872,7 @@ def system_extra(turn: PhoneTurn, pending: dict[str, Any] | None) -> str:
         "если не сказано куда — по умолчанию Telegram. В variants всегда передавай другие написания и родственные слова.",
         "• Сообщения уходят только после подтверждения: send_sms/telegram_send вернут ask_exactly — произнеси его. "
         "Согласие («да», «отправь», «ha») → confirm_send; отказ → cancel_send; просит изменить текст — снова telegram_send/send_sms с новым текстом.",
-        "• Текст сообщения — от первого лица владельца, как он продиктовал, без приписок от ZEKI; язык — как диктовал (узбекский — латиницей).",
+        "• Текст сообщения — от первого лица владельца, как он продиктовал, без приписок от JES; язык — как диктовал (узбекский — латиницей).",
         "• Несколько кандидатов (candidates) → ask_user, а в вопросе назови варианты голосом («Какой маме: Ойижон или Мама Билайн?»).",
         "• «Что мне написали», «новые сообщения», «что пишет Алишер» → telegram_read и перескажи коротко: кто и о чём.",
         "• Будильник («разбуди в 7», «будильник на 6:30») → set_alarm; подъём на фаджр со звонком — set_wake, как раньше. "
@@ -880,7 +941,7 @@ async def _snapshot(profile: Any) -> str:
 
 
 async def prefetch(uid: int) -> None:
-    """Телефон услышал «ZEKI» — пока человек договаривает, прогреваем кэши профиля и данных для промпта."""
+    """Телефон услышал «JES» — пока человек договаривает, прогреваем кэши профиля и данных для промпта."""
     from .handlers.common import profile_by_id
 
     try:
@@ -897,9 +958,9 @@ WARM_EVERY = 120.0
 
 
 async def keep_warm(uid: int) -> None:
-    """Держим данные владельца свежими в памяти: «ZEKI» → разговор готов за ~0.4 с (подключение к Gemini),
+    """Держим данные владельца свежими в памяти: «JES» → разговор готов за ~0.4 с (подключение к Gemini),
     а не 1.5–5 с. Раз в 2 минуты обновляем то, что истечёт до следующего раза; изменения данных
-    сбрасывают кэш как раньше, так что устаревшего ZEKI не видит."""
+    сбрасывают кэш как раньше, так что устаревшего JES не видит."""
     while True:
         try:
             cache.drop_expiring(uid, WARM_EVERY + 15, WARM_KEYS)

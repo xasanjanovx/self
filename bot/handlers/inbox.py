@@ -1,7 +1,7 @@
 """Свободный ввод без выбранного раздела: сам определяем, куда отправить.
 
 Порядок: быстрые правила (регулярки/ключевые слова — дёшево и мгновенно) →
-всё остальное отдаём агенту «ZEKI», который сам решает: выполнить команду,
+всё остальное отдаём агенту «JES», который сам решает: выполнить команду,
 ответить на вопрос по данным, передать запись парсеру или просто поговорить.
 Голос транскрибируется один раз."""
 from __future__ import annotations
@@ -43,12 +43,12 @@ def _is_question(text: str) -> bool:
 
 
 async def _not_understood(message: Message, profile: Profile, transcript: str | None = None) -> None:
-    """Сюда попадаем только если ZEKI недоступен (ошибка AI) или сообщение без текста."""
+    """Сюда попадаем только если JES недоступен (ошибка AI) или сообщение без текста."""
     if transcript:
-        notice = profile.tr(f"ZEKI сейчас недоступен, не смог обработать: «{h(transcript[:80])}». Повтори через минуту.",
-                            f"ZEKI hozir ishlamayapti: «{h(transcript[:80])}». Bir daqiqadan so'ng qaytaring.")
+        notice = profile.tr(f"JES сейчас недоступен, не смог обработать: «{h(transcript[:80])}». Повтори через минуту.",
+                            f"JES hozir ishlamayapti: «{h(transcript[:80])}». Bir daqiqadan so'ng qaytaring.")
     else:
-        notice = profile.tr("ZEKI сейчас недоступен — повтори через минуту.", "ZEKI hozir ishlamayapti — bir daqiqadan so'ng qaytaring.")
+        notice = profile.tr("JES сейчас недоступен — повтори через минуту.", "JES hozir ishlamayapti — bir daqiqadan so'ng qaytaring.")
     # возвращаем главный экран (мог остаться «⏳ …») и показываем короткую подсказку
     await send_main_menu(message, profile)
     await screen_mod.send_ephemeral(message.bot, message.chat.id, f"{pe.CROSS} {notice}", keep_previous=True)
@@ -105,11 +105,11 @@ async def route_text(
 
 
 async def handle_photo_message(message: Message, state: FSMContext, profile: Profile) -> None:
-    """Фото: вакансия по подписи → договорённость с ZEKI
+    """Фото: вакансия по подписи → договорённость с JES
     (expect_photo) → еда или «другое».
 
-    Раньше любое фото считалось едой: пообещал ZEKI «пришли фото челленджа — отмечу», а фото ушло
-    в калории. Теперь ZEKI видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
+    Раньше любое фото считалось едой: пообещал JES «пришли фото челленджа — отмечу», а фото ушло
+    в калории. Теперь JES видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
     caption = message_text(message)
     if caption and vac.looks_like_vacancy(caption):
         await vacancy_h.process_vacancy(message, state, profile, caption)

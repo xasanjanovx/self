@@ -4,7 +4,7 @@
   Telegram-звонок (pytgcalls)  ──входящий звук 24 кГц──▶  Gemini Live (websocket)
                                ◀──голос модели 24 кГц───
   Модель сама слышит паузы и перебивания (VAD на стороне Gemini), отвечает голосом
-  и вызывает те же инструменты, что ZEKI в чате: добавить цель, удалить операцию,
+  и вызывает те же инструменты, что JES в чате: добавить цель, удалить операцию,
   записать калории, ответить по данным. Всё, что изменено в звонке, после разговора
   приходит в чат одним сообщением с кнопкой «Отменить».
 
@@ -49,8 +49,12 @@ SILENT_TOOLS = {"phone_call", "set_alarm", "set_timer", "open_app", "media", "ad
                 "add_reminder", "confirm_send", "cancel_send", "phone_task", "send_to_chat", "end_call"}
 # экономные настройки сессии, которые модель приняла: 2 — «размышления» minimal + сжатие, 1 — только сжатие, 0 — ничего
 _extras_level: dict[str, int] = {}
+# 26.09 он выбрал «голос как в звонке»: голос тот же (Sulafat), а манера на телефоне была сухой — теперь как по телефону,
+# но команды по-прежнему молча (PHONE_RULES)
+PHONE_VOICE = ("МАНЕРА РЕЧИ — как в звонке: тёплая, живая, разговорная, как близкий человек; реагируй на настроение, лёгкий юмор "
+               "к месту. Это про то, КАК говоришь, когда отвечаешь словами; команды всё равно выполняешь молча.\n")
 SPEECH_LANGS = ("ru-RU", "uz-UZ", "en-US")      # на чём он говорит — подсказка распознаванию речи
-VOCABULARY = ("ZEKI", "Зеки", "Zeki")           # имя ассистента — чтобы не слышалось как «зеки»/«Jeeves»
+VOCABULARY = ("JES", "Джес", "Jes")            # имя ассистента — чтобы не слышалось как «жесть»/«Jeeves»
 
 # инструменты чата, которые в голосе не нужны или мешают
 _SKIP_TOOLS = {"hand_off", "open_screen", "ask_user", "call_me", "test_wake_call"}
@@ -72,6 +76,7 @@ class LiveResult:
     actions: list[str] = field(default_factory=list)
     mutated: bool = False
     model: str | None = None
+    dialed: bool = False               # звонок дошёл до телефона (взяли или нет) — это не сбой Gemini
 
 
 # ------------------------------------------------------------------ промпт и инструменты
@@ -86,12 +91,12 @@ def facts_only(memory: str) -> str:
 
 
 def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str = "", memory: str = "",
-                       wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True) -> str:
+                       wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True, people: str = "") -> str:
     """with_time=False — без текущего времени: экономный режим телефона кладёт его в реплику, чтобы инструкция
     не менялась каждую минуту и Gemini брал её из кэша (10% цены)."""
     now = profile.now
     name = p.name_for(profile.first_name) or "пользователь"
-    channel = ("Он позвал тебя голосом («ZEKI») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
+    channel = ("Он позвал тебя голосом («JES») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
                "говоришь через динамик телефона и управляешь телефоном своими инструментами. "
                if mode == "phone" else "Сейчас ты говоришь с ним ПО ТЕЛЕФОНУ (звонок в Telegram). ")
     where = f"{now_line(profile)}, Андижан, Узбекистан" if with_time else "Он живёт в Андижане, Узбекистан (время — в его репликах)"
@@ -100,12 +105,13 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         # эта инструкция оплачивается в КАЖДОМ ответе Live
         from . import billing
 
-        return (f"Ты — ZEKI (читается «Зеки»), голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
+        return (f"Ты — JES (читается «Джес»), голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang_rule(p)}\n{style_rules(p, spoken=True)}\n"
-                + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
+                + PHONE_VOICE + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
+                + (f"\n{people}\n" if people else "")
                 + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
     base = (
-        f"Ты — ZEKI (читается «Зеки»), личный помощник {name}. {channel}"
+        f"Ты — JES (читается «Джес»), личный помощник {name}. {channel}"
         "Голос у тебя женский — о себе говори в женском роде («поняла», «записала»). "
         f"{where}. Валюта — сум.\n\n"
         f"{lang_rule(p)}\n\n{human_rules(p)}\n{style_rules(p, spoken=True)}\n"
@@ -155,7 +161,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Узнал о нём что-то важное и надолго (люди, планы, предпочтения) — сохрани remember_about_me, не говоря об этом. "
         "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила.\n"
         "ЧЕСТНОСТЬ: не обещай того, чего не сделаешь инструментами. Договорились о фото («пришлю фото челленджа — отмечай», «буду слать чеки») — "
-        "СРАЗУ вызови expect_photo с подробной инструкцией и сроком: тогда его фото в чате придут ZEKI с этой инструкцией, а не в подсчёт калорий. "
+        "СРАЗУ вызови expect_photo с подробной инструкцией и сроком: тогда его фото в чате придут JES с этой инструкцией, а не в подсчёт калорий. "
         "Хочет что-то сложное — ищи способ своими инструментами; по-настоящему невозможное — честно одной фразой и ближайшая замена.\n"
         "Когда он прощается («всё», «пока», «rahmat», «xayr», «bo'ldi») — тепло и коротко попрощайся и вызови end_call.\n"
     )
@@ -170,7 +176,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
 # Телефон: Gemini Live заново оплачивает инструкцию и описания инструментов в КАЖДОМ ответе — поэтому здесь коротко
 # (раньше ~40 тысяч знаков вместе с блоком «О себе» и данными бота; данные теперь — через инструменты и bot_task).
 PHONE_RULES = (
-    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Ты РАБОТАЕШЬ, а не разговариваешь. Не здоровайся. Сказал только «ZEKI» — молчи: "
+    "\nГОЛОСОВОЙ АССИСТЕНТ НА ТЕЛЕФОНЕ. Ты РАБОТАЕШЬ, а не разговариваешь. Не здоровайся. Сказал только «JES» — молчи: "
     "телефон уже ответил «Да, сэр» твоим голосом.\n"
     "КОМАНДЫ — МОЛЧА: сразу вызови инструмент и НИЧЕГО не говори — ни «делаю», ни «сейчас», ни «открываю», ни «готово»: "
     "телефон сам покажет карточку. Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или "
@@ -255,7 +261,7 @@ def compact_declaration(decl: dict[str, Any]) -> dict[str, Any]:
 
 
 def _control_tools(mode: str) -> list[dict[str, Any]]:
-    end = ("Закончить разговор (панель ZEKI закроется) — когда он попрощался или сказал, что больше ничего не нужно."
+    end = ("Закончить разговор (панель JES закроется) — когда он попрощался или сказал, что больше ничего не нужно."
            if mode == "phone" else "Положить трубку — когда разговор окончен или человек попрощался.")
     tools = [{"name": "end_call", "description": end,
               "parameters": {"type": "OBJECT", "properties": {}}}]
@@ -296,7 +302,7 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
         snapshot, memory = await asyncio.gather(agent_tools.snapshot(profile), extra.memory_prompt(profile.telegram_id))
     except Exception:
         snapshot, memory = "", ""
-    hint = "[голосовая просьба через ZEKI: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
+    hint = "[голосовая просьба через JES: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
     res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
     return {"ok": True, "reply": res.text, "done": res.ctx.calls}
@@ -479,8 +485,9 @@ class _Session:
             above, keep = (PHONE_COMPRESS_ABOVE, PHONE_COMPRESS_KEEP) if self.mode == "phone" else (COMPRESS_ABOVE, COMPRESS_KEEP)
             setup["contextWindowCompression"] = {"triggerTokens": base + above, "slidingWindow": {"targetTokens": base + keep}}
             # он говорит только по-русски, по-узбекски и по-английски: без подсказки тихую речь распознавание писало
-            # испанским («hermana») и латиницей («Dasshif»), а имя ZEKI — чем попало (проверено: 3.8-live принимает)
-            setup["inputAudioTranscription"] = {"languageCodes": list(SPEECH_LANGS), "customVocabulary": list(VOCABULARY)}
+            # испанским («hermana») и латиницей («Dasshif»), а имя JES — чем попало (проверено: 3.8-live принимает)
+            vocab = list(VOCABULARY) + [w for w in getattr(self, "extra_vocab", []) if w not in VOCABULARY]
+            setup["inputAudioTranscription"] = {"languageCodes": list(SPEECH_LANGS), "customVocabulary": vocab[:30]}
         self.nonblocking = level >= 1 and self.mode == "phone"
         if not self.nonblocking and tools:
             # модель не приняла «тихие» инструменты — объявляем их обычными
@@ -701,6 +708,11 @@ async def _pregreet(sess: "_Session", http, kick: str):  # noqa: ANN001
     return ws, down
 
 
+async def _not_prepared():  # noqa: ANN202
+    """Приветствие заранее не готовили — _live_ready подключится, когда возьмут трубку."""
+    raise LookupError("приветствие заранее не готовили")
+
+
 async def _live_ready(sess: "_Session", http, early: asyncio.Task, kick: str):  # noqa: ANN001
     """Живая сессия к моменту «трубку взяли». Приветствие уже готово — просто продолжаем.
     Gemini закрыл сессию, пока шли гудки (~30 с простоя), или не подключился — подключаемся заново:
@@ -799,11 +811,13 @@ async def _converse(sess: "_Session", http, call: dict[str, Any], early: asyncio
 
 
 async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wake: dict[str, Any] | None = None,
-              ring_seconds: int = 45, lang: str | None = None) -> LiveResult:
+              ring_seconds: int = 45, lang: str | None = None, pregreet: bool = True) -> LiveResult:
     """Позвонить и провести разговор целиком. Возвращает итог (что сказано, что сделано).
 
     Всё, что можно, — параллельно с гудками: набор номера стартует сразу, промпт собирается и
     Gemini готовит приветствие, пока телефон звонит. Взяли трубку — голос через полсекунды.
+    pregreet=False — приветствие не готовим заранее (повторные звонки будильника: 26.09 он не взял 20 звонков подряд,
+    и каждое заготовленное приветствие стоило ~$0.003–0.009); Gemini подключается, когда взяли трубку (~1 с).
     После дневного лимита — не звоним (кроме подъёма на фаджр)."""
     from . import billing
 
@@ -813,12 +827,13 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
         return LiveResult(error="daily_limit")
     meter = billing.start_session("wake" if mode == "wake" else "call")
     try:
-        return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang)
+        return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang, pregreet=pregreet)
     finally:
         billing.end_session(meter)
 
 
-async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] | None, ring_seconds: int, lang: str | None) -> LiveResult:
+async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] | None, ring_seconds: int, lang: str | None,
+               pregreet: bool = True) -> LiveResult:
     import aiohttp
 
     from . import billing
@@ -836,12 +851,13 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
     sess = _Session(profile, persona, mode=mode, system=system)
 
     async with aiohttp.ClientSession() as http:
-        early = asyncio.create_task(_pregreet(sess, http, KICK), name="live-connect")
+        early = asyncio.create_task(_pregreet(sess, http, KICK) if pregreet else _not_prepared(), name="live-connect")
         try:
             call = await dial
         except BaseException:
             await _close_pre(early)
             raise
+        sess.result.dialed = True
         if not call.get("answered"):
             sess.result.error = call.get("error")
             await _close_pre(early)
@@ -852,7 +868,7 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
 
 
 async def answer(profile: Profile) -> LiveResult:
-    """Он сам позвонил ZEKI в Telegram: сначала Gemini (приветствие готовится ~1 с), потом берём
+    """Он сам позвонил JES в Telegram: сначала Gemini (приветствие готовится ~1 с), потом берём
     трубку — он слышит голос сразу, а не тишину после ответа."""
     from . import billing
 

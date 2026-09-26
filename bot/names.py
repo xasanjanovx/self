@@ -19,18 +19,28 @@ _CYR = {
 _APOS = re.compile(r"['`ʻʼ’‘]")
 _NON_WORD = re.compile(r"[^a-z0-9 ]+")
 
-# Кто как может быть записан в контактах. Ключ — нормализованная форма.
+# Кто как может быть записан в контактах. Ключ — нормализованная форма. Первое слово группы — «корень»: по нему
+# запоминаем, кто у него «брат» (phone.learn_alias). С падежами из речи («маме», «брату», «akamga»).
+# 26.09: «ака»/«опа» убраны — это вежливые обращения («Abdulatif Aka»: у него ~180 таких контактов), и «брат»
+# звонил случайному «… Aka»; «ука» (младший брат) и «синглим» (младшая сестра) — отдельные группы.
 _KIN = [
-    ("мама", "мамочка", "мамуля", "мамa", "ойи", "ойижон", "онам", "она", "онажон", "ойим", "oyi", "oyijon", "ona", "onam", "onajon", "oyim",
-     "mama", "mamochka", "mom", "mother", "ойижоним", "онажоним", "onajonim", "oyijonim", "onajonimsiz"),
-    ("папа", "папочка", "дада", "дадажон", "ота", "отам", "отажон", "дадам", "ada", "adajon", "dada", "dadajon", "ota", "otam", "otajon",
-     "papa", "dad", "father", "дадажоним", "dadajonim", "otajonim", "adajonim"),
-    ("брат", "братишка", "ака", "акам", "акажон", "ука", "укам", "укажон", "aka", "akam", "akajon", "uka", "ukam", "ukajon", "brat", "brother"),
-    ("сестра", "сестрёнка", "опа", "опам", "опажон", "синглим", "сингил", "opa", "opam", "opajon", "singlim", "singil", "sestra", "sister"),
-    ("жена", "жёнушка", "аёлим", "хотиним", "рафиқам", "ayolim", "xotinim", "rafiqam", "jena", "wife", "жана"),
-    ("муж", "эрим", "turmush", "erim", "muj", "husband"),
-    ("бабушка", "буви", "бувижон", "momo", "buvi", "buvijon", "babushka", "grandma", "бувим", "buvim"),
-    ("дедушка", "бобо", "бобожон", "bobo", "bobojon", "dedushka", "grandpa", "бобом", "bobom"),
+    ("мама", "маме", "мамочка", "мамочке", "мамуля", "ойи", "ойижон", "онам", "она", "онажон", "ойим", "oyi", "oyijon", "ona", "onam",
+     "onajon", "oyim", "mama", "mamochka", "mom", "mother", "ойижоним", "онажоним", "onajonim", "oyijonim", "onamga", "oyimga",
+     "onajonimga", "oyijonimga", "онамга", "ойимга"),
+    ("папа", "папе", "папочка", "дада", "дадажон", "ота", "отам", "отажон", "дадам", "ada", "adajon", "dada", "dadajon", "ota", "otam",
+     "otajon", "papa", "dad", "father", "дадажоним", "dadajonim", "otajonim", "adajonim", "dadamga", "otamga", "dadajonimga", "дадамга",
+     "отамга"),
+    ("брат", "брату", "брата", "братом", "акам", "акажон", "акажоним", "akam", "akajon", "akajonim", "brat", "brother", "akamga",
+     "акамга", "akajonimga"),
+    ("братишка", "братишке", "укам", "укажон", "ukam", "ukajon", "ukajonim", "ukamga", "укамга", "младший брат"),
+    ("сестра", "сестре", "сестру", "опам", "опажон", "opam", "opajon", "opajonim", "sestra", "sister", "opamga", "опамга"),
+    ("сестрёнка", "сестрёнке", "синглим", "сингил", "singlim", "singil", "singlimga", "синглимга", "младшая сестра"),
+    ("жена", "жене", "жёнушка", "аёлим", "хотиним", "рафиқам", "ayolim", "xotinim", "rafiqam", "jena", "wife", "жана", "ayolimga",
+     "xotinimga"),
+    ("муж", "мужу", "эрим", "turmush", "erim", "muj", "husband", "erimga"),
+    ("бабушка", "бабушке", "буви", "бувижон", "momo", "buvi", "buvijon", "babushka", "grandma", "бувим", "buvim", "buvimga",
+     "buvajon", "buvajonim", "buvijonim", "бувижоним"),
+    ("дедушка", "дедушке", "бобо", "бобожон", "bobo", "bobojon", "dedushka", "grandpa", "бобом", "bobom", "bobomga", "bobojonim"),
 ]
 
 
@@ -44,6 +54,16 @@ def norm(value: Any) -> str:
 
 
 _KIN_GROUPS = [{norm(w) for w in group} for group in _KIN]
+_KIN_ROOTS = [norm(group[0]) for group in _KIN]
+
+
+def kin_root(value: Any) -> str | None:
+    """«брату», «akamga», «Акам» → «brat» (корень группы); не родство → None."""
+    n = norm(value)
+    for root, group in zip(_KIN_ROOTS, _KIN_GROUPS):
+        if n in group:
+            return root
+    return None
 
 
 def expand(queries: Iterable[Any]) -> list[tuple[str, float]]:
@@ -127,19 +147,34 @@ def is_kin(queries: Iterable[Any]) -> bool:
     return any(norm(q) in group for q in queries for group in _KIN_GROUPS)
 
 
+AMBIGUOUS_GAP = 0.05   # двое почти одинаково похожи — и частота звонков их не развела: лучше коротко спросить
+CLEAR_SCORE = 0.9      # уверенно (можно запомнить, как он назвал человека)
+
+
+def frequency_boost(calls: int) -> float:
+    """Кому он звонит чаще — тот вероятнее: 1 звонок +0.03, 3 — +0.06, 10 — +0.1, 30+ — +0.12."""
+    if calls <= 0:
+        return 0.0
+    import math
+
+    return round(min(0.12, 0.03 * math.log2(1 + calls)), 3)
+
+
 def pick(queries: Iterable[Any], items: list[dict[str, Any]], *, name_keys: tuple[str, ...] = ("name",),
          boosts: dict[str, float] | None = None, alias: str | None = None) -> dict[str, Any]:
-    """Всегда один лучший человек — без переспросов (он просил не спрашивать «кому именно»).
+    """Один лучший человек. {"match", "score", "others", "clear", "ambiguous": [второй]} | {}.
 
     alias — как он уже называл этого человека раньше («мама» → «ONAJONIM»), выигрывает сразу;
     boosts — надбавка по нормализованному имени (кому чаще звонит / с кем недавно переписывался);
-    на родственные слова организации из книги отодвигаем назад. {"match", "score", "others"} | {}."""
+    на родственные слова организации из книги отодвигаем назад.
+    ambiguous — второй почти так же похож (разница < AMBIGUOUS_GAP с учётом частоты): 26.09 он выбрал «звонить тому,
+    кому чаще, а если оба редкие — коротко спросить» (раньше — всегда первому, и «Сирожбек» уходил к «Сирожиддину»)."""
     queries = [q for q in queries if q]
     if alias:
         a = norm(alias)
         for item in items:
             if any(norm(item.get(k)) == a for k in name_keys if item.get(k)):
-                return {"match": item, "score": 1.0, "others": [], "learned": True}
+                return {"match": item, "score": 1.0, "others": [], "learned": True, "clear": True}
     variants = expand(queries)
     kin = is_kin(queries)
     boosts = boosts or {}
@@ -157,8 +192,17 @@ def pick(queries: Iterable[Any], items: list[dict[str, Any]], *, name_keys: tupl
         return {}
     scored.sort(key=lambda s: -s[0])
     first = items[scored[0][1]]
-    others = [str(items[i].get(name_keys[0]) or "") for _, i in scored[1:4]]
-    return {"match": first, "score": round(scored[0][0], 2), "others": others}
+    top = scored[0][0]
+    # тёзки с одинаковым именем (три «ONAJONIM») — это один человек, не вопрос
+    first_name = norm(first.get(name_keys[0]))
+    rivals = [(s, i) for s, i in scored[1:] if norm(items[i].get(name_keys[0])) != first_name]
+    second = rivals[0][0] if rivals else 0.0
+    others = [str(items[i].get(name_keys[0]) or "") for _, i in rivals[:3]]
+    out: dict[str, Any] = {"match": first, "score": round(top, 2), "others": others,
+                           "clear": top >= CLEAR_SCORE and top - second >= CLEAR_GAP}
+    if rivals and top - second < AMBIGUOUS_GAP:
+        out["ambiguous"] = items[rivals[0][1]]
+    return out
 
 
 _PHONE_RE = re.compile(r"^\+?[\d\s\-()]{5,}$")
@@ -173,4 +217,4 @@ def as_phone_number(value: Any) -> str | None:
     return digits if len(digits.lstrip("+")) >= 5 else None
 
 
-__all__ = ["norm", "expand", "score", "resolve", "pick", "is_kin", "as_phone_number"]
+__all__ = ["kin_root", "frequency_boost", "norm", "expand", "score", "resolve", "pick", "is_kin", "as_phone_number"]

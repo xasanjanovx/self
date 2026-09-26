@@ -131,7 +131,7 @@ def report_failure(reason: str) -> None:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
                 text="💳 Alibaba Model Studio", url="https://modelstudio.console.alibabacloud.com/")]])
             for uid in sorted(settings.allowed_telegram_ids)[:1]:
-                await bot_instance().send_message(uid, "🟠 <b>Qwen не подключился</b> — ZEKI говорит через Gemini.\n"
+                await bot_instance().send_message(uid, "🟠 <b>Qwen не подключился</b> — JES говорит через Gemini.\n"
                                                   f"Причина: <code>{reason[:200]}</code>", reply_markup=kb)
         except Exception:
             logger.warning("qwen: не отправил предупреждение", exc_info=True)

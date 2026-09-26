@@ -1,4 +1,4 @@
-"""HTTP API для приложения «ZEKI» на телефоне (jarvis-android).
+"""HTTP API для приложения «JES» на телефоне (jarvis-android).
 
 Поднимается внутри процесса бота, если задан JARVIS_TOKEN (порт JARVIS_PORT, по умолчанию 8097).
 Снаружи — nginx с HTTPS. Все запросы — с заголовком `Authorization: Bearer <JARVIS_TOKEN>`;
@@ -7,10 +7,10 @@
   GET  /jarvis/v1/ping          — жив ли сервер, подключён ли Telegram, сколько контактов
   POST /jarvis/v1/voice         — {"audio": base64 WAV | "text": str, "device": {...}} →
                                    {"transcript", "say", "actions": [...], "listen", "need_contacts"}
-  POST /jarvis/v1/warm          — услышал «ZEKI»: прогреть кэши, пока человек договаривает
+  POST /jarvis/v1/warm          — услышал «JES»: прогреть кэши, пока человек договаривает
   GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
-  POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «ZEKI» (защита от чужих и ТВ)
+  POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «JES» (защита от чужих и ТВ)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
   POST /jarvis/v1/contacts      — {"contacts": [{"n": имя, "p": [номера]}]} — телефонная книга
@@ -48,12 +48,12 @@ _warm: asyncio.Task | None = None
 _lock = asyncio.Lock()
 
 _STT_PROMPT = (
-    "Это голосовая команда личному ассистенту «ZEKI» на телефоне. Расшифруй речь дословно. "
+    "Это голосовая команда личному ассистенту «JES» на телефоне. Расшифруй речь дословно. "
     "Язык — русский или узбекский (узбекский пиши латиницей), бывает смесь. Имена и названия пиши как слышишь. "
     "Верни только текст. Если речи нет или она неразборчива — верни ровно: <пусто>"
 )
-# имя ассистента — ZEKI (читается «Зеки», с 26.09.2026); прежние имена не будят и не срезаются
-_WAKE_PREFIX = re.compile(r"^\s*((эй|хей|hey|ey|ой)[\s,!.]*)?(зеки|зэки|зеке|зики|зыки|зыкий|зи кей|zeki|zeky)"
+# имя ассистента — JES (читается «Джес», с 26.09.2026, 2.1); прежние имена не будят и не срезаются
+_WAKE_PREFIX = re.compile(r"^\s*((эй|хей|hey|ey|ой)[\s,!.]*)?(джесс?|джейс|джез|жес|jess?|jez)"
                           r"[\s,!.:—-]*", re.IGNORECASE)
 
 
@@ -162,15 +162,15 @@ async def live(request: web.Request) -> web.WebSocketResponse:
 
 
 _WAKE_PROMPT = (
-    "На записи человек, возможно, зовёт голосового ассистента по имени «ZEKI» (читается «Зеки»). "
+    "На записи человек, возможно, зовёт голосового ассистента по имени «JES» (читается «Джес»). "
     "Язык — русский или узбекский. Расшифруй запись дословно и реши, прозвучало ли имя как обращение. "
-    "Похожие слова (реки, веки, зайки, Заки, Закиров, секи, звонки) и прежние имена «Джарвис», «Нурай» — это НЕ имя. "
+    "Похожие слова (жест, жесть, есть, здесь, джаз, Джек, джинсы) и прежние имена «Джарвис», «Нурай», «Зеки» — это НЕ имя. "
     'Верни JSON: {"name": true/false, "text": "дословно", "after": "слова после имени (пусто, если ничего)"}'
 )
 
 
 async def wake_check(request: web.Request) -> web.Response:
-    """Телефон решил, что услышал «ZEKI», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова.
+    """Телефон решил, что услышал «JES», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова.
 
     Голос (свой отпечаток, ~0.05 с) и слово (локальный распознаватель, ~0.05–0.1 с) — параллельно; Gemini — только
     если распознаватель недоступен или ничего не расслышал. Пока проверяем, сервер уже готовит разговор с Gemini
@@ -200,7 +200,7 @@ async def wake_check(request: web.Request) -> web.Response:
     if heard is not None and (heard["text"] or data.get("confident")):
         ok = heard["name"] or (not heard["text"] and bool(data.get("confident")))
         if ok and uid is not None:
-            voiceprint.remember(uid, voice.get("_emb"))  # его «ZEKI» — образец голоса для фраз этого разговора
+            voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
         logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
                     voice.get("score"), voice.get("z"), heard["ms"])
         if not ok:
@@ -227,7 +227,7 @@ async def _no_voice() -> dict[str, Any]:
 
 
 def _reject(uid: int | None) -> None:
-    """Не «ZEKI» — заготовленный разговор с Gemini не нужен."""
+    """Не «JES» — заготовленный разговор с Gemini не нужен."""
     if uid is not None:
         from . import phone_live
 
@@ -335,7 +335,7 @@ async def tg_status(request: web.Request) -> web.Response:
 
 
 async def voice_enroll(request: web.Request) -> web.Response:
-    """Запись голоса из приложения: 10 раз «ZEKI» + ~40 с чтения → отпечаток и порог «только мой голос»."""
+    """Запись голоса из приложения: 10 раз «JES» + ~40 с чтения → отпечаток и порог «только мой голос»."""
     from . import voiceprint
 
     uid = owner_id()

@@ -64,7 +64,7 @@ def test_phone_number_detection():
 
 
 # ------------------------------------------------------------------ yes / no / transcript
-@pytest.mark.parametrize("text", ["Да", "да, отправь", "Ha", "ok", "Давай!", "Зеки, да"])
+@pytest.mark.parametrize("text", ["Да", "да, отправь", "Ha", "ok", "Давай!", "Джес, да"])
 def test_is_yes(text):
     assert phone.is_yes(text) and not phone.is_no(text)
 
@@ -80,12 +80,13 @@ def test_long_phrases_are_not_short_answers(text):
 
 
 def test_clean_transcript():
-    assert clean_transcript("Эй, Зеки, позвони маме.") == "позвони маме."
-    assert clean_transcript("Hey Zeki what time") == "what time"
+    assert clean_transcript("Эй, Джес, позвони маме.") == "позвони маме."
+    assert clean_transcript("Hey Jes what time") == "what time"
     assert clean_transcript("<пусто>") == ""
-    assert clean_transcript("Зеки") == ""
+    assert clean_transcript("Джес") == ""
     assert clean_transcript("Джарвис, позвони маме") == "Джарвис, позвони маме"  # прежнее имя — просто слово
-    assert clean_transcript("Зеки, позвони маме") == "позвони маме" and clean_transcript("эй зеки открой ютуб") == "открой ютуб"
+    assert clean_transcript("Джесс, позвони маме") == "позвони маме" and clean_transcript("эй джес открой ютуб") == "открой ютуб"
+    assert clean_transcript("Зеки, позвони маме") == "Зеки, позвони маме"
 
 
 # ------------------------------------------------------------------ declarations
@@ -155,7 +156,7 @@ def test_call_without_contacts_asks_phone_to_upload(uid):
 def test_alarm_and_bad_alarm(uid):
     turn = phone.PhoneTurn(uid=uid)
     _run(turn, "разбуди в 6:30 по будням", _call("set_alarm", time="6:30", days=["mon", "fri"]), _say("Поставил."))
-    assert turn.actions == [{"type": "alarm", "hour": 6, "minute": 30, "label": "ZEKI", "days": [2, 6]}]
+    assert turn.actions == [{"type": "alarm", "hour": 6, "minute": 30, "label": "JES", "days": [2, 6]}]
     turn2 = phone.PhoneTurn(uid=uid)
     _run(turn2, "будильник", _call("set_alarm", time="25:00"), _say("Во сколько?"))
     assert turn2.actions == []
@@ -247,12 +248,43 @@ def test_quick_reply_for_pending_message_is_the_confirmation_question(uid, monke
     assert result.text == "Отправить в Telegram — Азиз: «Ок»?" and turn.listen
 
 
-def test_similar_contacts_pick_best_without_asking(uid):
-    """Он просил не переспрашивать «кому именно»: похожих несколько — звоним лучшему."""
+def test_similar_rare_contacts_ask_frequent_one_wins(uid):
+    """26.09 его выбор: двое почти одинаковых — звоним тому, кому он чаще звонит; оба редкие — коротко спросить."""
     phone.save_contacts(uid, [{"n": "Ойижон", "p": ["1"]}, {"n": "Мама Beeline", "p": ["2"]}])
+    found = phone.find_contact(uid, "мама", [])
+    assert found["ask"] == ["Ойижон", "Мама Beeline"]
+    assert phone.ask_which(found)["ask_exactly"] == "Ойижон или Мама Beeline?"
+    phone.save_contacts(uid, [{"n": "Ойижон", "p": ["1"], "c": 25}, {"n": "Мама Beeline", "p": ["2"]}])
     turn = phone.PhoneTurn(uid=uid)
     _run_quick(turn, "позвони маме", _call("phone_call", who="мама"), _say("Звоню."))
-    assert len(turn.actions) == 1 and turn.actions[0]["type"] == "call"
+    assert len(turn.actions) == 1 and turn.actions[0]["type"] == "call" and turn.actions[0]["name"] == "Ойижон"
+
+
+def test_brother_is_not_any_aka(uid):
+    """«брат» звонил случайному «… Aka» (у него ~180 таких контактов): «ака» — вежливость, а «акам» — брат."""
+    phone.save_contacts(uid, [{"n": "Mashxurbek Aka ISH", "p": ["1"]}, {"n": "ABDULATIF AKA", "p": ["2"]},
+                              {"n": "SIROJBEK AKAM", "p": ["3"]}, {"n": "Sirojiddin Aka", "p": ["4"]}])
+    assert phone.find_contact(uid, "брат", ["akam"])["match"]["name"] == "SIROJBEK AKAM"
+    # запомнил «брат» по корню — «брату», «akamga» и «акам» ведут туда же
+    phone.learn_alias(uid, "phone", "брату", "SIROJBEK AKAM")
+    for who in ("брат", "akamga", "Акам"):
+        assert phone.find_contact(uid, who, [])["match"]["name"] == "SIROJBEK AKAM"
+    assert "Родные: brat — SIROJBEK AKAM." in phone.people_line(uid)
+
+
+def test_unclear_pick_is_not_learned(uid):
+    """Неуверенный выбор не запоминаем — иначе ошибка закрепляется навсегда («srachbek aka» → ABDULATIF AKA)."""
+    phone.save_contacts(uid, [{"n": "ABDULATIF AKA", "p": ["1"]}, {"n": "SIROJBEK AKAM", "p": ["2"]}])
+    turn = phone.PhoneTurn(uid=uid)
+    _run_quick(turn, "позвони Срачбек ака", _call("phone_call", who="Срачбек ака"), _say("Звоню."))
+    assert "srachbek aka" not in phone.aliases(uid)["phone"]
+
+
+def test_frequency_boost_grows_slowly():
+    from bot import names
+
+    assert names.frequency_boost(0) == 0 and names.frequency_boost(1) == 0.03
+    assert names.frequency_boost(3) == 0.06 and names.frequency_boost(100) == 0.12
 
 
 def test_mama_prefers_person_over_organization_and_learns(uid):

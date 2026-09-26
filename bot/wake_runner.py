@@ -96,7 +96,7 @@ async def plan_for(profile: Profile, day: date | None = None) -> tuple[wake_mod.
 
 # ------------------------------------------------------------------ голос
 async def _say(text: str) -> bytes | None:
-    """Фраза ZEKI → PCM (24 кГц, моно) для проигрывания в звонке."""
+    """Фраза JES → PCM (24 кГц, моно) для проигрывания в звонке."""
     if not text.strip():
         return None
     try:
@@ -132,15 +132,37 @@ async def _speech_file(text: str) -> str | None:
 
 
 # ------------------------------------------------------------------ разговор в трубке
+LOUD_TIP_AFTER = 5  # столько звонков подряд без ответа — один раз за утро: как сделать звонок громким
+LOUD_TIP = {
+    "ru": ("🔔 Будильник звонил уже {n} раз — трубку не взяли. Громкость звонка Telegram сервер изменить не может, "
+           "это настраивается на телефоне один раз:\n"
+           "1) Громкость звонка — выше середины (кнопка громкости → «Звонок»).\n"
+           "2) Ночной режим «Не беспокоить» глушит Telegram: добавьте Telegram в исключения "
+           "(Настройки телефона → Звук → Не беспокоить → Приложения / Исключения).\n"
+           "3) Добавьте JES в контакты и включите в Telegram уведомления о звонках и работу в фоне.\n"
+           "4) Можно поставить на звонки JES отдельную громкую мелодию (профиль JES → Уведомления).\n"
+           "Напишите «проверь будильник» — позвоню прямо сейчас, как утром."),
+    "uz": ("🔔 Budilnik {n} marta qo'ng'iroq qildi — javob bo'lmadi. Telegram qo'ng'irog'i ovozini server o'zgartira olmaydi, "
+           "buni telefonda bir marta sozlash kerak:\n"
+           "1) Qo'ng'iroq ovozi — o'rtachadan baland (ovoz tugmasi → «Qo'ng'iroq»).\n"
+           "2) Tungi «Bezovta qilmang» rejimi Telegram'ni o'chiradi: Telegram'ni istisnolarga qo'shing "
+           "(Telefon sozlamalari → Ovoz → Bezovta qilmang → Ilovalar / Istisnolar).\n"
+           "3) JESni kontaktlarga qo'shing va Telegram'da qo'ng'iroq bildirishnomalari hamda fon rejimiga ruxsat bering.\n"
+           "4) JES qo'ng'iroqlariga alohida baland ohang qo'yish mumkin (JES profili → Bildirishnomalar).\n"
+           "«Budilnikni tekshir» deb yozing — hozir ertalabgidek qo'ng'iroq qilaman."),
+}
+PREGREET_ATTEMPTS = 2  # первые звонки утра — приветствие готово к моменту «взял трубку»; дальше — без заготовки (экономия)
+
+
 async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mod.DayPlan,
-                       minutes_left: int | None) -> dict[str, Any]:
+                       minutes_left: int | None, attempt: int = 1) -> dict[str, Any]:
     """Звонок-разговор на Gemini Live: живой голос, будит, пока не услышит, что встал."""
     from . import live_call
 
     from . import islam_quiz
 
     quiz = islam_quiz.for_day(profile.telegram_id, plan.day)
-    live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds),
+    live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds), pregreet=attempt <= PREGREET_ATTEMPTS,
                                wake={"takbir": plan.takbir, "minutes_left": minutes_left,
                                      "quiz": islam_quiz.prompt_block(quiz), "today": await _today_line(profile)})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
@@ -149,7 +171,7 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     state.transcript = list(live.transcript)
     if live.snooze_minutes:
         await snooze(profile, live.snooze_minutes)
-    if live.model:  # до Gemini Live достучались — итог звонка берём оттуда, даже если трубку не взяли
+    if live.model or live.dialed:  # звонок состоялся (взяли или нет) — итог оттуда; запасной путь — только при сбое Gemini
         return {"answered": live.answered, "error": live.error, "state": state, "quiz": quiz}
     # Gemini Live недоступен — запасной путь: старый пошаговый разговор
     logger.warning("wake: live недоступен (%s), пошаговый режим", live.error)
@@ -199,7 +221,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     result: dict[str, Any] = {}
     if s.call_enabled and caller.available():
         if s.talk:
-            result = await _dialog_call(profile, s, plan, minutes_left)
+            result = await _dialog_call(profile, s, plan, minutes_left, attempts)
             answered, call_error = bool(result.get("answered")), result.get("error")
             dstate = result.get("state")
             confirmed = bool(getattr(dstate, "confirmed", False))
@@ -245,6 +267,13 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             from . import call_assistant
 
             await call_assistant.helper_intro(profile)  # один раз: чат с Джарвисом → «Добавить в контакты»
+        if call_error == "no_answer" and attempts == LOUD_TIP_AFTER:
+            # 26.09 будильник звонил 20 раз, а он не слышал: без приложения громкость — только его настройки телефона
+            try:
+                tip = LOUD_TIP.get(profile.lang, LOUD_TIP["ru"]).format(n=attempts)
+                await bot.send_message(uid, tip, disable_notification=False)
+            except Exception:
+                logger.warning("wake loud tip failed for %s", uid, exc_info=True)
     if confirmed:
         await mark_awake(bot, profile, source="call")  # подтвердил голосом — больше не звоним
         quiz = (result or {}).get("quiz") if s.talk else None

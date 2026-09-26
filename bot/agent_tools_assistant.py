@@ -1,4 +1,4 @@
-"""Инструменты «ZEKI» уровня ассистента: заметки («запомни…»), задачи, цели
+"""Инструменты «JES» уровня ассистента: заметки («запомни…»), задачи, цели
 накоплений, сроки возврата долгов. Регистрируются в общем реестре `agent_tools.TOOLS`
 (модуль импортируется в конце bot/agent_tools.py).
 """
@@ -497,7 +497,7 @@ async def _get_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
        "takbir_time": P("STRING", "во сколько такбир (HH:MM) — пересчитает поправку к азану"),
        "takbir_offset_min": P("NUMBER", "минут между азаном фаджра и такбиром"),
        "days": ARR({"type": "NUMBER"}, "дни недели 1=пн … 7=вс"), "call_enabled": P("BOOLEAN", "звонить или только писать"),
-       "voice_lang": P("STRING", "на каком языке ZEKI говорит в трубке: uz | ru | en", enum=["uz", "ru", "en"]),
+       "voice_lang": P("STRING", "на каком языке JES говорит в трубке: uz | ru | en", enum=["uz", "ru", "en"]),
        "talk": P("BOOLEAN", "живой разговор в трубке (true) или просто сказать и положить трубку (false)"),
        "skip_until": DATE, "skip_days": P("NUMBER", "не будить столько дней подряд, начиная с сегодня")})
 async def _set_wake(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:

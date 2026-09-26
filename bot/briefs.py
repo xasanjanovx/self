@@ -171,7 +171,8 @@ async def evening_brief(profile: Profile) -> str | None:
         return (f"🌙 {'Bugun yozilmagan' if lang == 'uz' else 'Сегодня не записано'}: <b>{what}</b>.\n"
                 + ("Bir qatorda yuboring — 10 soniya: «tushlik 40000», «osh yedim»." if lang == "uz"
                    else "Скинь одной строкой — это 10 секунд: «обед 40000», «съел плов».")
-                + "\n".join(await goal_evening_lines(profile)))
+                + "\n".join(await goal_evening_lines(profile))
+                + "".join(f"\n{line}" for line in ai_spend_lines(profile)))
     totals = nutri.totals(logs)
     target = int((nutrition_profile or {}).get("daily_calories") or 0)
     lines = [f"🌙 <b>{'Kun yakuni' if lang == 'uz' else 'Итог дня'}</b>",
@@ -181,7 +182,27 @@ async def evening_brief(profile: Profile) -> str | None:
     if nutrition_profile:
         lines.append(f"{pe.NUTRITION} {int(totals['calories'])}" + (f" / {target}" if target else "") + f" {'kkal' if lang == 'uz' else 'ккал'} · {int(totals['meals'])} {'qabul' if lang == 'uz' else 'приёмов'}")
     lines.extend(await goal_evening_lines(profile))
+    lines.extend(ai_spend_lines(profile))
     return "\n".join(lines)
+
+
+def ai_spend_lines(profile: Profile) -> list[str]:
+    """Владельцу — сколько сегодня ушло с его Google AI Studio (Gemini) и за месяц. Google не даёт узнать это по API,
+    поэтому — по подсчёту бота (billing.py: каждый ответ Gemini × цены), остаток — если он называл баланс."""
+    from . import access, billing
+
+    if not access.is_owner(profile.telegram_id):
+        return []
+    try:
+        s = billing.status()
+    except Exception:
+        return []
+    uz = profile.lang == "uz"
+    line = (f"🤖 Google AI Studio: {'bugun' if uz else 'сегодня'} <b>${s['spent_today_usd']:.2f}</b> · "
+            f"{'shu oy' if uz else 'за месяц'} ${s['spent_month_usd']:.2f}")
+    if s.get("balance_usd") is not None:
+        line += f" · {'qoldiq' if uz else 'остаток'} ~${s['balance_usd']:.2f}"
+    return [line]
 
 
 async def goal_evening_lines(profile: Profile) -> list[str]:

@@ -1,4 +1,4 @@
-"""Живой разговор с ZEKI на телефоне (как Gemini Live): телефон ⇄ WebSocket ⇄ Gemini Live.
+"""Живой разговор с JES на телефоне (как Gemini Live): телефон ⇄ WebSocket ⇄ Gemini Live.
 
 Тот же голос, характер и инструменты, что в звонках бота (bot/live_call.py, режим "phone"), плюс
 телефонные действия (bot/phone.py): звонок, SMS, Telegram от имени владельца, будильник, таймер,
@@ -15,7 +15,7 @@
     {"type":"action_error","text":…} — действие на телефоне не удалось; {"type":"bye"}
     {"type":"image",…} — кадр камеры/экрана (device.frames_on_request — только в ответ на frame_request)
   сервер → телефон
-    бинарные кадры — голос ZEKI, PCM s16le 24 кГц моно
+    бинарные кадры — голос JES, PCM s16le 24 кГц моно
     {"type":"ready"} {"type":"user","text":…} {"type":"jarvis","text":…} {"type":"turn_complete"} {"type":"interrupted"}
     {"type":"action","action":{…}} {"type":"status","text":…} {"type":"need_contacts"} {"type":"end"} {"type":"error","text":…}
     {"type":"frame_request"} — пришли один свежий кадр камеры/экрана
@@ -47,6 +47,13 @@ INPUT_RATE = 16000
 # он выбрал: ждать 1 секунду тишины — не обрывать на полуслове, если задумался посреди фразы
 VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 1000)
 OWNER_STRICT = (os.getenv("PHONE_OWNER_STRICT") or "1") != "0"  # «только мой голос» и посреди разговора
+# мгновенные команды (bot/instant.py): фразу держим, пока он не замолчит, — локальный распознаватель и разбор ~0.1 с;
+# команда — выполняем сами, без Gemini; нет — отдаём фразу Gemini целиком (задержка ответа почти та же: Gemini всё
+# равно ждёт секунду тишины)
+INSTANT = (os.getenv("PHONE_INSTANT") or "1") != "0"
+INSTANT_SILENCE_S = 0.55   # столько тишины после речи — фраза кончилась
+INSTANT_MIN_S = 0.35       # короче — это не команда
+INSTANT_MAX_S = 6.0        # длиннее — это разговор, не команда: сразу в Gemini
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
 IDLE_END_S = 15.0        # он выбрал: 15 с тишины — разговор закрывается
 IDLE_END_ECONOMY = 8.0   # после дневного лимита — быстрее
@@ -114,7 +121,7 @@ class SpeechGate:
 
 class OwnerGate:
     """«Только мой голос» посреди разговора: начало каждой фразы (~1.2 с) сверяем с его отпечатком; явно чужой голос
-    (телевизор, кто-то рядом, эхо самого ZEKI) в Gemini не уходит — не оплачивается и не вызывает ответ.
+    (телевизор, кто-то рядом, эхо самого JES) в Gemini не уходит — не оплачивается и не вызывает ответ.
     Его фразы уходят целиком: задержка — только в начале (конец фразы Gemini слышит вовремя)."""
 
     CHECK_S = 1.2
@@ -234,6 +241,11 @@ class PhoneLive(_Session):
         self.jarvis_lines: list[str] = []
         self.gate = SpeechGate()
         self.owner = OwnerGate(self.uid, enabled=False)   # включает run(), если есть отпечаток голоса
+        self.instant_on = INSTANT
+        self.instant_done = 0
+        self._ibuf: list[bytes] = []
+        self._ibuf_s = 0.0
+        self._ipass = False                    # длинная фраза уже ушла в Gemini — её хвост тоже прямо туда
         self.idle_limit = IDLE_END_ECONOMY if billing.over_limit() else IDLE_END_S
         self._last_model_audio = time.monotonic()
         self._ended = False
@@ -254,7 +266,7 @@ class PhoneLive(_Session):
         if self.vad_tuned:
             vad: dict[str, Any] = {"endOfSpeechSensitivity": "END_SENSITIVITY_HIGH", "silenceDurationMs": VAD_SILENCE_MS, "prefixPaddingMs": 200}
             if self.turn.device.get("duplex"):
-                # телефон шлёт микрофон и пока ZEKI говорит (эхоподавление): остаток эха не должен его перебивать
+                # телефон шлёт микрофон и пока JES говорит (эхоподавление): остаток эха не должен его перебивать
                 vad["startOfSpeechSensitivity"] = "START_SENSITIVITY_LOW"
             else:
                 # он говорит тихо — пусть Gemini слышит и тихую речь (чужие голоса до Gemini не доходят: OwnerGate)
@@ -298,6 +310,61 @@ class PhoneLive(_Session):
     async def say_text(self, gem, text: str) -> None:  # noqa: ANN001
         await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}})
 
+    async def _instant(self, gem, chunks: list[bytes]) -> list[bytes]:  # noqa: ANN001
+        """Фраза целиком — сначала на мгновенную команду («позвони маме», «фонарик»); не команда — в Gemini одним куском."""
+        if not self.instant_on:
+            return chunks
+        if self._ipass:
+            if not self.gate.active:
+                self._ipass = False
+            return chunks
+        if chunks:
+            self._ibuf.extend(chunks)
+            self._ibuf_s += sum(len(c) for c in chunks) / 2 / INPUT_RATE
+        if not self._ibuf:
+            return []
+        quiet = time.monotonic() - self.gate.last_voice
+        too_long = self._ibuf_s >= INSTANT_MAX_S
+        if self.gate.active and quiet < INSTANT_SILENCE_S and not too_long:
+            return []  # фраза ещё идёт
+        audio, self._ibuf, self._ibuf_s = b"".join(self._ibuf), [], 0.0
+        if too_long:
+            self._ipass = self.gate.active
+            return [audio]
+        if len(audio) / 2 / INPUT_RATE >= INSTANT_MIN_S and await self._try_instant(gem, audio):
+            return []
+        return [audio]
+
+    async def _try_instant(self, gem, audio: bytes) -> bool:  # noqa: ANN001
+        from . import instant, wakeword
+
+        try:
+            heard = await wakeword.check(pcm_to_wav(audio, INPUT_RATE))
+        except Exception:
+            logger.warning("instant: распознаватель", exc_info=True)
+            return False
+        if not heard or not heard.get("text"):
+            return False
+        cmd = instant.parse(heard["after"] if heard.get("name") else heard["text"])
+        if cmd is None:
+            return False
+        if self.turn.device.get("locked") and cmd.tool in NEED_UNLOCK:
+            return False  # после разблокировки Gemini сам доделает — ему нужна фраза
+        logger.info("phone live: мгновенная команда «%s» → %s %s (%s мс)", heard["text"], cmd.tool,
+                    json.dumps(cmd.args, ensure_ascii=False), heard.get("ms"))
+        result = await exec_tool(self, cmd.tool, cmd.args)
+        if not instant.succeeded(result):
+            logger.info("phone live: мгновенная команда не вышла (%s) — фразу решает Gemini", str(result)[:160])
+            return False
+        self.instant_done += 1
+        self.user_lines.append(heard["text"])
+        await self.to_phone({"type": "user", "text": heard["text"], "final": True})
+        await self.to_phone({"type": "turn_complete"})  # телефон не ждёт ответа — Gemini молчит
+        # если разговор продолжится — Gemini знает, что уже сделано (текст без ответа: ничего не стоит, пока он молчит)
+        note = f"[Он сказал: «{heard['text']}» — уже выполнено ({cmd.tool}). Не повторяй и не комментируй.]"
+        await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
+        return True
+
     async def pump_phone(self, gem) -> None:  # noqa: ANN001
         """Телефон → Gemini: микрофон и служебные сообщения."""
         import aiohttp
@@ -308,6 +375,7 @@ class PhoneLive(_Session):
                 # и только его речь (OwnerGate): телевизор и чужие голоса — нет
                 was_active = self.gate.active
                 chunks = await self.owner.filter(self.gate.feed(bytes(msg.data)), self.gate.active)
+                chunks = await self._instant(gem, chunks)
                 for chunk in chunks:
                     await self.to_gemini(gem, {"realtimeInput": {"audio": {"data": base64.b64encode(chunk).decode(),
                                                                            "mimeType": f"audio/pcm;rate={INPUT_RATE}"}}})
@@ -513,7 +581,7 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
 
 # ------------------------------------------------------------------ phone_task: редкое на телефоне — делает Flash-Lite
 PHONE_TASK_SYSTEM = (
-    "Ты исполнитель команд на Android-телефоне владельца для голосового ассистента ZEKI. Выполни просьбу своими инструментами "
+    "Ты исполнитель команд на Android-телефоне владельца для голосового ассистента JES. Выполни просьбу своими инструментами "
     "сразу, без уточнений: кому звонить/писать — инструмент сам выбирает лучшее совпадение, в variants — другие написания и "
     "родственные слова (мама → ойи, онам, ona, oyijon). Текст сообщения — от первого лица владельца, как он продиктовал "
     "(узбекский — латиницей). Если инструмент вернул ask_exactly — больше ничего не делай. В конце — одна короткая фраза-итог "
@@ -577,9 +645,10 @@ async def _build(uid: int, device: dict[str, Any]) -> tuple[PhoneLive, Any, Any,
     profile, persona, memory = await asyncio.gather(profile_by_id(uid), services.persona(uid), extra.memory_prompt(uid))
     prepared = time.monotonic() - started
     # данные бота (траты, задачи) в промпт не кладём — они оплачивались бы в каждом ответе; нужны — инструменты и bot_task
-    system = live_call.system_instruction(profile, persona, mode="phone", memory=memory)
+    system = live_call.system_instruction(profile, persona, mode="phone", memory=memory, people=phone.people_line(uid))
     system += phone.device_prompt(device) + billing.voice_note()
     sess = PhoneLive(profile, persona, system=system, phone_ws=None, device=dict(device))
+    sess.extra_vocab = phone.people_vocabulary(uid)  # имена родных и частых — распознаванию речи
     http = aiohttp.ClientSession()
     try:
         gem = await sess.connect(http)
@@ -601,7 +670,7 @@ async def _close_built(task: asyncio.Task) -> None:
 
 
 def prewarm(uid: int) -> None:
-    """Начать собирать разговор, пока проверяется «ZEKI». Телефон ещё ни разу не подключался — не с чем.
+    """Начать собирать разговор, пока проверяется «JES». Телефон ещё ни разу не подключался — не с чем.
     Экономный режим начинается без Gemini Live — заготовка не нужна."""
     device = _last_device.get(uid)
     if device is None or _modes.get(uid, "live") != "live" or not billing.live_allowed("phone"):
@@ -618,7 +687,7 @@ def prewarm(uid: int) -> None:
 
 
 def discard(uid: int) -> None:
-    """Заготовка не пригодилась (не «ZEKI» или телефон так и не подключился)."""
+    """Заготовка не пригодилась (не «JES» или телефон так и не подключился)."""
     item = _warm.pop(uid, None)
     if item is None:
         return
@@ -696,7 +765,7 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
     sess.phone_ws = phone_ws
     sess.frames_on_request = bool(device.get("frames_on_request"))
     # «только мой голос» строго (он выбрал 26.09): и посреди разговора чужие голоса и телевизор в Gemini не уходят.
-    # Раньше отсекал его самого (нормировка по «толпе») — теперь главное сравнение с его же «ZEKI» из этого разговора
+    # Раньше отсекал его самого (нормировка по «толпе») — теперь главное сравнение с его же «JES» из этого разговора
     from . import voiceprint
 
     sess.owner.enabled = OWNER_STRICT and voiceprint.enrolled(uid)

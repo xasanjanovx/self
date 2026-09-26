@@ -1,6 +1,6 @@
 """Звонок в Telegram от аккаунта-помощника (userbot) — Telethon + pytgcalls.
 
-Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «ZEKI»: у тебя
+Обычный бот звонить не умеет, поэтому звонит отдельный аккаунт «JES»: у тебя
 на экране обычный входящий Telegram-звонок, в трубке — синтезированный голос.
 
 Включается, только если в .env заданы TG_CALLER_API_ID / TG_CALLER_API_HASH /
@@ -77,6 +77,7 @@ async def start() -> bool:
             _hook_updates()  # сразу: входящие звонки Джарвису и «положили трубку» — с первой секунды
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
             await _ensure_display_name(me)
+            await _allow_p2p()
             return True
         except Exception as exc:
             _import_error = f"{type(exc).__name__}: {exc}"
@@ -85,13 +86,13 @@ async def start() -> bool:
             return False
 
 
-ASSISTANT_NAME = "ZEKI"  # ассистент переименован 26.09.2026 (раньше «Jarvis», «Nurai»)
-_OLD_NAMES = ("jarvis", "джарвис", "nurai", "нурай")
+ASSISTANT_NAME = "JES | AI"  # имя аккаунта-помощника: ассистент — JES с 26.09.2026 (раньше «Jarvis», «Nurai», «ZEKI»); «| AI» — как он сам назвал «Zeki | AI»
+_OLD_NAMES = ("jarvis", "джарвис", "nurai", "нурай", "zeki", "зеки")
 
 
 async def _ensure_display_name(me: Any) -> None:
     """Имя аккаунта помощника в Telegram не должно остаться старым («Jarvis»/«Nurai»): он видит его, когда тот звонит.
-    Своё имя он ставит сам (26.09 — «Zeki | AI», @zeki_AI) — такое не трогаем."""
+    Своё имя он ставит сам (26.09 — «Zeki | AI», @zeki_AI) — остальное не трогаем."""
     current = " ".join(x for x in (getattr(me, "first_name", "") or "", getattr(me, "last_name", "") or "") if x)
     if not any(old in current.lower() for old in _OLD_NAMES):
         return
@@ -102,6 +103,22 @@ async def _ensure_display_name(me: Any) -> None:
         logger.info("caller: имя аккаунта «%s» → «%s»", current, ASSISTANT_NAME)
     except Exception:
         logger.warning("caller: не смог сменить имя аккаунта", exc_info=True)
+
+
+async def _allow_p2p() -> None:
+    """Звонки напрямую (P2P) — всем. 26.09: по его домашнему Wi-Fi звонок висел на «соединении», а с мобильным интернетом
+    соединялся — в логе p2p=False, то есть звук шёл только через ретрансляторы Telegram, до которых его Wi-Fi не достаёт.
+    Напрямую телефон соединяется с нашим сервером. Telegram разрешает P2P, только если разрешили ОБЕ стороны: у него
+    в Telegram «Конфиденциальность → Звонки → Peer-to-peer» должно быть «Все» или помощник у него в контактах."""
+    try:
+        from telethon.tl.functions.account import SetPrivacyRequest  # type: ignore
+        from telethon.tl.types import InputPrivacyKeyPhoneCall, InputPrivacyKeyPhoneP2P, InputPrivacyValueAllowAll  # type: ignore
+
+        for key in (InputPrivacyKeyPhoneP2P(), InputPrivacyKeyPhoneCall()):
+            await _client(SetPrivacyRequest(key=key, rules=[InputPrivacyValueAllowAll()]))
+        logger.info("caller: звонки и P2P — разрешены всем")
+    except Exception:
+        logger.warning("caller: не смог разрешить P2P", exc_info=True)
 
 
 async def resolve_peer(user_id: int, username: str | None = None) -> Any:
@@ -263,7 +280,7 @@ def _hook_updates() -> None:
 
 
 def _answer_or_decline(chat_id: int) -> None:
-    """Кто-то звонит аккаунту ZEKI. Владелец — берём трубку (разговор ведёт call_assistant),
+    """Кто-то звонит аккаунту JES. Владелец — берём трубку (разговор ведёт call_assistant),
     остальным — сбрасываем: это личный помощник, а не общий номер."""
     async def run() -> None:
         taken = False
@@ -401,7 +418,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
 def classify_error(exc: Exception) -> str | None:
     """Почему звонок не состоялся — чтобы сказать человеку, ЧТО сделать, а не «не удалось».
 
-    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт ZEKI;
+    privacy   — его настройки «Кто может мне звонить» не пускают аккаунт JES;
     no_answer — звонило, но трубку не взяли (часто: звонящего нет в контактах → телефон глушит);
     None      — отклонил / занято (сам решил не брать)."""
     name = type(exc).__name__.lower()
@@ -529,7 +546,7 @@ async def talk(user_id: int, *, greeting_pcm: bytes, on_utterance, ring_seconds:
 
 
 async def send_message(user_id: int, text: str) -> bool:
-    """Сообщение от лица «ZEKI» (например, если звонок не прошёл)."""
+    """Сообщение от лица «JES» (например, если звонок не прошёл)."""
     if not await start():
         return False
     try:

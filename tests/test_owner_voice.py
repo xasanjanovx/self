@@ -1,4 +1,4 @@
-"""ZEKI (26.09.2026): только его голос и посреди разговора, субтитры без чужих письменностей."""
+"""Только его голос (2.0, 26.09.2026): только его голос и посреди разговора, субтитры без чужих письменностей."""
 from __future__ import annotations
 
 import asyncio
@@ -80,7 +80,7 @@ def test_anchors_expire(monkeypatch):
 
 
 @pytest.mark.parametrize("text, foreign", [
-    ("hermana", False), ("где ты", False), ("Zeki, qalaysan?", False), ("O'zbekiston", False),
+    ("hermana", False), ("где ты", False), ("Jes, qalaysan?", False), ("O'zbekiston", False),
     ("नमस्ते", True), ("你好", True), ("مرحبا", True), ("こんにちは", True), ("Γεια", True),
 ])
 def test_foreign_script_subtitles(text, foreign):
