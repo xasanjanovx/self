@@ -89,7 +89,22 @@ REPLY_LANGS = {"uz": "узбекский (латиница)", "ru": "русск�
 
 
 def system_prompt(profile: Profile, snapshot: str, memory: str = "", reply_lang: str | None = None) -> str:
+    """Весь промпт одним текстом (как раньше): неизменная часть + данные на сейчас."""
+    return static_prompt(profile, reply_lang) + "\n\n" + context_block(profile, snapshot, memory)
+
+
+def context_block(profile: Profile, snapshot: str, memory: str = "") -> str:
+    """Что меняется от реплики к реплике: время, память, данные. В запросе агента идёт В КОНЦЕ (к его реплике), а не в
+    инструкции: иначе время в начале инструкции меняется каждую минуту и Gemini не берёт инструкцию с инструментами
+    из кэша (кэш — в 4 раза дешевле; 26.09 в кэш попадала лишь четверть)."""
     now = profile.now
+    return (f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}).\n"
+            + (f"{memory}\n\n" if memory else "")
+            + f"ДАННЫЕ:\n{snapshot}")
+
+
+def static_prompt(profile: Profile, reply_lang: str | None = None) -> str:
+    """Неизменная часть инструкции (для одного человека одна и та же весь день) — её Gemini берёт из кэша."""
     name = profile.first_name or "пользователя"
     # язык ответа — язык Джарвиса из его настроек (интерфейс бота может быть на другом языке)
     lang = REPLY_LANGS.get(reply_lang or profile.lang, "русский")
@@ -101,7 +116,8 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "", reply_lang:
         "Ты живой человек, а не робот: шутит — ответь с юмором, устал или расстроен — поддержи.\n"
         "Пользователь часто диктует голосом: опечатки, склейки слов, имена и бренды в другой транскрипции (Узум = Uzum, Хамкор = Hamkorbank) — "
         "восстанавливай смысл по контексту и данным, а не отвечай «не понял».\n"
-        f"Сейчас: {_WEEKDAYS[now.weekday()]}, {now.date().isoformat()} {now.strftime('%H:%M')} ({profile.tz_name}). Валюта: {profile.currency}. "
+        f"Валюта: {profile.currency}. Текущее время, память о нём и ДАННЫЕ (счета, долги, заметки, задачи) — в блоке «[КОНТЕКСТ …]» "
+        "в начале его последней реплики: это не его слова, а твои сведения на сейчас; «Данные ниже» в правилах — это они. "
         f"ЯЗЫК ОТВЕТА: всегда {lang} (выбран в настройках JES) — даже если он пишет или говорит на другом языке "
         "(узбекский, русский, английский, таджикский, казахский, турецкий…) или смешивает языки: понимай любой, отвечай только на этом. "
         "Другой язык — только если он прямо попросил в этом сообщении («ответь по-русски», «ruscha yoz», «in English»).\n\n"
@@ -188,9 +204,7 @@ def system_prompt(profile: Profile, snapshot: str, memory: str = "", reply_lang:
         "Если по-настоящему невозможно — скажи честно одной фразой и предложи ближайшую замену.\n\n"
         f"Категории расходов: {cats.prompt_catalog('expense')}.\nКатегории доходов: {cats.prompt_catalog('income')}.\n"
         "Счета (bucket): card — карта, cash — наличные, lent — мне должны, debt — я должен (долги — только через record_debt).\n\n"
-        + ABOUT_SELF + "\n"
-        + (f"{memory}\n\n" if memory else "")
-        + f"ДАННЫЕ:\n{snapshot}"
+        + ABOUT_SELF
     )
 
 
@@ -323,6 +337,31 @@ async def run_agent(
     """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст.
     `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…).
     `decls` / `system_extra` — другой набор инструментов и дополнение к промпту (голосовой режим, bot/phone.py)."""
+    from .. import billing
+
+    token = billing.set_user(profile.telegram_id)  # и из фоновых задач (напоминания, звонки) — расход на него
+    try:
+        return await _run_agent(profile, text, history, snapshot=snapshot, memory=memory, step_fn=step_fn, run_tool=run_tool,
+                                max_steps=max_steps, image=image, reply_lang=reply_lang, decls=decls, system_extra=system_extra)
+    finally:
+        billing.reset_user(token)
+
+
+async def _run_agent(
+    profile: Profile,
+    text: str,
+    history: list[dict[str, Any]],
+    *,
+    snapshot: str,
+    memory: str,
+    step_fn: StepFn | None,
+    run_tool: RunFn | None,
+    max_steps: int,
+    image: tuple[bytes, str] | None,
+    reply_lang: str | None,
+    decls: list[dict[str, Any]] | None,
+    system_extra: str,
+) -> AgentResult:
     step_fn = step_fn or ai.agent_step
     run_tool = run_tool or tools.run
     ctx = tools.ToolContext(profile=profile, text=text)
@@ -332,12 +371,22 @@ async def run_agent(
 
         parts.append({"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     contents = list(history) + [{"role": "user", "parts": parts}]
-    system = system_prompt(profile, snapshot, memory, reply_lang=reply_lang) + system_extra
+    system = static_prompt(profile, reply_lang) + system_extra
     decls = decls if decls is not None else tools.declarations()
+    # данные на сейчас — к его реплике, только в запрос (в историю не попадают): инструкция + инструменты остаются
+    # неизменными и идут из кэша Gemini
+    turn = len(history)
+    context = {"text": f"[КОНТЕКСТ — не его слова]\n{context_block(profile, snapshot, memory)}\n[/КОНТЕКСТ]\n\nЕго реплика:"}
+
+    def with_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = list(items)
+        out[turn] = {**out[turn], "parts": [context] + list(out[turn]["parts"])}
+        return out
+
     final = ""
     steps = 0
     for steps in range(1, max_steps + 1):
-        step = await step_fn(contents, system=system, tools=decls, thinking_budget=settings.agent_thinking_budget)
+        step = await step_fn(with_context(contents), system=system, tools=decls, thinking_budget=settings.agent_thinking_budget)
         contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "…"}]})
         if not step.calls:
             final = step.text or final
@@ -410,6 +459,13 @@ async def handle_command(message: Message, state: FSMContext, profile: Profile, 
     own_message=False — `message` это экран бота (кнопка), а не сообщение пользователя: его не удаляем.
     voice=True — пришло голосом: если включены голосовые ответы, продублируем ответ голосом."""
     uid = profile.telegram_id
+    from .. import billing
+
+    if billing.user_over_limit(uid):
+        # клиент исчерпал дневной лимит ИИ (27.09): кнопки, меню и подъём работают, помощник — завтра
+        await message.answer(profile.tr("🟡 На сегодня лимит ИИ-помощника исчерпан — завтра снова. Меню, кнопки и будильник работают как обычно.",
+                                        "🟡 Bugungi AI-yordamchi limiti tugadi — ertaga yana. Menyu, tugmalar va uyg‘otish odatdagidek ishlaydi."))
+        return True
     cache.put(uid, ("agent_ask",), None, 1)  # новый ход — прошлый вопрос с кнопками больше не ждёт ответа
     await show_progress(message, profile.tr("⏳ Понял, делаю…", "⏳ Tushundim, bajaryapman…"))
     undo.begin_turn(uid)

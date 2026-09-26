@@ -191,15 +191,16 @@ PHONE_RULES = (
     "КОМАНДЫ — МОЛЧА: сразу вызови инструмент и НИЧЕГО не говори — ни «делаю», ни «сейчас», ни «открываю», ни «готово»: "
     "телефон сам покажет карточку. Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или "
     "ask_exactly (произнеси дословно).\n"
-    "Ответ — одна короткая фраза, без «что-то ещё?». На любые вопросы отвечай по существу, без «не могу»; свежие факты — "
-    "web_search, погода — weather; сейчас {year} год.\n"
-    "ДАННЫЕ: трата — add_finance_entries, еда — add_calorie_logs, задача, напоминание, «сколько потратил» — get_finance_stats; "
-    "прочее с его данными (исправить, удалить, цели, долги, бюджеты, отчёты, подъём, баланс Gemini) — bot_task, просьбой целиком.\n"
-    "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком и с конкретикой: SMS, «что мне написали», фонарик, громкость, маршрут, "
-    "такси, WhatsApp, YouTube, галерея, яркость, не беспокоить, звонки, настройки, курс, намаз, запомнить, отменить. "
-    "Адрес или место — словами; если он показывает место на экране или камерой — прочитай его с кадра и передай.\n"
-    "ЛЮДИ: не переспрашивай — инструмент сам выберет; в variants — другие написания (мама → ойи, ona, oyijon). "
-    "Сообщения уходят после «да» — confirm_send, «нет» — cancel_send.\n"
+    "ЯЗЫК — язык его ПОСЛЕДНЕЙ фразы: сказал по-русски — отвечай по-русски, даже если до этого звучал узбекский; "
+    "по-узбекски — только в ответ на узбекскую фразу.\n"
+    "Ответ — одна короткая фраза, без «что-то ещё?». Длинное (список, рецепт, инструкция, подробности) — send_to_chat и одной "
+    "фразой «отправила в чат». На вопросы отвечай по существу, без «не могу»; свежие факты — web_search; сейчас {year} год.\n"
+    "ЕГО ДАННЫЕ — bot_task, просьбой целиком: трата, еда, задача, напоминание, «сколько потратил», погода, исправить, удалить, "
+    "цели, долги, отчёты, подъём.\n"
+    "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком: SMS, «что мне написали», фонарик, громкость, маршрут, такси "
+    "(без адреса — просто «такси»), WhatsApp, YouTube, галерея, яркость, не беспокоить, журнал звонков, курс, намаз, запомнить, отменить.\n"
+    "ЛЮДИ: звони только тому, кого он назвал сейчас; «позвони мне» — phone_call(who=«мне»): помощник JES позвонит ему в Telegram. "
+    "В variants — другие написания (мама → ойи, ona, oyijon). Сообщения уходят после «да» — confirm_send, «нет» — cancel_send.\n"
     "ВИДЕТЬ: камера — look, экран — screen_look; кадр придёт с результатом — сразу ответь по нему. Нажимать в других "
     "приложениях не умеешь. need_unlock — одной фразой попроси разблокировать.\n"
     "Разговор НЕ закрывается сам: после ответа молча жди. Речь, обращённую не к тебе (кто-то рядом, телевизор), — не отвечай. "
@@ -213,9 +214,13 @@ PHONE_ECONOMY = (
 PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "set_ai_balance", "calculate", "add_note"}
 # облегчённый живой голос (он выбрал 25.09): в Live — только частое (~9 тыс. знаков вместо 18), остальное телефонное — phone_task
 # (Flash-Lite выполняет его сам, bot/phone_live.py:phone_task), данные — bot_task
+# 27.09: записи (трата, еда, задача, напоминание), «сколько потратил» и погода — через bot_task (Flash-Lite со всеми
+# инструментами): эти 6 описаний были 40% текста, который Live оплачивает в каждой реплике. Команды, которые должны
+# сработать мгновенно (звонок, будильник, приложение, камера), остаются в Live.
 PHONE_LIVE_CORE = {"end_call", "phone_call", "telegram_send", "confirm_send", "cancel_send", "set_alarm", "set_timer", "open_app",
-                   "media", "look", "screen_look", "weather", "web_search", "add_finance_entries", "get_finance_stats",
-                   "add_reminder", "add_calorie_logs", "add_task", "bot_task", "send_to_chat"}
+                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat"}
+PHONE_DESC_LIMIT = 120   # описание инструмента в голосе телефона (знаков)
+PHONE_PARAM_LIMIT = 50
 _PHONE_TASK = {"name": "phone_task",
                "description": "Всё остальное на телефоне: SMS, прочитать Telegram, фонарик, громкость, маршрут, такси, WhatsApp, YouTube, "
                               "галерея, яркость, не беспокоить, звонки: журнал/перезвонить, настройки, курс, намаз, запомнить, отменить последнее.",
@@ -246,27 +251,27 @@ def _short(text: Any, limit: int) -> str:
     return cut[: cut.rfind(" ")].rstrip(" ,:—") + "…"
 
 
-def _compact_schema(schema: Any, name: str = "") -> Any:
+def _compact_schema(schema: Any, name: str = "", limit: int = 80) -> Any:
     if not isinstance(schema, dict):
         return schema
     out = dict(schema)
     if "description" in out and out.get("enum") and "|" in str(out["description"]):
         out.pop("description")  # «a | b | c» — это уже есть в enum
     elif "description" in out:
-        out["description"] = _SHORT_PARAMS.get(name) or _short(out["description"], 80)
+        out["description"] = _SHORT_PARAMS.get(name) or _short(out["description"], limit)
     if isinstance(out.get("properties"), dict):
-        out["properties"] = {k: _compact_schema(v, k) for k, v in out["properties"].items()}
+        out["properties"] = {k: _compact_schema(v, k, limit) for k, v in out["properties"].items()}
     if isinstance(out.get("items"), dict):
-        out["items"] = _compact_schema(out["items"])
+        out["items"] = _compact_schema(out["items"], limit=limit)
     return out
 
 
-def compact_declaration(decl: dict[str, Any]) -> dict[str, Any]:
-    """Описание инструмента для голоса: суть в ~170 знаках, параметры — коротко."""
+def compact_declaration(decl: dict[str, Any], limit: int = 170, param_limit: int = 80) -> dict[str, Any]:
+    """Описание инструмента для голоса: суть в ~170 знаках (телефон — 120), параметры — коротко."""
     out = dict(decl)
-    out["description"] = _short(decl.get("description"), 170)
+    out["description"] = _short(decl.get("description"), limit)
     if isinstance(decl.get("parameters"), dict):
-        out["parameters"] = _compact_schema(decl["parameters"])
+        out["parameters"] = _compact_schema(decl["parameters"], limit=param_limit)
     return out
 
 
@@ -340,8 +345,9 @@ def tool_declarations(mode: str, *, full: bool = False) -> list[dict[str, Any]]:
             if not full:
                 decls = [d for d in decls if d["name"] in PHONE_LIVE_CORE] + [_PHONE_TASK]
                 decls = [{**d, "behavior": "NON_BLOCKING"} if d["name"] in SILENT_TOOLS else d for d in decls]
-        # голос: описания короткие — они оплачиваются в каждом ответе Gemini Live
-        decls = [compact_declaration(d) for d in decls]
+        # голос: описания короткие — они оплачиваются в каждом ответе Gemini Live (телефон — ещё короче)
+        tight = mode == "phone" and not full
+        decls = [compact_declaration(d, PHONE_DESC_LIMIT, PHONE_PARAM_LIMIT) if tight else compact_declaration(d) for d in decls]
     else:
         decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake", "weather"}]
     return decls
@@ -879,11 +885,16 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
     if not billing.live_allowed(mode):
         logger.info("call %s: дневной лимит живого голоса — не звоню (%s)", uid, mode)
         return LiveResult(error="daily_limit")
+    if mode != "wake" and billing.user_over_limit(uid):
+        logger.info("call %s: клиент исчерпал дневной лимит ИИ — не звоню (%s)", uid, mode)
+        return LiveResult(error="daily_limit")
     meter = billing.start_session("wake" if mode == "wake" else "call")
+    who = billing.set_user(uid)  # звонок из фоновой задачи (подъём, «позвони мне») — расход на него
     try:
         return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang, pregreet=pregreet)
     finally:
         billing.end_session(meter)
+        billing.reset_user(who)
 
 
 async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] | None, ring_seconds: int, lang: str | None,
@@ -939,11 +950,16 @@ async def answer(profile: Profile) -> LiveResult:
     трубку — он слышит голос сразу, а не тишину после ответа."""
     from . import billing
 
+    if billing.user_over_limit(profile.telegram_id):
+        logger.info("incoming %s: клиент исчерпал дневной лимит ИИ — не отвечаю", profile.telegram_id)
+        return LiveResult(error="daily_limit")
     meter = billing.start_session("incoming")
+    who = billing.set_user(profile.telegram_id)
     try:
         return await _answer(profile)
     finally:
         billing.end_session(meter)
+        billing.reset_user(who)
 
 
 async def _answer(profile: Profile) -> LiveResult:

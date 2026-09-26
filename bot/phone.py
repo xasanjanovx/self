@@ -295,6 +295,15 @@ def _action(turn: PhoneTurn, kind: str, **fields: Any) -> dict[str, Any]:
 @ptool("phone_call", "Обычный звонок с телефона человеку из контактов или на номер («позвони маме», «набери Алишера», «qo'ng'iroq qil dadamga»).",
        {"who": WHO, "variants": VARIANTS}, ("who",))
 async def _phone_call(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    if names.is_self(a.get("who")):
+        # «позвони мне (через Telegram)» — звонит помощник JES в Telegram (как «позвони мне» в боте); 27.09 он просил,
+        # а JES переспрашивал «Кому позвонить?»
+        from . import call_assistant, caller
+
+        if not caller.available():
+            return {"error": "звонки в Telegram не настроены"}
+        call_assistant.call_in_background(ctx.profile, topic="")
+        return {"ok": True, "calling_via_telegram": True, "note": "JES сейчас позвонит ему в Telegram — скажи одной фразой"}
     number = names.as_phone_number(a.get("who"))
     if number:
         return _action(turn, "call", number=number, name=number)
@@ -695,6 +704,7 @@ async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any])
     return {"messages": found} if found else {"messages": [], "note": "ничего не нашлось"}
 
 
+_NO_PLACE = {"menya", "mne", "kuda", "kuda nibud", "otsyuda", "ya", "moe mesto", "moyo mesto", "meni", "menga", "qayerga"}
 _VAGUE_PLACE = re.compile(r"^\s*(на |в |до |к )?(эт[уоа]\w*|ту|сюда|туда|здесь|там|текущ\w*|мою|моё|мое|shu|bu|u)?\s*"
                           r"(геолокац\w*|локац\w*|мест\w*|точк\w*|адрес\w*|location|joy\w*)?\s*$", re.IGNORECASE)
 
@@ -707,9 +717,11 @@ async def _taxi(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[st
     from . import media
 
     to = _str(a.get("to"))
-    if not to or _VAGUE_PLACE.search(to):
-        # «на эту геолокацию», «сюда» — адреса нет: пусть спросит, а не открывает пустой маршрут (25.09 — дважды)
-        return {"error": "куда ехать? Нужен адрес или место словами (улица, район, заведение)"}
+    if not to or _VAGUE_PLACE.search(to) or names.norm(to) in _NO_PLACE:
+        # «вызови такси» без адреса: 26.09 модель подставляла «меня», «куда», «текущее местоположение» и переспрашивала
+        # по кругу — теперь просто открываем Яндекс Go от того места, где он сейчас; куда ехать — выберет там
+        return {**_action(turn, "taxi", tariff=_str(a.get("tariff")) or "econom"),
+                "note": "Яндекс Go открыт от его места, куда ехать — выберет там; скажи одной фразой"}
     loc = turn.device.get("location") if isinstance(turn.device.get("location"), dict) else None
     near = (float(loc["lat"]), float(loc["lon"])) if loc and loc.get("lat") is not None else None
     place = await media.geocode(to, near)

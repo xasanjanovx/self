@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -12,6 +13,8 @@ from . import goals as goals_mod
 from . import nutrition as nutri
 from . import services
 from .profile import Profile, h
+
+logger = logging.getLogger(__name__)
 
 
 async def morning_brief(profile: Profile) -> str:
@@ -172,7 +175,7 @@ async def evening_brief(profile: Profile) -> str | None:
                 + ("Bir qatorda yuboring — 10 soniya: «tushlik 40000», «osh yedim»." if lang == "uz"
                    else "Скинь одной строкой — это 10 секунд: «обед 40000», «съел плов».")
                 + "\n".join(await goal_evening_lines(profile))
-                + "".join(f"\n{line}" for line in ai_spend_lines(profile)))
+                + "".join(f"\n{line}" for line in ai_spend_lines(profile) + await owner_ops_lines(profile)))
     totals = nutri.totals(logs)
     target = int((nutrition_profile or {}).get("daily_calories") or 0)
     lines = [f"🌙 <b>{'Kun yakuni' if lang == 'uz' else 'Итог дня'}</b>",
@@ -183,6 +186,7 @@ async def evening_brief(profile: Profile) -> str | None:
         lines.append(f"{pe.NUTRITION} {int(totals['calories'])}" + (f" / {target}" if target else "") + f" {'kkal' if lang == 'uz' else 'ккал'} · {int(totals['meals'])} {'qabul' if lang == 'uz' else 'приёмов'}")
     lines.extend(await goal_evening_lines(profile))
     lines.extend(ai_spend_lines(profile))
+    lines.extend(await owner_ops_lines(profile))
     return "\n".join(lines)
 
 
@@ -203,6 +207,41 @@ def ai_spend_lines(profile: Profile) -> list[str]:
     if s.get("balance_usd") is not None:
         line += f" · {'qoldiq' if uz else 'остаток'} ~${s['balance_usd']:.2f}"
     return [line]
+
+
+async def owner_ops_lines(profile: Profile) -> list[str]:
+    """Владельцу вечером (27.09): промахи JES за день (журнал) и расход по клиентам бота."""
+    from . import access, billing, journal
+    from .context import db
+
+    if not access.is_owner(profile.telegram_id):
+        return []
+    uz = profile.lang == "uz"
+    lines: list[str] = []
+    try:
+        journal.cleanup()
+        lines += journal.report_lines(profile.today, profile.telegram_id, profile.lang)
+    except Exception:
+        logger.warning("evening: журнал не прочитался", exc_info=True)
+    try:
+        rows = billing.clients_report(30)
+    except Exception:
+        rows = []
+    if rows:
+        today = sum(r["today"] for r in rows)
+        month = sum(r["period"] for r in rows)
+        active = sum(1 for r in rows if r["today"] > 0)
+        lines += ["", f"👥 <b>{'Mijozlar' if uz else 'Клиенты'}</b>: {'bugun' if uz else 'сегодня'} ${today:.2f} ({active} {'kishi' if uz else 'чел.'}) · "
+                      f"{'30 kun' if uz else '30 дней'} ${month:.2f}"]
+        for r in rows[:3]:
+            try:
+                user = await db.get_user(r["uid"])
+            except Exception:
+                user = None
+            name = str((user or {}).get("first_name") or r["uid"])
+            over = " 🟡" if r["today"] >= billing.CLIENT_DAILY_LIMIT_USD > 0 else ""
+            lines.append(f"   • {h(name)}: ${r['period']:.2f} · {'bugun' if uz else 'сегодня'} ${r['today']:.2f}{over}")
+    return lines
 
 
 async def goal_evening_lines(profile: Profile) -> list[str]:

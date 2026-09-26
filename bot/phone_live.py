@@ -34,6 +34,7 @@ import wave
 from typing import Any
 
 from . import billing
+from . import journal
 from . import live_call
 from . import phone
 from . import services
@@ -565,11 +566,28 @@ class PhoneLive(_Session):
             self.jarvis_lines.append("".join(self._out_text).strip())
         super()._flush_transcript()
 
+    def _named(self, args: dict[str, Any]) -> bool:
+        """Звонить можно тому, кого он назвал сейчас (или на чей вопрос «Позвонить папе?» он ответил «да»)."""
+        from . import names
+
+        who = args.get("who")
+        if names.is_self(who) or names.as_phone_number(who):
+            return True
+        said = " ".join(self.user_lines[-1:] + ["".join(self._in_text)])
+        asked = self.jarvis_lines[-1] if self.jarvis_lines else ""
+        return names.mentioned([who, *(args.get("variants") or [])], f"{said} {asked}")
+
     async def _run_tools(self, ws, calls: list[dict[str, Any]]) -> None:  # noqa: ANN001
         responses = []
         for call in calls:
             name, args, cid = str(call.get("name")), call.get("args") or {}, call.get("id")
-            result = await exec_tool(self, name, args)
+            if name == "phone_call" and not self._named(args):
+                # 26.09: «вызови такси» → звонок папе. Звонок уходит сразу — без его слов не звоним, а переспрашиваем
+                logger.info("phone live: звонок «%s» не прозвучал в его словах — переспрос", args.get("who"))
+                journal.miss(self.uid, "wrong_call", f"модель хотела позвонить «{args.get('who')}», а он сказал «{' '.join(self.user_lines[-1:] + [''.join(self._in_text)])[:120]}»")
+                result: dict[str, Any] = {"error": "он не называл этого человека — не звони. Переспроси одной короткой фразой: «Позвонить <кому>?»"}
+            else:
+                result = await exec_tool(self, name, args)
             if name in {"look", "screen_look"} and isinstance(result, dict) and not result.get("error") and args.get("on") is not False:
                 await self._wait_frame(FIRST_FRAME_WAIT_S)  # «посмотри» — модель отвечает, уже видя кадр
             response: dict[str, Any] = {"id": cid, "name": name, "response": _jsonable(result)}
@@ -616,6 +634,8 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
         if sess.turn.need_contacts:
             sess.turn.need_contacts = False
             await sess.to_phone({"type": "need_contacts"})
+    if isinstance(result, dict) and result.get("error") and not result.get("need_unlock"):
+        journal.miss(sess.uid, "tool_error", f"{name} {json.dumps(args, ensure_ascii=False)[:100]}: {result['error']}")
     if not (isinstance(result, dict) and result.get("error")):
         sess.result.actions.append(name)
         if (card := result_card(name, args, result)) is not None:
@@ -858,6 +878,7 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
     info["said"] = " / ".join(x for x in (info.get("said"), said) if x)
     logger.info("phone live %s: %.0f с, действия %s, «%s» → «%s»%s", uid, time.monotonic() - started, sess.result.actions, said[:80], answered[:80],
                 f", чужой голос не пропущен {sess.owner.dropped} раз" if sess.owner.dropped else "")
+    journal.check_session(uid, sess.user_lines, sess.jarvis_lines)
     if said:
         phone._later(services.log_agent(uid, text=said, kind="phone_live", tools=",".join(sess.result.actions), reply=answered, ok=True))
         phone._later(extra.remember_exchange(uid, "📱 " + said, answered, when=profile.now.strftime("%d.%m %H:%M")))

@@ -13,6 +13,10 @@ from tests.test_phone_live import FakeWS, _profile
 
 @pytest.mark.parametrize("text, tool, args", [
     ("позвони маме", "phone_call", {"who": "маме", "variants": []}),
+    ("позвони мне", "phone_call", {"who": "мне", "variants": []}),
+    ("набери меня через телеграм", "phone_call", {"who": "мне", "variants": []}),
+    ("вызови такси", "taxi", {"to": ""}),
+    ("такси до вокзала", "taxi", {"to": "вокзала"}),
     ("набери сирожбек акам пожалуйста", "phone_call", {"who": "сирожбек акам", "variants": []}),
     ("открой ютуб", "open_app", {"name": "ютуб", "variants": []}),
     ("включи фонарик", "flashlight", {"on": True}),
@@ -35,7 +39,7 @@ def test_commands(text, tool, args):
 
 
 @pytest.mark.parametrize("text", [
-    "позвони мне", "вызови такси", "какая погода завтра", "сколько я потратил", "да", "нет",
+    "какая погода завтра", "сколько я потратил", "да", "нет",
     "будильник на завтра", "открой мне пожалуйста то что я вчера смотрел в ютубе", "onamga qongiroq qil", "",
 ])
 def test_not_commands_go_to_gemini(text):

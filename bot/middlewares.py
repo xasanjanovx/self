@@ -33,11 +33,17 @@ class AccessMiddleware(BaseMiddleware):
         uid = user.id if user else None
         await access.refresh()
         if access.is_allowed(uid):
+            from . import billing
+
             if isinstance(event, CallbackQuery) and uid is not None:
                 from . import i18n
 
                 i18n.note_callback(event.id, uid)  # чтобы перевести всплывашку ответа на кнопку
-            return await handler(event, data)
+            token = billing.set_user(uid)  # весь расход Gemini этого обновления — на него (расход по клиентам)
+            try:
+                return await handler(event, data)
+            finally:
+                billing.reset_user(token)
 
         # ссылка-приглашение: /start inv_<code>
         code = access.invite_code(event.text) if isinstance(event, Message) else None

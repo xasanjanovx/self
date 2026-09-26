@@ -195,7 +195,7 @@ async def wake_check(request: web.Request) -> web.Response:
         # чужой голос и телевизор отсекаем сразу
         logger.info("wake check: чужой голос (сходство %s, z %s, порог %s, банк %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
                     voice.get("threshold"), voice.get("bank"), took, (heard or {}).get("text", ""))
-        _reject(uid)
+        _reject(uid, f"чужой голос: «{(heard or {}).get('text', '')[:60]}»")
         return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
     if heard is not None:
         # 26.09: пустая запись (кашель, стук) при «уверенном» телефоне тоже пропускалась — JES открывался сам по себе.
@@ -208,7 +208,7 @@ async def wake_check(request: web.Request) -> web.Response:
         logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
                     voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"])
         if not ok:
-            _reject(uid)
+            _reject(uid, f"не «Джес»: «{heard['text'][:60]}»")
         return web.json_response({"ok": ok, "text": heard["text"], "command": bool(heard["after"]), "voice": voice.get("score"), "fast": True})
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
@@ -222,7 +222,7 @@ async def wake_check(request: web.Request) -> web.Response:
     after = str(verdict.get("after") or "").strip()
     logger.info("wake check: %s за %.1f с «%s» (Gemini)", "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
     if not ok:
-        _reject(uid)
+        _reject(uid, "не «Джес» (Gemini)")
     return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
 
 
@@ -279,6 +279,7 @@ async def wake_event(request: web.Request) -> web.Response:
     event = str(data.get("event") or "")
     if event == "scheduled" and data.get("day") and data.get("at_ms"):
         app_alarm.scheduled(uid, str(data["day"])[:10], int(data["at_ms"]))
+        logger.info("app alarm %s: поставлен в телефоне на %s", uid, str(data["day"])[:10])
         return web.json_response({"ok": True})
     if event == "awake":
         await wake_runner.mark_awake(bot_instance(), profile, source="app")
@@ -294,12 +295,28 @@ async def _no_voice() -> dict[str, Any]:
     return {"ok": True}
 
 
-def _reject(uid: int | None) -> None:
-    """Не «JES» — заготовленный разговор с Gemini не нужен."""
+def _reject(uid: int | None, why: str = "") -> None:
+    """Не «JES» — заготовленный разговор с Gemini не нужен; в журнал — для ночного отчёта (сколько ложных «Джес»)."""
     if uid is not None:
-        from . import phone_live
+        from . import journal, phone_live
 
         phone_live.discard(uid)
+        journal.miss(uid, "false_wake", why)
+
+
+async def app_log(request: web.Request) -> web.Response:
+    """Журнал с телефона (2.5): {"events": [{"t": мс, "level": "error"|"crash"|"info", "tag", "msg"}]} — ошибки и сбои
+    приложения попадают в ночной отчёт, чинить можно без скриншотов."""
+    from . import journal
+
+    data = await _json(request)
+    uid = owner_id()
+    events = data.get("events") if isinstance(data.get("events"), list) else []
+    n = journal.app_events(uid or 0, events)
+    crashes = [e for e in events if isinstance(e, dict) and e.get("level") == "crash"]
+    for e in crashes[:3]:
+        logger.warning("app crash: %s %s", e.get("tag"), str(e.get("msg"))[:500])
+    return web.json_response({"ok": True, "saved": n})
 
 
 _CALL_COMMAND_PROMPT = (
@@ -466,6 +483,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
     app.router.add_get("/jarvis/v1/wake_plan", wake_plan)
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
+    app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/wake_settings", wake_settings)
     app.router.add_post("/jarvis/v1/announce", announce)
     app.router.add_post("/jarvis/v1/call_command", call_command)

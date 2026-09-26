@@ -54,6 +54,9 @@ URGENT_USD = 0.5
 KEEP_DAYS = 45
 # он выбрал: не больше $0.5 в день (по Ташкенту). Дошли — пишем в чат, Джарвис до конца дня в экономном режиме
 DAILY_LIMIT_USD = float(os.getenv("GEMINI_DAILY_LIMIT_USD") or 0.5)
+# 27.09: клиенты бота (не владелец) — свой дневной лимит на ИИ-помощника (чат, голосовые, звонок «позвони мне»);
+# дошли — до полуночи только кнопки и простые записи. Подъём на фаджр — всегда. Их расход не съедает лимит владельца.
+CLIENT_DAILY_LIMIT_USD = float(os.getenv("CLIENT_DAILY_LIMIT_USD") or 0.10)
 TOPUP_URL = "https://aistudio.google.com/"
 
 _state: dict[str, Any] | None = None
@@ -210,6 +213,67 @@ class Meter:
 
 
 _meter: contextvars.ContextVar[Meter | None] = contextvars.ContextVar("billing_meter", default=None)
+# чей это расход: middleware бота ставит на каждое обновление, разговоры и агент — на свой ход (27.09, расход по клиентам)
+_user: contextvars.ContextVar[int | None] = contextvars.ContextVar("billing_user", default=None)
+
+
+def set_user(uid: int | None) -> contextvars.Token:
+    return _user.set(int(uid) if uid else None)
+
+
+def reset_user(token: contextvars.Token) -> None:
+    try:
+        _user.reset(token)
+    except ValueError:
+        pass
+
+
+def _is_owner(uid: int | None) -> bool:
+    try:
+        from . import access
+
+        return uid is not None and access.is_owner(uid)
+    except Exception:
+        return False
+
+
+def _users_day(day_key: str | None = None) -> dict[str, float]:
+    return dict(((_load().get("days") or {}).get(day_key or _today()) or {}).get("users") or {})
+
+
+def user_spent_today(uid: int) -> float:
+    return float(_users_day().get(str(uid)) or 0.0) * float(_load().get("factor") or 1.0)
+
+
+def clients_spent_today() -> float:
+    return sum(float(v) for k, v in _users_day().items() if not _is_owner(int(k))) * float(_load().get("factor") or 1.0)
+
+
+def user_over_limit(uid: int | None) -> bool:
+    """Клиент исчерпал дневной лимит ИИ (владелец — никогда: у него свой общий лимит и экономный режим)."""
+    if uid is None or _is_owner(uid) or CLIENT_DAILY_LIMIT_USD <= 0:
+        return False
+    return user_spent_today(uid) >= CLIENT_DAILY_LIMIT_USD
+
+
+def clients_report(days: int = 30) -> list[dict[str, Any]]:
+    """Расход по клиентам (без владельца): сегодня и за последние `days` дней, дорогие — первыми."""
+    st = _load()
+    factor = float(st.get("factor") or 1.0)
+    today = _today()
+    since = (datetime.now(timezone(timedelta(hours=5))).date() - timedelta(days=days - 1)).isoformat()
+    agg: dict[str, dict[str, float]] = {}
+    for key, day in (st.get("days") or {}).items():
+        if key < since:
+            continue
+        for uid, usd in (day.get("users") or {}).items():
+            row = agg.setdefault(uid, {"today": 0.0, "period": 0.0, "days": 0})
+            row["period"] += float(usd) * factor
+            row["days"] += 1
+            if key == today:
+                row["today"] += float(usd) * factor
+    rows = [{"uid": int(uid), **{k: round(v, 4) for k, v in row.items()}} for uid, row in agg.items() if not _is_owner(int(uid))]
+    return sorted(rows, key=lambda r: -r["period"])
 
 
 def start_session(kind: str, mode: str = "") -> Meter:
@@ -264,6 +328,9 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
         return usd
     day["usd"] = round(day["usd"] + usd, 6)
     day["calls"] = int(day.get("calls") or 0) + 1
+    if (who := _user.get()) is not None:
+        users = day.setdefault("users", {})
+        users[str(who)] = round(float(users.get(str(who)) or 0) + usd, 6)
     day["kinds"][kind] = round(float(day["kinds"].get(kind) or 0) + usd, 6)
     detail = day.setdefault("detail", {}).setdefault(kind, {})
     counts = day.setdefault("tokens", {}).setdefault(kind, {})
@@ -286,8 +353,9 @@ def spent_today() -> float:
 
 
 def over_limit() -> bool:
-    """Сегодняшний расход дошёл до дневного лимита — экономный режим до полуночи."""
-    return DAILY_LIMIT_USD > 0 and spent_today() >= DAILY_LIMIT_USD
+    """Сегодняшний расход ВЛАДЕЛЬЦА дошёл до дневного лимита — экономный режим до полуночи. Клиенты сюда не входят
+    (у них свой лимит, user_over_limit) — иначе их чаты съедали бы его живой голос."""
+    return DAILY_LIMIT_USD > 0 and spent_today() - clients_spent_today() >= DAILY_LIMIT_USD
 
 
 def live_allowed(mode: str = "phone") -> bool:
@@ -297,7 +365,7 @@ def live_allowed(mode: str = "phone") -> bool:
 
 
 def _maybe_limit_alert(st: dict[str, Any], day: dict[str, Any]) -> None:
-    if DAILY_LIMIT_USD <= 0 or day.get("limit_alert") or float(day["usd"]) * float(st.get("factor") or 1.0) < DAILY_LIMIT_USD:
+    if DAILY_LIMIT_USD <= 0 or day.get("limit_alert") or spent_today() - clients_spent_today() < DAILY_LIMIT_USD:
         return
     day["limit_alert"] = True
     _schedule_save()
@@ -506,4 +574,5 @@ def _notify(text: str) -> None:
 
 
 __all__ = ["record", "cost", "breakdown", "status", "set_balance", "exhausted", "is_billing_error", "rate_limited", "voice_note", "flush",
-           "PRICES", "Meter", "start_session", "end_session", "live_allowed"]
+           "PRICES", "Meter", "start_session", "end_session", "live_allowed", "set_user", "reset_user", "user_spent_today",
+           "user_over_limit", "clients_report", "clients_spent_today", "CLIENT_DAILY_LIMIT_USD"]

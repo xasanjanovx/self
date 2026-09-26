@@ -228,4 +228,35 @@ def as_phone_number(value: Any) -> str | None:
     return digits if len(digits.lstrip("+")) >= 5 else None
 
 
-__all__ = ["kin_root", "frequency_boost", "norm", "expand", "score", "resolve", "pick", "is_kin", "as_phone_number"]
+SELF_WORDS = {"mne", "menya", "sebe", "menga", "meni", "ozimga", "me", "myself"}
+
+
+def is_self(value: Any) -> bool:
+    """«позвони мне / набери меня / menga qo'ng'iroq qil» — это он сам, а не контакт."""
+    words = norm(value).split()
+    return bool(words) and words[0] in SELF_WORDS
+
+
+def mentioned(queries: Iterable[Any], text: Any) -> bool:
+    """Назвал ли он этого человека в своих словах. Модель однажды позвонила не тому: «вызови такси» → звонок папе
+    (26.09) — звонок уходит сразу, поэтому звоним только тому, кого он действительно назвал. Не расслышали вовсе — не мешаем."""
+    words = norm(text).split()
+    if not words:
+        return True
+    roots = {kin_root(w) for w in words} - {None}
+    for q, _ in expand(queries):
+        if as_phone_number(q):
+            return True
+        if (root := kin_root(q)) and root in roots:
+            return True
+        for qt in q.split():
+            if qt in HONORIFICS or len(qt) < 3:
+                continue
+            stem = qt[:4] if len(qt) >= 5 else qt[:3]
+            if any(w.startswith(stem) or (len(w) >= 4 and SequenceMatcher(None, qt, w).ratio() >= 0.75) for w in words):
+                return True
+    return False
+
+
+__all__ = ["kin_root", "frequency_boost", "norm", "expand", "score", "resolve", "pick", "is_kin", "as_phone_number",
+           "is_self", "mentioned", "SELF_WORDS"]

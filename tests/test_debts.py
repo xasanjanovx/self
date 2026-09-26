@@ -355,7 +355,9 @@ def test_list_debts_and_deadlines_by_loan(fdb):
     out = _run(tools.run("set_debt_deadline", {"person": "узум", "due_date": "2026-10-26", "loan_id": "65"}, ctx))
     assert out["loans"] == ["65"] and next(r for r in fdb.entries if r["id"] == 65)["note"] == "[x:debt>card] [due:2026-10-26] UZUM BANK"
     rows = _run(tools.run("list_debt_deadlines", {}, ctx))["deadlines"]
-    assert [(r["due_date"], r["amount"], r["days_left"]) for r in rows] == [("2026-10-01", 2_205_000, 5), ("2026-10-26", 1_050_000, 30)]
+    today = _profile(92).today  # дни до срока — от сегодняшнего дня (тест писался 26.09 и падал уже назавтра)
+    left = lambda d: (date.fromisoformat(d) - today).days  # noqa: E731
+    assert [(r["due_date"], r["amount"], r["days_left"]) for r in rows] == [("2026-10-01", 2_205_000, left("2026-10-01")), ("2026-10-26", 1_050_000, left("2026-10-26"))]
     # один займ — срок ставится без вопроса; человек без займа-операции — старый срок «по человеку»
     out = _run(tools.run("set_debt_deadline", {"person": "Асельбек", "due_date": "2026-10-05"}, ctx))
     assert out["matched_person"] == "Асилбек" and out["loans"] == ["15"]

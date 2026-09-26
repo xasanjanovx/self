@@ -507,7 +507,7 @@ def test_live_phone_declares_silent_tools_and_strong_compression(monkeypatch):
     sess = live_call._Session(_profile(), Persona(lang="ru"), mode="phone", system="x" * 3000)
     setup = sess.setup_payload("gemini-3.8-live", rich=False)["setup"]
     decls = {d["name"]: d for d in setup["tools"][0]["functionDeclarations"]}
-    assert decls["phone_call"]["behavior"] == "NON_BLOCKING" and "behavior" not in decls["weather"] and sess.nonblocking
+    assert decls["phone_call"]["behavior"] == "NON_BLOCKING" and "behavior" not in decls["web_search"] and sess.nonblocking
     cw = setup["contextWindowCompression"]
     assert cw["triggerTokens"] - cw["slidingWindow"]["targetTokens"] == live_call.PHONE_COMPRESS_ABOVE - live_call.PHONE_COMPRESS_KEEP
     live_call._extras_level["gemini-3.8-live"] = 0  # модель не приняла — обычные инструменты
@@ -515,9 +515,10 @@ def test_live_phone_declares_silent_tools_and_strong_compression(monkeypatch):
     assert not any("behavior" in d for d in setup["tools"][0]["functionDeclarations"]) and not sess.nonblocking
 
 
-def test_taxi_needs_a_real_place():
-    turn = phone.PhoneTurn(uid=1)
-    for vague in ("эту геолокацию", "текущая геолокация", "сюда", "shu joy"):
+def test_taxi_without_place_opens_yandex_go_from_here():
+    # 27.09: без адреса («вызови такси», «меня», «куда») — Яндекс Go от его места, а не переспрос по кругу
+    for vague in ("эту геолокацию", "текущая геолокация", "сюда", "shu joy", "меня", "куда", ""):
+        turn = phone.PhoneTurn(uid=1)
         res = asyncio.run(phone.PHONE_TOOLS["taxi"].handler(turn, None, {"to": vague}))
-        assert "куда ехать" in res["error"], vague
-    assert not turn.actions
+        assert res.get("ok") and "error" not in res, vague
+        assert turn.actions == [{"type": "taxi", "tariff": "econom"}], vague

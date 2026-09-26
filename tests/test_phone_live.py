@@ -39,7 +39,7 @@ def test_phone_tool_declarations():
     decls = live_call.tool_declarations("phone")
     names = [d["name"] for d in decls]
     assert len(names) == len(set(names))
-    assert {"phone_call", "telegram_send", "end_call", "send_to_chat", "add_finance_entries", "set_alarm"} <= set(names)
+    assert {"phone_call", "telegram_send", "end_call", "send_to_chat", "bot_task", "set_alarm"} <= set(names)
     assert not {"call_me", "ask_user", "open_screen", "hand_off", "control_phone"} & set(names)
     for d in decls:
         assert d["parameters"]["type"] == "OBJECT"
