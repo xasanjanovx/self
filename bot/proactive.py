@@ -71,7 +71,8 @@ def debt_alerts(deadlines: list[dict[str, Any]], ledger: dict[str, list[tuple[st
             due = date.fromisoformat(str(row.get("due_date"))[:10])
         except ValueError:
             continue
-        amount = next((a for n, a in ledger.get(side, []) if n and (fuzzy_contains(person, n) or fuzzy_contains(n, person))), 0.0)
+        # строки сроков по займам (services.debt_due_rows) несут свой остаток; старые строки «по человеку» — ищем в итогах
+        amount = float(row["amount"]) if row.get("amount") is not None else             next((a for n, a in ledger.get(side, []) if n and (fuzzy_contains(person, n) or fuzzy_contains(n, person))), 0.0)
         if amount <= 0:
             continue
         left = (due - today).days
@@ -215,11 +216,11 @@ async def collect(profile: Profile) -> list[Alert]:
     snap = await services.finance_snapshot(profile)
     recurring, budgets, goals, deadlines, plan, logs = (
         await services.recurring(uid), await services.budgets(uid), await services.goals(uid),
-        await services.debt_deadlines(uid), await services.nutrition_profile(uid), await services.calorie_logs(profile, 5),
+        await services.debt_due_rows(uid), await services.nutrition_profile(uid), await services.calorie_logs(profile, 5),
     )
     alerts: list[Alert] = []
-    if deadlines:
-        alerts += debt_alerts(deadlines, fin.debt_ledger(snap.entries, snap.settings), today, lang=lang, hour=hour)
+    if deadlines:  # сроки по каждому займу: у одного кредитора их может быть несколько
+        alerts += debt_alerts(deadlines, {}, today, lang=lang, hour=hour)
     if (a := spike_alert(snap.entries, today, lang=lang, hour=hour)):
         alerts.append(a)
     alerts += recurring_alerts(recurring, snap.wallet, today, lang=lang, hour=hour)

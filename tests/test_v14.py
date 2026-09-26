@@ -120,7 +120,7 @@ def fake_data(monkeypatch):
     async def empty(*a, **k):
         return []
 
-    for name in ("notes", "reminders", "goals", "recurring", "debt_deadlines"):
+    for name in ("notes", "reminders", "goals", "recurring", "debt_deadlines", "debt_due_rows"):
         monkeypatch.setattr(bulk.services, name, empty)
     monkeypatch.setattr(bulk.services, "calorie_logs", empty)
     monkeypatch.setattr(bulk.services, "finance_entries", entries)

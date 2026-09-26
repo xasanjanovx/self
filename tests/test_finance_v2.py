@@ -106,7 +106,10 @@ def test_needs_counterparty():
 def test_existing_debt_parse_and_balances():
     old = fin.parse_existing_debt("мне должен Абдулазиз 200000")
     assert old == {"kind": "transfer", "amount": 200000.0, "from_bucket": "init", "to_bucket": "lent", "note": "Абдулазиз"}
-    assert fin.parse_existing_debt("я должен банку 3 млн")["to_bucket"] == "debt"
+    assert fin.parse_existing_debt("я должен брату 3 млн")["to_bucket"] == "debt"
+    # банк и сроки — к бухгалтеру (спросит срок займа, не спутает дату с именем)
+    assert fin.parse_existing_debt("я должен банку 3 млн") is None
+    assert fin.parse_existing_debt("мне должен Алишер 200000 до 5 октября") is None
     assert fin.parse_existing_debt("дал Абдулазизу 200000") is None
     entries = [
         _e("expense", 200_000, "[x:init>lent] Абдулазиз", "2026-09-01", "transfer"),

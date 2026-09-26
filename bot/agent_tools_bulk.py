@@ -78,9 +78,10 @@ async def _find_records(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             if _hit(query, r.get("title")) or _amount_hit(amount, r.get("amount")):
                 out.append({"type": "recurring", "id": str(r.get("id")), "text": r.get("title"), "amount": r.get("amount")})
     if "debts" in types:
-        for r in await services.debt_deadlines(uid):
-            if _hit(query, r.get("person"), r.get("note")):
-                out.append({"type": "debt_deadline", "person": r.get("person"), "side": r.get("side"), "date": str(r.get("due_date") or "")[:10]})
+        for r in await services.debt_due_rows(uid):
+            if _hit(query, r.get("person")):
+                out.append({"type": "debt_deadline", "person": r.get("person"), "side": r.get("side"), "date": str(r.get("due_date") or "")[:10],
+                            "amount": round(float(r.get("amount") or 0), 2), "loan_ids": r.get("loan_ids")})
     out.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
     if not out:
         return {"found": [], "note": "ничего не нашлось — спроси, как ещё это могло быть записано, или поищи другими словами"}

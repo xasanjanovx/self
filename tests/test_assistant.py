@@ -326,23 +326,7 @@ def test_goal_tools_weight_habit_custom(monkeypatch):
     assert "meals" in habits_out and "spending" in habits_out
 
 
-def test_set_debt_deadline_matches_fuzzy_name(monkeypatch):
-    fdb = _wire(monkeypatch)
-    entries = [{"id": 1, "entry_type": "expense", "amount": 1_000_000, "category": "transfer", "note": "[x:card>lent] Асилбек", "entry_date": "2026-09-16"}]
-
-    async def snap(profile):
-        from bot import finance as fin
-        from bot.services import FinanceSnapshot
-
-        return FinanceSnapshot(entries=entries, settings={}, balances=fin.compute_balances(entries), today=TODAY)
-
-    monkeypatch.setattr(asst.services, "finance_snapshot", snap)
-    ctx = tools.ToolContext(profile=_profile(73), text="")
-    out = _run(tools.run("set_debt_deadline", {"person": "Асельбек", "due_date": "2026-10-05"}, ctx))
-    assert out["matched_person"] == "Асилбек" and out["deadline"]["side"] == "lent" and out["amount_now"] == 1_000_000
-    assert fdb.deadlines[0]["person"] == "Асилбек"
-    out = _run(tools.run("clear_debt_deadline", {"person": "асил"}, ctx))
-    assert out["cleared"][0]["person"] == "Асилбек"
+# set_debt_deadline / clear_debt_deadline (сроки по займам) — tests/test_debts.py
 
 
 # ------------------------------------------------------------------ voice

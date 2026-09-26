@@ -98,7 +98,7 @@ async def _assistant_lines(profile: Profile, today: Any, lang: str) -> list[str]
 
     uz = lang == "uz"
     out: list[str] = []
-    tasks, deadlines, goals = await asyncio.gather(services.tasks(profile.telegram_id), services.debt_deadlines(profile.telegram_id), services.goals(profile.telegram_id))
+    tasks, deadlines, goals = await asyncio.gather(services.tasks(profile.telegram_id), services.debt_due_rows(profile.telegram_id), services.goals(profile.telegram_id))
     today_tasks, overdue = [], []
     for t in tasks:
         due = str(t.get("due_date") or "")[:10]
@@ -128,7 +128,7 @@ async def _assistant_lines(profile: Profile, today: Any, lang: str) -> list[str]
         if -30 <= left <= 7:
             soon.append((left, d, r))
     for left, d, r in sorted(soon, key=lambda x: x[0])[:3]:
-        who = h(r.get("person"))
+        who = h(r.get("person")) + (f" {fin.fmt_money(float(r['amount']))}" if r.get("amount") else "")
         if left < 0:
             out.append(f"⚠️ {who}: " + (f"muddat {-left} kun oldin o'tgan" if uz else f"срок прошёл {-left} дн. назад"))
         elif left == 0:

@@ -43,6 +43,8 @@ class ToolContext:
     ask: dict[str, Any] | None = None  # уточняющий вопрос с вариантами-кнопками (ask_user)
     mutated: bool = False
     calls: list[str] = field(default_factory=list)  # имена вызванных инструментов (для логов)
+    # точный ответ, посчитанный кодом (бухгалтер долгов): если модель в ответе назовёт другие суммы — покажем его
+    fixed_reply: str | None = None
 
     @property
     def uid(self) -> int:
@@ -391,17 +393,7 @@ async def _stats(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@tool("list_debts", "Долги по людям: кто должен мне (lent) и кому должен я (debt). Пустое имя = «без имени».")
-async def _debts(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    snap = await services.finance_snapshot(ctx.profile)
-    ledger = fin.debt_ledger(snap.entries, snap.settings)
-    debt_rows = [r for r in snap.entries if (tr := fin.transfer_from_note(r.get("note"))) and ("lent" in tr or "debt" in tr)]
-    return {
-        "lent": [{"name": n or "", "amount": round(v, 2)} for n, v in ledger["lent"]],
-        "debt": [{"name": n or "", "amount": round(v, 2)} for n, v in ledger["debt"]],
-        "totals": {"lent": round(snap.balances["lent"], 2), "debt": round(snap.balances["debt"], 2)},
-        "entries": [entry_view(r) for r in debt_rows[:MAX_LIST]],
-    }
+# list_debts — в bot/agent_tools_debts.py (займы по кредиторам, сроки, остатки)
 
 
 # ------------------------------------------------------------------ finance: write
@@ -411,10 +403,10 @@ _ITEM = {
         "kind": P("STRING", "expense | income | transfer", enum=["expense", "income", "transfer"]),
         "amount": P("NUMBER", "сумма"),
         "category": P("STRING", "ключ категории"),
-        "note": P("STRING", "комментарий (имя человека для долгов)"),
+        "note": P("STRING", "комментарий"),
         "bucket": P("STRING", "card | cash — откуда/куда деньги", enum=["card", "cash"]),
-        "from_bucket": P("STRING", "для transfer: card | cash | lent | debt | init", enum=["card", "cash", "lent", "debt", "init"]),
-        "to_bucket": P("STRING", "для transfer: card | cash | lent | debt", enum=["card", "cash", "lent", "debt"]),
+        "from_bucket": P("STRING", "для transfer: card | cash", enum=["card", "cash"]),
+        "to_bucket": P("STRING", "для transfer: card | cash", enum=["card", "cash"]),
         "date": DATE,
     },
     "required": ["kind", "amount"],
@@ -423,13 +415,15 @@ _ITEM = {
 
 @tool(
     "add_finance_entries",
-    "Записать операции напрямую (когда указана дата в прошлом или несколько операций сразу). Переводы: снял с карты = card→cash; дал в долг = card/cash→lent; мне вернули = lent→card/cash; взял в долг = debt→card/cash; вернул долг = card/cash→debt; старый долг без движения денег = init→lent/debt.",
+    "Записать расходы/доходы напрямую (дата в прошлом, несколько операций сразу, чек) и переводы между своими счетами: "
+    "снял с карты = transfer card→cash, положил на карту = cash→card. ДОЛГИ, займы, кредиты, рассрочку, возвраты — НЕ здесь, а record_debt.",
     {"items": ARR(_ITEM, "операции")},
     ("items",),
 )
 async def _add_entries(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     today = ctx.profile.today
     payload: list[dict[str, Any]] = []
+    skipped_debts: list[dict[str, Any]] = []
     for it in a.get("items") or []:
         if not isinstance(it, dict):
             continue
@@ -440,6 +434,10 @@ async def _add_entries(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         day = parse_day(it.get("date"), today) or today
         note = _str(it.get("note"))
         if kind == "transfer":
+            raw = {str(it.get("from_bucket") or "").lower(), str(it.get("to_bucket") or "").lower()}
+            if raw & {"lent", "debt", "init"}:
+                skipped_debts.append(it)  # долги считает бухгалтер: остатки, сроки, карта/наличные
+                continue
             src, dst = fin.normalize_bucket(it.get("from_bucket")), fin.normalize_bucket(it.get("to_bucket"))
             if src == dst:
                 continue
@@ -448,19 +446,24 @@ async def _add_entries(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             kind = "income" if kind == "income" else "expense"
             category = cats.normalize(_str(it.get("category")), kind, note=note)
             payload.append({"entry_type": kind, "amount": amount, "category": category, "note": fin.note_with_bucket(note, _str(it.get("bucket")) or "card"), "entry_date": day.isoformat()})
+    debt_error = ("долги/займы/возвраты этим инструментом не пишутся — вызови record_debt (в голосе — bot_task с просьбой целиком): "
+                  "он сам посчитает остатки, сроки и карту/наличные") if skipped_debts else None
     if not payload:
-        return {"error": "nothing to add"}
+        return {"error": debt_error or "nothing to add"}
     inserted = await db.add_finance_entries(ctx.uid, payload, entry_date=today, source="agent")
     cache.invalidate(ctx.uid, "fin_entries")
     ids = [r.get("id") for r in inserted if r.get("id") is not None]
     undo.push(ctx.uid, {"type": "delete_entries", "ids": ids})
     ctx.mutated = True
-    return {"added": [entry_view(r) for r in inserted]}
+    out: dict[str, Any] = {"added": [entry_view(r) for r in inserted]}
+    if debt_error:
+        out["not_saved"] = debt_error
+    return out
 
 
 @tool(
     "update_finance_entry",
-    "Исправить операцию: сумму, категорию, комментарий, дату, счёт.",
+    "Исправить операцию: сумму, категорию, комментарий, дату, счёт (у долга/займа — карта или наличные).",
     {"id": ID, "amount": P("NUMBER", "новая сумма"), "category": P("STRING", "новый ключ категории"), "note": P("STRING", "новый комментарий"), "date": DATE, "bucket": P("STRING", "card | cash", enum=["card", "cash"])},
     ("id",),
 )
@@ -481,7 +484,12 @@ async def _update_entry(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if note_new is not None or bucket_new:
         note = _str(note_new) if note_new is not None else fin.clean_note(row.get("note"))
         if transfer:
-            fields["note"] = fin.note_with_transfer(note, *transfer)
+            # «это было наличными»: у перевода/долга меняем сторону card|cash, срок займа и теги сохраняем
+            src, dst = transfer
+            if bucket_new in {"card", "cash"}:
+                src = bucket_new if src in {"card", "cash"} and dst not in {"card", "cash"} else src
+                dst = bucket_new if dst in {"card", "cash"} and transfer[0] not in {"card", "cash"} else dst
+            fields["note"] = fin.note_with_transfer(note, src, dst, due=fin.due_from_note(row.get("note")), targets=fin.targets_from_note(row.get("note")))
         else:
             fields["note"] = fin.note_with_bucket(note, bucket_new or fin.bucket_from_note(row.get("note")))
     day = parse_day(a.get("date"), ctx.profile.today)
@@ -1074,11 +1082,10 @@ async def snapshot(profile: Profile) -> str:
         f"Балансы: карта {m(snap.balances['card'])}, наличные {m(snap.balances['cash'])}, мне должны {m(snap.balances['lent'])}, я должен {m(snap.balances['debt'])}.",
         f"Сегодня: расход {m(snap.today_expense)}, доход {m(snap.today_income)}. Этот месяц: расход {m(snap.month.expense if snap.month else 0)}, доход {m(snap.month.income if snap.month else 0)}.",
     ]
-    ledger = fin.debt_ledger(snap.entries, snap.settings)
-    if ledger["lent"] or ledger["debt"]:
-        lent_txt = ", ".join(f"{n or 'без имени'} {m(v)}" for n, v in ledger["lent"]) or "—"
-        debt_txt = ", ".join(f"{n or 'без имени'} {m(v)}" for n, v in ledger["debt"]) or "—"
-        parts.append(f"Долги по людям — мне должны: {lent_txt}. Я должен: {debt_txt}.")
+    book = fin.debt_book(snap.entries, snap.settings, await services.debt_deadlines(uid))
+    debt_lines = agent_tools_debts.snapshot_lines(book, profile.today)
+    if debt_lines:
+        parts.extend(debt_lines)
         debt_rows = [r for r in snap.entries if (tr := fin.transfer_from_note(r.get("note"))) and ("lent" in tr or "debt" in tr)][:15]
         parts.append("Долговые операции (id, дата, сумма, счёт→счёт, имя): " + "; ".join(
             f"[{r.get('id')}] {str(r.get('entry_date') or '')[:10]} {m(float(r.get('amount') or 0))} {'→'.join(fin.transfer_from_note(r.get('note')))} «{fin.clean_note(r.get('note')) or ''}»" for r in debt_rows))
@@ -1118,5 +1125,6 @@ async def _assistant_lines(profile: Profile) -> list[str]:
 from . import agent_tools_assistant  # noqa: E402  — регистрирует инструменты заметок/задач/целей/сроков
 from . import agent_tools_extra  # noqa: E402,F401  — ask_user, память, курсы валют, калькулятор, поиск, погода
 from . import agent_tools_bulk  # noqa: E402,F401  — найти любую запись, массовые правки
+from . import agent_tools_debts  # noqa: E402  — бухгалтер долгов: займы, погашения, сроки
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

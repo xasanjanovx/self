@@ -82,7 +82,7 @@ async def add_finance_entries(profile: Profile, items: list[dict[str, Any]], *, 
                     "entry_type": "expense",
                     "amount": amount,
                     "category": "transfer",
-                    "note": fin.note_with_transfer(item.get("note"), src, dst),
+                    "note": fin.note_with_transfer(item.get("note"), src, dst, due=item.get("due_date") if "debt" in (src, dst) or "lent" in (src, dst) else None),
                     "source": source,
                 }
             )
@@ -257,6 +257,17 @@ async def debt_deadlines(uid: int) -> list[dict[str, Any]]:
     if not db.available("debt_deadlines"):
         return []
     return await cache.remember(uid, ("debt_deadlines",), 600, lambda: db.list_debt_deadlines(uid))
+
+
+async def debt_book(uid: int) -> dict[str, dict[str, fin.Counterparty]]:
+    """Все займы по кредиторам и должникам — с остатками и сроками (bot/finance.py:debt_book)."""
+    entries, settings, deadlines = await asyncio.gather(finance_entries(uid), finance_settings(uid), debt_deadlines(uid))
+    return fin.debt_book(entries, settings, deadlines)
+
+
+async def debt_due_rows(uid: int) -> list[dict[str, Any]]:
+    """Сроки по открытым займам: [{person, side, due_date, amount, loan_ids}] (свой срок займа или старый срок «по человеку»)."""
+    return fin.effective_deadlines(await debt_book(uid))
 
 
 # ------------------------------------------------------------------ 007: weight logs / goal check-ins

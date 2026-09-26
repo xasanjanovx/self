@@ -65,7 +65,8 @@ def test_no_more_dead_end_text():
 def test_system_prompt_has_memory_and_new_rules():
     text = agent.system_prompt(_profile(), "Балансы: карта 1", "ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n• Асилбек — брат")
     assert "Асилбек — брат" in text and text.index("ПАМЯТЬ") < text.index("ДАННЫЕ:")
-    assert "ask_user" in text and "set_debt_deadline(person как в «Я должен», side=debt" in text
+    assert "ask_user" in text and "set_debt_deadline(person как в «Долги по займам», due_date" in text
+    assert "БУХГАЛТЕР" in text and "record_debt" in text and "repay TEZ" in text
     assert "remember_about_me" in text and "currency_rates" in text and "web_search" in text
     assert "НИКОГДА не отвечай «не понял»" in text
     assert agent.system_prompt(_profile(), "x") .count("ПАМЯТЬ") == 1  # без памяти — только упоминание в правиле

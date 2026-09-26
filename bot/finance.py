@@ -3,7 +3,9 @@
 - кодирование счёта/перевода в поле note (совместимо со старыми записями):
   `[b:card] заметка`  — операция по счёту card|cash|lent|debt
   `[x:card>cash] ...` — внутренний перевод между счетами
-- расчёт балансов, статистика по категориям, быстрый локальный парсер.
+  `[x:debt>card] [due:2026-10-26] UZUM BANK` — займ со своим сроком возврата (каждый займ — отдельный «транш»)
+  `[x:card>debt] [t:19,65] UZUM BANK` — погашение конкретных займов (без тега — по ближайшему сроку)
+- расчёт балансов, долги по займам (debt_book), статистика по категориям, быстрый локальный парсер.
 """
 from __future__ import annotations
 
@@ -20,6 +22,8 @@ INIT = "init"
 
 _TRANSFER_RE = re.compile(r"^\[x:(card|cash|lent|debt|init)>(card|cash|lent|debt|init)\]\s*", re.IGNORECASE)
 _BUCKET_RE = re.compile(r"^\[b:(card|cash|lent|debt)\]\s*", re.IGNORECASE)
+_DUE_TAG_RE = re.compile(r"^\[due:(\d{4}-\d{2}-\d{2})\]\s*", re.IGNORECASE)
+_TARGET_TAG_RE = re.compile(r"^\[t:([\w,-]+)\]\s*", re.IGNORECASE)
 
 
 def fmt_money(value: float) -> str:
@@ -43,11 +47,46 @@ def bucket_from_note(note: str | None) -> str:
     return match.group(1).lower() if match else "card"
 
 
+def _tags(note: str | None) -> tuple[str | None, list[str]]:
+    """Служебные теги после префикса счёта: срок займа и какие займы гасит платёж."""
+    text = str(note or "").strip()
+    text = _TRANSFER_RE.sub("", text)
+    text = _BUCKET_RE.sub("", text)
+    due: str | None = None
+    targets: list[str] = []
+    while True:
+        m = _DUE_TAG_RE.match(text)
+        if m:
+            due = m.group(1)
+            text = text[m.end():]
+            continue
+        m = _TARGET_TAG_RE.match(text)
+        if m:
+            targets = [t for t in m.group(1).split(",") if t]
+            text = text[m.end():]
+            continue
+        return due, targets
+
+
+def due_from_note(note: str | None) -> date | None:
+    raw = _tags(note)[0]
+    try:
+        return date.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def targets_from_note(note: str | None) -> list[str]:
+    return _tags(note)[1]
+
+
 def clean_note(note: str | None) -> str | None:
     text = str(note or "").strip()
     while True:
         nxt = _TRANSFER_RE.sub("", text)
-        nxt = _BUCKET_RE.sub("", nxt).strip()
+        nxt = _BUCKET_RE.sub("", nxt)
+        nxt = _DUE_TAG_RE.sub("", nxt)
+        nxt = _TARGET_TAG_RE.sub("", nxt).strip()
         if nxt == text:
             break
         text = nxt
@@ -58,8 +97,23 @@ def note_with_bucket(note: str | None, bucket: str) -> str:
     return f"[b:{normalize_bucket(bucket)}] {clean_note(note) or ''}".strip()
 
 
-def note_with_transfer(note: str | None, src: str, dst: str) -> str:
-    return f"[x:{normalize_bucket(src)}>{normalize_bucket(dst)}] {clean_note(note) or ''}".strip()
+def note_with_transfer(note: str | None, src: str, dst: str, *, due: str | date | None = None, targets: list[str] | None = None) -> str:
+    tags = ""
+    if due:
+        tags += f"[due:{str(due)[:10]}] "
+    if targets:
+        tags += f"[t:{','.join(str(t) for t in targets)}] "
+    return f"[x:{normalize_bucket(src)}>{normalize_bucket(dst)}] {tags}{clean_note(note) or ''}".strip()
+
+
+def renote(old_note: str | None, text: str | None, *, due: str | date | None | bool = True) -> str:
+    """Новый текст заметки с сохранением счёта/перевода и тегов. due=True — оставить срок как был, None/False — убрать."""
+    transfer = transfer_from_note(old_note)
+    old_due, targets = _tags(old_note)
+    keep_due = old_due if due is True else (due or None)
+    if transfer:
+        return note_with_transfer(text, *transfer, due=keep_due, targets=targets)
+    return note_with_bucket(text, bucket_from_note(old_note))
 
 
 def normalize_bucket(bucket: str | None) -> str:
@@ -97,12 +151,17 @@ def apply_to_balances(balances: dict[str, float], *, kind: str, amount: float, b
         return
     if kind == "transfer":
         # debt — пассив: возврат долга (to=debt) УМЕНЬШАЕТ его, заём (from=debt) — увеличивает.
-        # init — «уже было»: старый долг, счета card/cash не трогаем.
-        for b, sign in ((normalize_bucket(src), -1.0), (normalize_bucket(dst), 1.0)):
+        # init — «уже было / списано»: старый долг (init→debt|lent) или прощённый (debt|lent→init), счета card/cash не трогаем.
+        src_b, dst_b = normalize_bucket(src), normalize_bucket(dst)
+        for b, sign in ((src_b, -1.0), (dst_b, 1.0)):
             if b == INIT:
                 continue
-            if b == "debt" and src != INIT:
+            if b == "debt" and src_b != INIT and dst_b != INIT:
                 sign = -sign
+            elif b == "debt" and src_b == INIT:
+                sign = 1.0  # старый долг: я должен
+            elif b == "debt" and dst_b == INIT:
+                sign = -1.0  # долг простили / списали
             balances[b] = balances.get(b, 0.0) + sign * amount
         return
     b = normalize_bucket(bucket)
@@ -637,58 +696,258 @@ def recurring_due_today(items: list[dict[str, Any]], today: date) -> list[dict[s
     return due
 
 
-# ------------------------------------------------------------ debts by person
-def debt_ledger(entries: list[dict[str, Any]], settings: dict[str, float] | None = None) -> dict[str, list[tuple[str, float]]]:
-    """Кто мне должен и кому должен я — по именам из комментария операции.
-    Возвращает {"lent": [(имя, сумма)], "debt": [(имя, сумма)]}, отсортировано по сумме."""
-    lent: dict[str, float] = {}
-    debt: dict[str, float] = {}
-    names: dict[str, str] = {}
+# ------------------------------------------------------------ debts: займы по кредиторам и должникам
+# Каждый займ («взял у Uzum 1 050 000 до 26.10», «дал Асилбеку 1 млн») — отдельный транш со своей суммой, датой и сроком.
+# Погашение распределяется на займы: сначала те, что указаны в теге [t:…], дальше — с ближайшим сроком
+# (займы без срока — последними, по дате). Переплата копится у человека и уменьшает его следующий займ.
+@dataclass
+class Tranche:
+    id: str
+    side: str  # lent — мне должны, debt — я должен
+    date: date | None
+    amount: float
+    left: float
+    due: date | None = None
+    account: str = "card"  # куда пришли / откуда ушли деньги: card | cash | init (долг был до учёта)
 
-    def _key(note: str | None) -> str:
-        name = (clean_note(note) or "").strip(" .,;:—-")
-        if not name:
-            return ""
-        k = name.casefold()
-        names.setdefault(k, name)
-        return k
+    @property
+    def open(self) -> bool:
+        return self.left >= 1
 
-    for row in entries:
-        transfer = transfer_from_note(row.get("note"))
+
+@dataclass
+class Counterparty:
+    side: str
+    name: str
+    tranches: list[Tranche] = field(default_factory=list)
+    credit: float = 0.0  # переплата: вернул/мне вернули больше, чем было
+    paid: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return sum(t.left for t in self.tranches) - self.credit
+
+    def open_tranches(self) -> list[Tranche]:
+        return sorted((t for t in self.tranches if t.open), key=_tranche_order)
+
+
+def _tranche_order(t: Tranche) -> tuple:
+    return (t.due is None, t.due or date.max, t.date or date.min, _id_num(t.id))
+
+
+def _id_num(value: Any) -> int:
+    try:
+        return int(str(value))
+    except ValueError:
+        return 0
+
+
+def _chrono_key(row: dict[str, Any]) -> tuple:
+    return (str(row.get("entry_date") or "")[:10], str(row.get("created_at") or ""), _id_num(row.get("id")))
+
+
+def _debt_effects(row: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """[(side, "up"|"down", счёт денег)] — как операция меняет долги. up — новый займ, down — погашение/списание."""
+    transfer = transfer_from_note(row.get("note"))
+    if transfer:
+        src, dst = transfer
+        out = []
+        if dst == "lent":
+            out.append(("lent", "up", src))
+        if src == "lent":
+            out.append(("lent", "down", dst))
+        if src == "debt":
+            out.append(("debt", "down" if dst == INIT else "up", dst))
+        if dst == "debt":
+            out.append(("debt", "up" if src == INIT else "down", src))
+        return out
+    bucket = bucket_from_note(row.get("note"))
+    income = row.get("entry_type") == "income"
+    if bucket == "lent":
+        return [("lent", "down" if income else "up", "card")]
+    if bucket == "debt":
+        return [("debt", "up" if income else "down", "card")]
+    return []
+
+
+def person_key(name: str | None) -> str:
+    return (str(name or "").strip(" .,;:—-")).casefold()
+
+
+def _allocate(cp: Counterparty, amount: float, targets: list[str]) -> list[tuple[Tranche, float]]:
+    """Погасить amount: сначала займы из targets (по порядку), потом — с ближайшим сроком. Остаток → переплата."""
+    parts: list[tuple[Tranche, float]] = []
+    left = amount
+    by_id = {t.id: t for t in cp.tranches}
+    queue = [by_id[t] for t in targets if t in by_id] + [t for t in cp.open_tranches() if t.id not in targets]
+    for t in queue:
+        if left <= 0:
+            break
+        if not t.open:
+            continue
+        use = min(t.left, left)
+        t.left -= use
+        left -= use
+        parts.append((t, use))
+    if left > 0:
+        cp.credit += left
+    return parts
+
+
+def debt_book(entries: list[dict[str, Any]], settings: dict[str, float] | None = None,
+              deadlines: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Counterparty]]:
+    """{"lent": {ключ имени: Counterparty}, "debt": {...}} — все займы с остатками и сроками.
+    deadlines — старые сроки «по человеку» (таблица debt_deadlines): действуют на займы без своего срока,
+    взятые не позже дня, когда срок был поставлен."""
+    book: dict[str, dict[str, Counterparty]] = {"lent": {}, "debt": {}}
+
+    def _cp(side: str, name: str) -> Counterparty:
+        key = person_key(name)
+        cp = book[side].get(key)
+        if cp is None:
+            cp = book[side][key] = Counterparty(side=side, name=name.strip(" .,;:—-") if name else "")
+        return cp
+
+    person_due: dict[tuple[str, str], list[tuple[date, date | None]]] = {}
+    for r in deadlines or []:
+        try:
+            due = date.fromisoformat(str(r.get("due_date"))[:10])
+        except ValueError:
+            continue
+        try:
+            set_on = date.fromisoformat(str(r.get("created_at") or "")[:10])
+        except ValueError:
+            set_on = None
+        person_due.setdefault((str(r.get("side") or "lent"), person_key(r.get("person"))), []).append((due, set_on))
+
+    def _inherited_due(side: str, key: str, day: date | None) -> date | None:
+        rows = person_due.get((side, key))
+        if rows is None and key and person_due:
+            from . import names as names_mod  # «Асилбек» в сроках и «Асилбек ака» в операциях — один человек
+
+            n = names_mod.norm(key)
+            for (s, k), r in person_due.items():
+                m = names_mod.norm(k)
+                if s == side and n and m and (n == m or n.startswith(m) or m.startswith(n)):
+                    rows = r
+                    break
+        for due, set_on in rows or []:
+            if set_on is None or day is None or day <= set_on:
+                return due
+        return None
+
+    for side in ("lent", "debt"):
+        base = float((settings or {}).get(f"{side}_base") or 0)
+        if base > 0:
+            _cp(side, "").tranches.append(Tranche(id="base", side=side, date=None, amount=base, left=base, account=INIT))
+        elif base < 0:
+            _cp(side, "").credit += -base
+
+    for row in sorted(entries, key=_chrono_key):
         amount = float(row.get("amount") or 0)
         if amount <= 0:
             continue
-        if transfer:
-            src, dst = transfer
-            k = _key(row.get("note"))
-            if dst == "lent" and src in {"card", "cash", INIT}:
-                lent[k] = lent.get(k, 0.0) + amount
-            elif src == "lent" and dst in {"card", "cash"}:
-                lent[k] = lent.get(k, 0.0) - amount
-            elif src == "debt" and dst in {"card", "cash"}:
-                debt[k] = debt.get(k, 0.0) + amount
-            elif dst == "debt" and src in {"card", "cash", INIT}:
-                debt[k] = debt.get(k, 0.0) + (amount if src == INIT else -amount)
-            continue
-        bucket = bucket_from_note(row.get("note"))
-        if bucket == "lent":
-            k = _key(row.get("note"))
-            lent[k] = lent.get(k, 0.0) + (amount if row.get("entry_type") == "expense" else -amount)
-        elif bucket == "debt":
-            k = _key(row.get("note"))
-            debt[k] = debt.get(k, 0.0) + (amount if row.get("entry_type") == "income" else -amount)
+        for side, direction, account in _debt_effects(row):
+            name = clean_note(row.get("note")) or ""
+            cp = _cp(side, name)
+            if direction == "up":
+                day = _entry_date(row)
+                left = amount
+                if cp.credit > 0:  # переплата гасит новый займ
+                    use = min(cp.credit, left)
+                    cp.credit -= use
+                    left -= use
+                due = due_from_note(row.get("note")) or _inherited_due(side, person_key(name), day)
+                cp.tranches.append(Tranche(id=str(row.get("id")), side=side, date=day, amount=amount, left=left, due=due, account=account))
+            else:
+                cp.paid += amount
+                _allocate(cp, amount, targets_from_note(row.get("note")))
+    return book
 
-    if settings:
-        if float(settings.get("lent_base") or 0):
-            lent[""] = lent.get("", 0.0) + float(settings["lent_base"])
-        if float(settings.get("debt_base") or 0):
-            debt[""] = debt.get("", 0.0) + float(settings["debt_base"])
 
-    def _shape(d: dict[str, float]) -> list[tuple[str, float]]:
-        items = [(names.get(k, ""), v) for k, v in d.items() if abs(v) >= 1]
+def debt_ledger(entries: list[dict[str, Any]], settings: dict[str, float] | None = None) -> dict[str, list[tuple[str, float]]]:
+    """Кто мне должен и кому должен я — по именам из комментария операции.
+    Возвращает {"lent": [(имя, сумма)], "debt": [(имя, сумма)]}, отсортировано по сумме."""
+    book = debt_book(entries, settings)
+
+    def _shape(side: str) -> list[tuple[str, float]]:
+        items = [(cp.name, cp.total) for cp in book[side].values() if abs(cp.total) >= 1]
         return sorted(items, key=lambda x: -abs(x[1]))
 
-    return {"lent": _shape(lent), "debt": _shape(debt)}
+    return {"lent": _shape("lent"), "debt": _shape("debt")}
+
+
+def effective_deadlines(book: dict[str, dict[str, Counterparty]]) -> list[dict[str, Any]]:
+    """Сроки по открытым займам: [{person, side, due_date, amount, loan_ids}] — одна строка на (человек, срок)."""
+    rows: dict[tuple[str, str, date], dict[str, Any]] = {}
+    for side, people in book.items():
+        for cp in people.values():
+            for t in cp.open_tranches():
+                if t.due is None:
+                    continue
+                key = (side, person_key(cp.name), t.due)
+                row = rows.setdefault(key, {"person": cp.name, "side": side, "due_date": t.due.isoformat(), "amount": 0.0, "loan_ids": []})
+                row["amount"] += t.left
+                row["loan_ids"].append(t.id)
+    return sorted(rows.values(), key=lambda r: r["due_date"])
+
+
+def find_counterparty(book: dict[str, dict[str, Counterparty]], side: str, name: str, *, min_score: float = 0.8) -> list[Counterparty]:
+    """Кредитор/должник по имени из речи: «Узум» → «UZUM BANK», «Асельбек» → «Асилбек». Лучшие совпадения первыми;
+    точное совпадение — единственным элементом."""
+    from . import names as names_mod
+
+    query = names_mod.norm(name)
+    if not query:
+        return [cp for k, cp in book.get(side, {}).items() if not k]
+    scored = []
+    for cp in book.get(side, {}).values():
+        if not cp.name:
+            continue
+        cand = names_mod.norm(cp.name)
+        if not cand:
+            continue
+        s = names_mod.score(query, cand)
+        q_words, c_words = query.split(), cand.split()
+        # «Узум» = «UZUM BANK», но «Uzum Nasiya» ≠ «UZUM BANK»: общее первое слово решает, только если второго нет у одного из них
+        if cand.startswith(query) or query.startswith(cand) or (
+                len(q_words[0]) >= 3 and q_words[0] == c_words[0] and (len(q_words) == 1 or len(c_words) == 1)):
+            s = max(s, 0.9)
+        elif len(q_words) > 1 and len(c_words) > 1 and q_words[0] == c_words[0] and q_words[1] != c_words[1]:
+            s = min(s, 0.79)  # разные продукты одной компании — не сливать и не гасить молча (бухгалтер спросит)
+        if s >= min_score:
+            scored.append((s, cp))
+    scored.sort(key=lambda x: -x[0])
+    if scored and scored[0][0] >= 0.99:
+        return [scored[0][1]]
+    return [cp for _, cp in scored]
+
+
+_INSTITUTION_RE = re.compile(
+    r"bank|банк|uzum|узум|\btez\b|\bтез\b|hamkor|хамкор|kapital|капитал|anor|анор|alif|алиф|payme|пейми|click|клик|paynet|пайнет|"
+    r"ipak|ипак|asaka|асака|agrobank|агробанк|xalq|халк|\bnbu\b|\bsqb\b|trast|траст|infin|инфин|davr|давр|ziraat|octo|окто|"
+    r"hayot|хаёт|tbc|тбс|apelsin|апельсин|zood|intend|интенд|nasiya|насия|рассрочк|кредит|kredit|микрозайм|mikroqarz|lombard|ломбард|"
+    r"garant|гарант|turon|турон|universal|универсал|madad|мадад|poytaxt|пойтахт|smartbank|смартбанк|"
+    r"\bооо\b|\bmchj\b|\bмчж\b|магазин|market|маркет",
+    re.IGNORECASE,
+)
+
+
+def is_institution(name: str | None) -> bool:
+    """Банк / приложение / магазин рассрочки — деньги от них всегда на карту, у займа всегда есть срок."""
+    return bool(_INSTITUTION_RE.search(str(name or "")))
+
+
+_DEBT_WORDS = (
+    "долг", "qarz", "вернул", "вернула", "верну", "qaytar", "занял", "заняла", "одолжил", "за друга", "кредит", "kredit",
+    "погас", "рассрочк", "насия", "nasiya", "займ", "заём", "простил", "должен", "должна", "должны",
+)
+
+
+def is_debt_phrase(text: str) -> bool:
+    """Фраза про долги/займы/возвраты — её решает агент-бухгалтер (видит займы, сроки и балансы), а не простой парсер."""
+    low = str(text or "").lower()
+    return any(w in low for w in _DEBT_WORDS)
 
 
 def needs_counterparty(item: dict[str, Any]) -> bool:
@@ -759,10 +1018,21 @@ def parse_existing_debt(text: str) -> dict[str, Any] | None:
     m = _OLD_LENT_RE.match(rest)
     if m:
         who = (m.group("who") or m.group("who2") or m.group("who3") or "").strip(" ,.;:—-")
+        if _has_terms(who):
+            return None
         return {"kind": "transfer", "amount": amount, "from_bucket": INIT, "to_bucket": "lent", "note": who or None}
     m = _OLD_DEBT_RE.match(rest)
     if m:
         who = (m.group("who") or m.group("who2") or "").strip(" ,.;:—-")
         who = re.sub(r"^(перед|у|banku|bankga)\s+", "", who, flags=re.IGNORECASE)
+        if _has_terms(who) or is_institution(who):
+            return None  # срок, дата, банк — к бухгалтеру: он спросит срок займа и не спутает дату с именем
         return {"kind": "transfer", "amount": amount, "from_bucket": INIT, "to_bucket": "debt", "note": who or None}
     return None
+
+
+_TERMS_RE = re.compile(r"\d|\b(до|срок\w*|через|числ\w*|muddat\w*|gacha)\b", re.IGNORECASE)
+
+
+def _has_terms(who: str) -> bool:
+    return bool(_TERMS_RE.search(who or ""))

@@ -403,61 +403,7 @@ async def _my_habits(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {"meals": habits.meal_patterns(logs, tz=ctx.profile.tz, today=ctx.profile.today), "spending": habits.spending_patterns(entries, today=ctx.profile.today)}
 
 
-# ------------------------------------------------------------------ debt deadlines
-def match_person(name: str, entries: list[dict[str, Any]], settings: dict[str, float]) -> tuple[str | None, str | None, float]:
-    """Подобрать имя из долгов по людям (нечётко). Возвращает (имя как в базе, side, сумма)."""
-    from .agent_tools import fuzzy_contains
-
-    ledger = fin.debt_ledger(entries, settings)
-    for side in ("lent", "debt"):
-        for person, amount in ledger[side]:
-            if person and (fuzzy_contains(name, person) or fuzzy_contains(person, name)):
-                return person, side, amount
-    return None, None, 0.0
-
-
-@tool("set_debt_deadline", "Задать срок возврата долга по человеку («Асилбек вернёт до 5 октября», «я должен вернуть Хамкорбанку до 1 ноября»). Бот напомнит за день и при просрочке.",
-      {"person": P("STRING", "имя, как в долгах"), "due_date": DATE, "side": P("STRING", "lent — мне должны (по умолчанию), debt — я должен", enum=["lent", "debt"]), "note": P("STRING", "комментарий")},
-      ("person", "due_date"))
-async def _set_deadline(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    if not await db.ensure_available("debt_deadlines"):
-        return _migration_error("debt_deadlines")
-    name, day = _str(a.get("person")), parse_day(a.get("due_date"), ctx.profile.today)
-    if not name or not day:
-        return {"error": "person and due_date (YYYY-MM-DD) required"}
-    snap = await services.finance_snapshot(ctx.profile)
-    matched, side_found, amount = match_person(name, snap.entries, snap.settings)
-    side = _str(a.get("side")) or side_found or "lent"
-    person = matched or name
-    prev = next((r for r in await services.debt_deadlines(ctx.uid) if r.get("person") == person and r.get("side") == side), None)
-    row = await db.upsert_debt_deadline(ctx.uid, person=person, side=side, due_date=day.isoformat(), note=_str(a.get("note")))
-    cache.invalidate(ctx.uid, "debt_deadlines")
-    undo.push(ctx.uid, {"type": "restore_debt_deadline", "person": person, "side": side, "row": prev})
-    ctx.mutated = True
-    return {"deadline": deadline_view(row or {"person": person, "side": side, "due_date": day.isoformat()}, ctx.profile.today), "amount_now": round(amount, 2), "matched_person": matched}
-
-
-@tool("clear_debt_deadline", "Убрать срок возврата по человеку.", {"person": P("STRING", "имя"), "side": P("STRING", "lent | debt", enum=["lent", "debt"])}, ("person",))
-async def _clear_deadline(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    from .agent_tools import fuzzy_contains
-
-    name = _str(a.get("person")) or ""
-    rows = [r for r in await services.debt_deadlines(ctx.uid) if fuzzy_contains(name, str(r.get("person") or "")) and (not _str(a.get("side")) or r.get("side") == _str(a.get("side")))]
-    if not rows:
-        return {"error": "no deadline for that person"}
-    for r in rows:
-        await db.delete_debt_deadline(ctx.uid, person=str(r.get("person")), side=str(r.get("side")))
-        undo.push(ctx.uid, {"type": "restore_debt_deadline", "person": r.get("person"), "side": r.get("side"), "row": r})
-    cache.invalidate(ctx.uid, "debt_deadlines")
-    ctx.mutated = True
-    return {"cleared": [deadline_view(r) for r in rows]}
-
-
-@tool("list_debt_deadlines", "Сроки возврата долгов (кто и до какого числа), просрочки.")
-async def _list_deadlines(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    if not await db.ensure_available("debt_deadlines"):
-        return _migration_error("debt_deadlines")
-    return {"deadlines": [deadline_view(r, ctx.profile.today) for r in await services.debt_deadlines(ctx.uid)]}
+# сроки долгов (set/clear/list_debt_deadlines) — в bot/agent_tools_debts.py: у каждого займа свой срок
 
 
 # ------------------------------------------------------------------ подъём на фаджр
@@ -633,7 +579,7 @@ async def snapshot_lines(ctx_profile: Any) -> list[str]:
     # всё сразу, а не по очереди (каждое — поход в Supabase, если кэш остыл)
     notes, tasks, goals, logs, entries, deadlines = await asyncio.gather(
         services.notes(uid), services.tasks(uid), services.goals(uid),
-        safe(services.calorie_logs(ctx_profile, 30), None), safe(services.finance_entries(uid), None), services.debt_deadlines(uid))
+        safe(services.calorie_logs(ctx_profile, 30), None), safe(services.finance_entries(uid), None), safe(services.debt_due_rows(uid), []))
     if notes:
         parts.append("Заметки (id · текст): " + "; ".join(f"[{r.get('id')}] {str(r.get('text') or '')[:80]}" for r in notes[:20]))
     if tasks:
@@ -661,6 +607,6 @@ async def snapshot_lines(ctx_profile: Any) -> list[str]:
                 tail = f" (просрочено {-left} дн.)" if left < 0 else f" (через {left} дн.)"
             except ValueError:
                 tail = ""
-            return f"{r.get('person')} {'мне' if r.get('side') == 'lent' else 'я'} до {due}{tail}"
-        parts.append("Сроки долгов: " + "; ".join(_d(r) for r in deadlines[:10]))
+            return f"{r.get('person')} {'мне' if r.get('side') == 'lent' else 'я'} {fin.fmt_money(float(r.get('amount') or 0))} до {due}{tail}"
+        parts.append("Сроки долгов (по займам): " + "; ".join(_d(r) for r in deadlines[:10]))
     return parts
