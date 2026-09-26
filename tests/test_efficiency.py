@@ -70,7 +70,12 @@ def test_phone_live_tools_are_short_and_data_goes_to_bot_task():
 
 
 def test_phone_rules_answer_in_language_of_last_phrase():
-    assert "ПОСЛЕДНЕЙ фразы" in live_call.PHONE_RULES and "позвони мне" in live_call.PHONE_RULES
+    from bot import persona as persona_mod
+
+    mirror = live_call.system_instruction(_profile(), persona_mod.Persona(mirror=True), mode="phone")
+    assert "ПОСЛЕДНЕЙ фразы" in mirror and "позвони мне" in live_call.PHONE_RULES
+    fixed = live_call.system_instruction(_profile(), persona_mod.Persona(lang="ru"), mode="phone")
+    assert "ПОСЛЕДНЕЙ фразы" not in fixed and "ТОЛЬКО по-русски" in fixed  # язык из настроек — как раньше
 
 
 # ------------------------------------------------------------------ звонок не тому / «позвони мне»
