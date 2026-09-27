@@ -33,6 +33,9 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-2.5-flash-native-audio": {"text_in": 0.5, "audio_in": 3.0, "image_in": 3.0, "text_out": 2.0, "audio_out": 12.0},
     "gemini-3.5-flash-lite": {"text_in": 0.3, "audio_in": 0.3, "image_in": 0.3, "text_out": 2.5},
     "gemini-3.5-flash": {"text_in": 1.5, "audio_in": 1.5, "image_in": 1.5, "text_out": 9.0},
+    # до 31.12.2026 (потом вдвое дороже): 0.75 / 3.75 — ai.google.dev/gemini-api/docs/pricing, 28.09
+    "gemini-3.8-flash": {"text_in": 0.75, "audio_in": 0.75, "image_in": 0.75, "text_out": 3.75},
+    "gemini-3.7-flash": {"text_in": 0.75, "audio_in": 0.75, "image_in": 0.75, "text_out": 3.75},
     "gemini-3.1-flash-lite": {"text_in": 0.25, "audio_in": 0.5, "image_in": 0.25, "text_out": 1.5},
     "gemini-3.8-flash-lite-tts": {"text_in": 0.5, "audio_out": 6.0},
     "gemini-2.5-flash-preview-tts": {"text_in": 0.5, "audio_out": 10.0},

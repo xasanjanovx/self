@@ -256,3 +256,68 @@ def test_smart_model_missing_on_free_tier_falls_back_to_free_cheap(monkeypatch):
     asyncio.run(run())
     # 1-й ход: умная 404 → бесплатно дешёвая; 2-й ход: умную уже не пробуем
     assert seen == [("FREE", "smart"), ("FREE", "cheap"), ("FREE", "cheap")]
+
+
+def test_thinking_level_is_adapted_and_learned(monkeypatch):
+    """3.8 Flash не принимает «minimal» — шлём «low»; незнакомая модель ответила так же — запоминаем и сразу повторяем."""
+    import json as _json
+
+    from bot import billing
+    from bot.context import ai
+
+    assert ai_mod._adapt("gemini-3.8-flash", {"generationConfig": {"thinkingConfig": {"thinkingLevel": "minimal"}}}) == \
+        {"generationConfig": {"thinkingConfig": {"thinkingLevel": "low"}}}
+    assert ai_mod._adapt("gemini-3.5-flash-lite", {"generationConfig": {"thinkingConfig": {"thinkingLevel": "minimal"}}}) == \
+        {"generationConfig": {"thinkingConfig": {"thinkingLevel": "minimal"}}}
+
+    levels: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        level = _json.loads(request.content)["generationConfig"]["thinkingConfig"]["thinkingLevel"]
+        levels.append(level)
+        if level == "minimal":
+            return httpx.Response(400, json={"error": {"message": "Thinking level MINIMAL is not supported for this model."}})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ок"}]}}], "usageMetadata": {}})
+
+    monkeypatch.setattr(ai_mod, "FREE_API_KEY", "FREE")
+    monkeypatch.setattr(ai_mod, "_free_paused_until", 0.0)
+    monkeypatch.setattr(ai_mod, "_NO_MINIMAL", set())
+    monkeypatch.setattr(billing, "record_free", lambda *a, **k: None)
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "PAID"}))
+
+    async def run():  # noqa: ANN202
+        token = ai_mod.use_free("new-flash")
+        try:
+            await ai._post("new-flash", {"contents": [], "generationConfig": {"thinkingConfig": {"thinkingLevel": "minimal"}}})
+        finally:
+            ai_mod.reset_free(token)
+
+    asyncio.run(run())
+    assert levels == ["minimal", "low"] and "new-flash" in ai_mod._NO_MINIMAL
+
+
+def test_tts_goes_free_first_then_paid(monkeypatch):
+    from bot import billing
+    from bot.context import ai
+
+    seen: list[str] = []
+    audio = "data: " + '{"candidates":[{"content":{"parts":[{"inlineData":{"data":"AAAA"}}]}}]}' + "\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("x-goog-api-key")
+        seen.append(key)
+        if key == "FREE":
+            return httpx.Response(429, json={"error": {"message": "quota"}})
+        return httpx.Response(200, text=audio, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(ai_mod, "FREE_API_KEY", "FREE")
+    monkeypatch.setattr(ai_mod, "_free_tts_paused_until", 0.0)
+    monkeypatch.setattr(billing, "record", lambda *a, **k: 0.0)
+    monkeypatch.setattr(billing, "record_free", lambda *a, **k: None)
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "PAID"}))
+
+    async def run():  # noqa: ANN202
+        return [chunk async for chunk in ai.speak_stream("Готово")]
+
+    chunks = asyncio.run(run())
+    assert seen == ["FREE", "PAID"] and chunks == [b"\x00\x00\x00"]

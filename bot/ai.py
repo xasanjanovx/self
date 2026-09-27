@@ -58,14 +58,27 @@ def reload_free_key() -> None:
     _saved_free_key = None
     _free_paused_until = 0.0
 FREE_PAUSE_S = 3600.0          # бесплатный ответил «лимит» — час идём через платный
-FREE_SMART_MODEL = (_os.getenv("GEMINI_FREE_MODEL") or "gemini-3.5-flash").strip()  # 28.09: умнее — Flash, а не Flash-Lite
+# 28.09: умнее — Flash, а не Flash-Lite. 3.8 Flash на его бесплатном ключе работает (проверено), быстрее и умнее 3.5 Flash
+FREE_SMART_MODEL = (_os.getenv("GEMINI_FREE_MODEL") or "gemini-3.8-flash").strip()
 # None — бесплатный ключ не использовать; "" — той же моделью; "имя" — этой (умной) моделью через бесплатный ключ
 _free_mode: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_free", default=None)
 # какой моделью уже начат этот ход агента: «подписи размышлений» модели в истории хода другой модели не подходят —
 # поэтому весь ход (все шаги с инструментами) идёт одной моделью, даже если бесплатный лимит кончился посреди хода
 _turn_model: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_turn_model", default=None)
 _free_paused_until = 0.0
+_free_tts_paused_until = 0.0      # бесплатный ключ не дал озвучку — час озвучиваем платным
 _free_smart_blocked_until = 0.0   # умная модель на бесплатном уровне недоступна / её лимит кончился — до этого времени не пробуем
+# 28.09: 3.8/3.7 Flash не принимают thinkingLevel «minimal» (400) — им «low»; новые такие модели запоминаются по ответу
+_NO_MINIMAL: set[str] = {"gemini-3.8-flash", "gemini-3.7-flash"}
+
+
+def _adapt(model: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Настройки запроса под модель: «minimal» размышлений → «low» там, где minimal не поддерживается."""
+    gc = payload.get("generationConfig") or {}
+    tc = gc.get("thinkingConfig") or {}
+    if model in _NO_MINIMAL and str(tc.get("thinkingLevel") or "").lower() == "minimal":
+        return {**payload, "generationConfig": {**gc, "thinkingConfig": {**tc, "thinkingLevel": "low"}}}
+    return payload
 
 
 def use_free(model: str | None = None) -> _cv.Token:
@@ -304,9 +317,12 @@ class AIService:
                 else:
                     tries = [mode] if mode and mode != model and _time.monotonic() > _free_smart_blocked_until else []
                     tries.append(model)
-                for use in tries:
+                i = 0
+                while i < len(tries):
+                    use = tries[i]
+                    i += 1
                     try:
-                        response = await self._client.post(f"{self.base_url}/{use}:generateContent", json=payload,
+                        response = await self._client.post(f"{self.base_url}/{use}:generateContent", json=_adapt(use, payload),
                                                            headers={"x-goog-api-key": key})
                     except (httpx.TimeoutException, httpx.NetworkError) as exc:
                         logger.info("free key: %s — через платный", type(exc).__name__)
@@ -317,6 +333,10 @@ class AIService:
                         _turn_model.set(use)
                         return data
                     logger.info("free key %s: %s %s", use, response.status_code, response.text[:160])
+                    if response.status_code == 400 and "thinking level minimal" in response.text.lower() and use not in _NO_MINIMAL:
+                        _NO_MINIMAL.add(use)  # новая «привередливая» модель — запомнили, сразу ещё раз с «low»
+                        tries.insert(i, use)
+                        continue
                     if use != model and not turn and response.status_code in {429, 400, 403, 404}:
                         # умной на бесплатном уровне нет или её лимит кончился — бесплатно той же, что и раньше
                         _free_smart_blocked_until = _time.monotonic() + (FREE_PAUSE_S if response.status_code == 429 else 6 * FREE_PAUSE_S)
@@ -328,6 +348,7 @@ class AIService:
             model = turn or model
             url = f"{self.base_url}/{model}:generateContent"
             _turn_model.set(model)
+        payload = _adapt(model, payload)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 response = await self._client.post(url, json=payload)
@@ -490,33 +511,50 @@ class AIService:
     async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL):
         """Текст → речь потоком (PCM s16le, 24 kHz, mono): первые куски звука — через ~0.6 с, пока модель договаривает.
         gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз."""
+        global _free_tts_paused_until
         url = f"{self.base_url}/{model}:streamGenerateContent?alt=sse"
         payload = {
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
         }
-        usage: dict[str, Any] | None = None
-        try:
-            async with self._client.stream("POST", url, json=payload) as response:
+        # 28.09: 3.8 Flash-Lite TTS есть и на бесплатном уровне — сначала его бесплатным ключом, не вышло — платным
+        routes: list[tuple[str, dict[str, str]]] = []
+        key = free_key()
+        if key and _time.monotonic() > _free_tts_paused_until:
+            routes.append(("free", {"x-goog-api-key": key}))
+        routes.append(("paid", {}))
+        for route, headers in routes:
+            usage: dict[str, Any] | None = None
+            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = (await response.aread()).decode("utf-8", "replace")
+                    if route == "free":
+                        logger.info("free key TTS: %s %s — озвучиваю платным", response.status_code, body[:120])
+                        if response.status_code in {429, 400, 403, 404}:
+                            _free_tts_paused_until = _time.monotonic() + FREE_PAUSE_S
+                        continue
                     if response.status_code == 429:
                         billing.rate_limited()
                     if billing.is_billing_error(response.status_code, body):
                         billing.exhausted(body)
                     raise RuntimeError(f"TTS {model} {response.status_code}: {body[:200]}")
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = json.loads(line[6:])
-                    usage = data.get("usageMetadata") or usage
-                    for cand in data.get("candidates") or []:
-                        for part in (cand.get("content") or {}).get("parts") or []:
-                            blob = part.get("inlineData") if isinstance(part, dict) else None
-                            if blob and blob.get("data"):
-                                yield base64.b64decode(blob["data"])
-        finally:
-            billing.record(model, usage, kind="voice")
+                try:
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data = json.loads(line[6:])
+                        usage = data.get("usageMetadata") or usage
+                        for cand in data.get("candidates") or []:
+                            for part in (cand.get("content") or {}).get("parts") or []:
+                                blob = part.get("inlineData") if isinstance(part, dict) else None
+                                if blob and blob.get("data"):
+                                    yield base64.b64decode(blob["data"])
+                finally:
+                    if route == "free":
+                        billing.record_free(model, usage)
+                    else:
+                        billing.record(model, usage, kind="voice")
+            return
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
         text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)
