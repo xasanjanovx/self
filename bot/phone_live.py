@@ -244,6 +244,7 @@ class PhoneLive(_Session):
         self.owner = OwnerGate(self.uid, enabled=False)   # включает run(), если есть отпечаток голоса
         self.instant_on = INSTANT
         self.instant_done = 0
+        self.morning_proof = False             # утро после будильника: ждём его связный ответ (тогда — «проснулся»)
         self._ibuf: list[bytes] = []
         self._ibuf_s = 0.0
         self._ipass = False                    # длинная фраза уже ушла в Gemini — её хвост тоже прямо туда
@@ -450,6 +451,7 @@ class PhoneLive(_Session):
                     from . import app_alarm
 
                     self.gate.last_voice = time.monotonic()
+                    self.morning_proof = True  # 27.09: «проспал» — будильник выключится, только когда он ответит голосом
                     await self.say_text(gem, app_alarm.morning_note(self.profile, self.persona))
                 elif kind == "image" and data.get("data"):
                     await self._on_frame(gem, {"data": str(data["data"]), "mimeType": str(data.get("mime") or "image/jpeg")})
@@ -561,10 +563,26 @@ class PhoneLive(_Session):
 
     def _flush_transcript(self) -> None:
         if self._in_text:
-            self.user_lines.append("".join(self._in_text).strip())
+            said = "".join(self._in_text).strip()
+            self.user_lines.append(said)
+            if self.morning_proof and len(re.findall(r"\w{2,}", said)) >= 2:
+                # ответил связно после «Доброе утро» и вопроса дня — проснулся: будильник в телефоне выключаем, звонки — отбой
+                self.morning_proof = False
+                self.track(self._morning_awake(said))
         if self._out_text:
             self.jarvis_lines.append("".join(self._out_text).strip())
         super()._flush_transcript()
+
+    async def _morning_awake(self, said: str) -> None:
+        from . import wake_runner
+        from .context import bot_instance
+
+        logger.info("phone live %s: утро — ответил «%s», будильник выключаю", self.uid, said[:60])
+        await self.to_phone({"type": "awake"})
+        try:
+            await wake_runner.mark_awake(bot_instance(), self.profile, source="app")
+        except Exception:
+            logger.warning("morning: mark_awake не вышел", exc_info=True)
 
     def _named(self, args: dict[str, Any]) -> bool:
         """Звонить можно тому, кого он назвал сейчас (или на чей вопрос «Позвонить папе?» он ответил «да»)."""
@@ -656,6 +674,17 @@ PHONE_TASK_SILENT = {"remember_about_me", "remember_contact"}
 
 
 async def phone_task(sess, request: str) -> dict[str, Any]:  # noqa: ANN001
+    """То же, что _phone_task, но сначала бесплатным ключом Gemini (27.09, если задан)."""
+    from . import ai as ai_mod
+
+    free = ai_mod.use_free()
+    try:
+        return await _phone_task(sess, request)
+    finally:
+        ai_mod.reset_free(free)
+
+
+async def _phone_task(sess, request: str) -> dict[str, Any]:  # noqa: ANN001
     """Облегчённый Live передал редкую просьбу: Flash-Lite выполняет её телефонными инструментами (действия уходят на телефон
     тем же exec_tool) и возвращает итог — Live его перескажет или промолчит."""
     request = request.strip()

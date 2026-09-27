@@ -327,7 +327,13 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
         snapshot, memory = "", ""
     hint = "[голосовая просьба через JES: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
-    res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
+    from . import ai as ai_mod
+
+    free = ai_mod.use_free()  # 27.09: простые просьбы голосом — сначала бесплатным ключом Gemini (если задан)
+    try:
+        res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
+    finally:
+        ai_mod.reset_free(free)
     return {"ok": True, "reply": res.text, "done": res.ctx.calls}
 
 
@@ -592,10 +598,9 @@ class _Session:
         next_at = loop.time()
         drained_at = None
         while not self.stop.is_set():
-            if len(self.out) >= frame:
-                self.last_activity = loop.time()
+            speech = len(self.out) >= frame
+            if speech:
                 chunk = bytes(self.out[:frame])
-                del self.out[:frame]
             else:
                 chunk = silence
                 if self.hangup_after_speech:
@@ -603,9 +608,18 @@ class _Session:
                     if loop.time() - drained_at > 0.6:  # договорил прощание — кладём трубку
                         self.stop.set()
                         return
-            if not await caller.send_audio(self.uid, chunk):
+            sent = await caller.send_audio(self.uid, chunk)
+            if sent is None:
+                # звук ещё соединяется — приветствие не теряем, ждём
+                await asyncio.sleep(0.05)
+                next_at = loop.time()
+                continue
+            if not sent:
                 self.stop.set()
                 return
+            if speech:
+                self.last_activity = loop.time()
+                del self.out[:frame]
             next_at += tick
             delay = next_at - loop.time()
             if delay > 0:

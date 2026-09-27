@@ -230,7 +230,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn("Budilnik" if lang == "uz" else "Будильник", "settings:wake", style=P, icon=_pe.ID_ALARM),
             ],
             [
-                _btn(t(lang, "menu_settings"), "menu:settings", icon=_pe.ID_SETTINGS),
+                _btn(t(lang, "menu_settings"), "menu:settings", style="danger", icon=_pe.ID_SETTINGS),  # 27.09: красная — синий и зелёный уже заняты
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
         ]

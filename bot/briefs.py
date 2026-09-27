@@ -206,6 +206,10 @@ def ai_spend_lines(profile: Profile) -> list[str]:
             f"{'shu oy' if uz else 'за месяц'} ${s['spent_month_usd']:.2f}")
     if s.get("balance_usd") is not None:
         line += f" · {'qoldiq' if uz else 'остаток'} ~${s['balance_usd']:.2f}"
+    free = billing.free_today()
+    if free.get("calls"):
+        line += (f"\n🆓 {'bepul kalit' if uz else 'бесплатный ключ'}: {free['calls']} {'so‘rov' if uz else 'запросов'}, "
+                 f"{'tejaldi' if uz else 'сэкономлено'} ${float(free.get('saved_usd') or 0):.3f}")
     return [line]
 
 

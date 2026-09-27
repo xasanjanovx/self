@@ -129,4 +129,90 @@ async def warm() -> None:
     await recognizer()
 
 
-__all__ = ["check", "match", "warm"]
+# ------------------------------------------------------------------ 27.09: «умнее» — его голос, а имя расслышано криво
+# За сутки сервер отказал 236 раз «имя не прозвучало», и почти всё это был он сам (голос из его «банка» 0.8–0.99):
+# русский распознаватель слышит «Джес» как «джой», «джесси», «дж», «с» или вообще теряет имя («позвони маме»).
+# Когда голос точно его, эти варианты принимаем; ещё и учимся: отказали, а через несколько секунд он повторил ту же
+# команду и прошёл — значит, первое слово отказанной фразы и было его «Джес» в ушах распознавателя.
+_VERBS = {"позвони", "набери", "звони", "открой", "запусти", "включи", "выключи", "отключи", "поставь", "заведи", "засеки",
+          "вызови", "закажи", "напиши", "отправь", "скажи", "найди", "покажи", "сделай", "добавь", "запиши", "напомни",
+          "громче", "тише", "пауза", "фонарик", "такси"}
+_QUESTIONS = {"какая", "какой", "какое", "сколько", "который", "когда", "где", "кто", "что"}
+_TAIL = {"с", "эс", "ес", "есс", "жес", "жэс", "дж", "джс", "джэ"}
+_STOP = {"сейчас", "вот", "так", "это", "да", "нет", "а", "и", "ну", "мне", "меня", "там", "тут", "уже", "ещё", "еще",
+         "как", "что", "где", "когда", "потом", "тоже", "и", "но", "он", "она", "они", "я", "ты", "вы", "мы"}
+LEARN_WINDOW_S = 25.0
+_last_reject: dict[int, tuple[float, list[str]]] = {}
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-zа-яё]+", str(text or "").lower().replace("ё", "е"))
+
+
+def _variants_file():  # noqa: ANN202
+    from .tg_user import data_dir
+
+    return data_dir() / "wake_variants.json"
+
+
+def variants(uid: int | None) -> set[str]:
+    """Выученные написания его «Джес» (как их слышит распознаватель)."""
+    if uid is None:
+        return set()
+    try:
+        import json
+
+        return set(json.loads(_variants_file().read_text(encoding="utf-8")).get(str(uid)) or [])
+    except Exception:
+        return set()
+
+
+def _learn(uid: int, word: str) -> None:
+    import json
+
+    try:
+        path = _variants_file()
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        known = [w for w in data.get(str(uid)) or [] if w != word]
+        data[str(uid)] = (known + [word])[-20:]
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        logger.info("wakeword: выучил, как звучит его «Джес»: «%s»", word)
+    except Exception:
+        logger.warning("wakeword: не запомнил вариант", exc_info=True)
+
+
+def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None) -> tuple[bool, str, str]:
+    """Имя не распознано строго, но голос точно его: (принять?, что после имени, почему)."""
+    words = _words(text)
+    if not strong or not words:
+        return False, "", ""
+    learned = variants(uid)
+    for i, w in enumerate(words[: NAME_MAX_POS + 1]):
+        if (w.startswith("дж") and len(w) <= 8) or w in learned:
+            return True, " ".join(words[i + 1:]), f"имя как «{w}»"
+    for i, w in enumerate(words[:2]):
+        if w in _VERBS or (confident and w in _QUESTIONS):
+            return True, " ".join(words[i:]), "имя обрезано — сразу команда"
+    if len(words) == 1 and words[0] in _TAIL:
+        return True, "", "хвост имени"
+    return False, "", ""
+
+
+def note_reject(uid: int | None, text: str, strong: bool) -> None:
+    if uid is not None and strong:
+        _last_reject[uid] = (time.monotonic(), _words(text))
+
+
+def note_accept(uid: int | None, after: str) -> None:
+    """Прошло — если перед этим отказали той же команде, первое слово отказа = его «Джес» в ушах распознавателя."""
+    if uid is None:
+        return
+    rej = _last_reject.pop(uid, None)
+    if not rej or time.monotonic() - rej[0] > LEARN_WINDOW_S or len(rej[1]) < 2:
+        return
+    first, tail = rej[1][0], {w for w in rej[1][1:] if len(w) >= 3}
+    if tail & set(_words(after)) and 2 <= len(first) <= 8 and first not in _STOP and first not in _VERBS and first not in _QUESTIONS:
+        _learn(uid, first)
+
+
+__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants"]

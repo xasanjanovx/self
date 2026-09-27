@@ -348,6 +348,23 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
     return usd
 
 
+def record_free(model: str, usage: dict[str, Any] | None) -> None:
+    """Ответ бесплатного ключа Gemini: денег не стоит — считаем, сколько запросов и сколько это сэкономило."""
+    if not usage:
+        return
+    parts, _ = breakdown(model, usage)
+    st = _load()
+    day = st["days"].setdefault(_today(), {"usd": 0.0, "calls": 0, "kinds": {}})
+    free = day.setdefault("free", {"calls": 0, "saved_usd": 0.0})
+    free["calls"] = int(free.get("calls") or 0) + 1
+    free["saved_usd"] = round(float(free.get("saved_usd") or 0) + sum(parts.values()), 6)
+    _schedule_save()
+
+
+def free_today() -> dict[str, Any]:
+    return dict(((_load().get("days") or {}).get(_today()) or {}).get("free") or {})
+
+
 def spent_today() -> float:
     return float(((_load().get("days") or {}).get(_today()) or {}).get("usd") or 0.0) * float(_load().get("factor") or 1.0)
 
@@ -575,4 +592,4 @@ def _notify(text: str) -> None:
 
 __all__ = ["record", "cost", "breakdown", "status", "set_balance", "exhausted", "is_billing_error", "rate_limited", "voice_note", "flush",
            "PRICES", "Meter", "start_session", "end_session", "live_allowed", "set_user", "reset_user", "user_spent_today",
-           "user_over_limit", "clients_report", "clients_spent_today", "CLIENT_DAILY_LIMIT_USD"]
+           "user_over_limit", "clients_report", "clients_spent_today", "CLIENT_DAILY_LIMIT_USD", "record_free", "free_today"]

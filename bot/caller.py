@@ -406,6 +406,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
     # свежее событие после ответа: всё, что пришло про прошлые попытки, больше не считается
     ended = asyncio.Event()
     _ended[uid] = ended
+    _answered_at[uid] = time.monotonic()
     logger.info("call %s: соединение через %s · %s", uid, stats.at(), stats.summary())
     logger.info("call %s: трубку взяли", uid)
     try:
@@ -431,8 +432,13 @@ def classify_error(exc: Exception) -> str | None:
     return f"{type(exc).__name__}: {exc}"
 
 
-async def send_audio(user_id: int, pcm: bytes) -> bool:
-    """Отправить в звонок кусок PCM (24 кГц моно, кратно 10 мс). False — звонка уже нет."""
+CONNECT_GRACE = 15.0   # трубку взяли, а звук ещё соединяется (на Wi-Fi — до ~10 с): «не в звонке» ≠ «положил трубку»
+_answered_at: dict[int, float] = {}
+
+
+async def send_audio(user_id: int, pcm: bytes) -> bool | None:
+    """Отправить в звонок кусок PCM (24 кГц моно, кратно 10 мс). False — звонка уже нет; None — звонок принят,
+    но звук ещё соединяется (кусок не ушёл — отправить позже)."""
     try:
         from pytgcalls.types import Device  # type: ignore
 
@@ -440,6 +446,11 @@ async def send_audio(user_id: int, pcm: bytes) -> bool:
         return True
     except Exception as exc:
         if "notincall" in type(exc).__name__.lower():
+            # 27.09 05:05: будильник — трубку взяли, через 0.75 с первый кадр «не в звонке» → бот решил, что трубку
+            # положили, и сам оборвал звонок. Первые секунды после ответа звук ещё соединяется — ждём.
+            since = time.monotonic() - _answered_at.get(int(user_id), 0.0)
+            if since < CONNECT_GRACE:
+                return None
             event = _ended.get(int(user_id))
             if event is not None:
                 event.set()

@@ -200,16 +200,35 @@ async def wake_check(request: web.Request) -> web.Response:
     if heard is not None:
         # 26.09: пустая запись (кашель, стук) при «уверенном» телефоне тоже пропускалась — JES открывался сам по себе.
         # Теперь — только если распознаватель услышал имя
-        ok = bool(heard["name"])
+        ok, after, why = bool(heard["name"]), heard["after"], ""
+        # 27.09: голос точно его (банк его записей ≥ 0.8 или уверенный отпечаток) — имя принимаем и в кривом прочтении
+        # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
+        strong = bool(voice.get("sure")) or float(voice.get("bank") or 0) >= 0.8 or (
+            float(voice.get("z") or 0) >= 3 and float(voice.get("score") or 0) >= 0.45)
+        if not ok:
+            ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid)
+            if ok:
+                after = lenient_after
+            else:
+                wakeword.note_reject(uid, heard["text"], strong)
+        else:
+            wakeword.note_accept(uid, after)
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
             if voice.get("sure"):
                 voiceprint.bank_add(uid, voice.get("_emb"))  # уверенно он — в банк его настоящих записей
-        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)", "да" if ok else "нет", took, heard["text"][:60],
-                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"])
+        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)%s", "да" if ok else "нет", took, heard["text"][:60],
+                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"], f" — {why}" if why else "")
         if not ok:
             _reject(uid, f"не «Джес»: «{heard['text'][:60]}»")
-        return web.json_response({"ok": ok, "text": heard["text"], "command": bool(heard["after"]), "voice": voice.get("score"), "fast": True})
+            return web.json_response({"ok": False, "text": heard["text"], "fast": True})
+        if data.get("act") and after and uid is not None:
+            # 27.09 «моментально и бесплатно»: телефон дождался конца фразы — команду делаем сразу, без разговора с Gemini
+            done = await _instant_command(uid, heard["text"], after, data.get("device") if isinstance(data.get("device"), dict) else {})
+            if done is not None:
+                logger.info("wake check: сразу команда «%s» → %s за %.2f с (без Live)", heard["text"][:60], done["tool"], time.monotonic() - started)
+                return web.json_response({"ok": True, "text": heard["text"], "fast": True, **done})
+        return web.json_response({"ok": True, "text": heard["text"], "command": bool(after), "voice": voice.get("score"), "fast": True})
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
                                 model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
@@ -293,6 +312,35 @@ async def wake_event(request: web.Request) -> web.Response:
 
 async def _no_voice() -> dict[str, Any]:
     return {"ok": True}
+
+
+async def _instant_command(uid: int, said: str, after: str, device: dict[str, Any]) -> dict[str, Any] | None:
+    """«Джес, позвони маме» одной фразой: разобрать без ИИ и выполнить сразу — телефон получает готовые действия в ответе
+    на проверку имени, разговор с Gemini не открывается (быстрее на ~1 с и $0). Не команда / не вышло — None (как раньше)."""
+    from . import agent_tools, instant, phone_live, services
+    from . import agent_tools_extra as extra
+    from .handlers.common import profile_by_id
+
+    cmd = instant.parse(after)
+    first, _, rest = after.partition(" ")
+    if cmd is None and rest and first[:1] in {"д", "ж", "ч"}:
+        cmd = instant.parse(rest)  # имя расслышано как «джаз»/«жест» — команда после него
+    if cmd is None or (device.get("locked") and cmd.tool in phone_live.NEED_UNLOCK):
+        return None  # заблокирован — после разблокировки доделает Gemini (ему нужна фраза)
+    profile = await profile_by_id(uid)
+    turn = phone.PhoneTurn(uid=uid, device=device)
+    ctx = agent_tools.ToolContext(profile=profile, text=said)
+    try:
+        result = await phone.make_runner(turn)(cmd.tool, cmd.args, ctx)
+    except Exception:
+        logger.warning("instant: команда не вышла", exc_info=True)
+        return None
+    if not instant.succeeded(result) or not (turn.actions or (isinstance(result, dict) and result.get("calling_via_telegram"))):
+        return None
+    phone_live.discard(uid)  # заготовленный разговор с Gemini не нужен
+    phone._later(extra.remember_exchange(uid, "📱 " + said, f"(сделано: {cmd.tool})", when=profile.now.strftime("%d.%m %H:%M")))
+    phone._later(services.log_agent(uid, text=said, kind="phone_instant", tools=cmd.tool, reply="", ok=True))
+    return {"done": True, "tool": cmd.tool, "actions": turn.actions, "need_contacts": turn.need_contacts}
 
 
 def _reject(uid: int | None, why: str = "") -> None:

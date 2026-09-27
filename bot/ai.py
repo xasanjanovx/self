@@ -28,6 +28,30 @@ logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
+
+# 27.09 (его выбор «бесплатный ключ Google»): простые вопросы и команды бота с телефона — сначала через ключ проекта
+# БЕЗ оплаты (бесплатный уровень Gemini: $0, ~1000 запросов в день; Google может использовать эти тексты для обучения —
+# он согласился). Лимит кончился или модель там недоступна — тот же запрос сразу через платный ключ.
+import contextvars as _cv  # noqa: E402
+import os as _os  # noqa: E402
+import time as _time  # noqa: E402
+
+FREE_API_KEY = (_os.getenv("GEMINI_FREE_API_KEY") or "").strip()
+FREE_PAUSE_S = 3600.0          # бесплатный ответил «лимит» — час идём через платный
+_free_mode: _cv.ContextVar[bool] = _cv.ContextVar("gemini_free", default=False)
+_free_paused_until = 0.0
+
+
+def use_free() -> _cv.Token:
+    """Дальше в этой задаче запросы Gemini — сначала бесплатным ключом (если он задан)."""
+    return _free_mode.set(True)
+
+
+def reset_free(token: _cv.Token) -> None:
+    try:
+        _free_mode.reset(token)
+    except ValueError:
+        pass
 _BASE_DELAY = 0.8
 _MAX_DELAY = 4.0
 
@@ -240,7 +264,20 @@ class AIService:
     # ------------------------------------------------------------- core call
     async def _post(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST generateContent с коротким retry на временные ошибки. Возвращает сырой JSON."""
+        global _free_paused_until
         url = f"{self.base_url}/{model}:generateContent"
+        if _free_mode.get() and FREE_API_KEY and _time.monotonic() > _free_paused_until:
+            try:
+                response = await self._client.post(url, json=payload, headers={"x-goog-api-key": FREE_API_KEY})
+                if response.status_code == 200:
+                    data = response.json()
+                    billing.record_free(model, data.get("usageMetadata"))
+                    return data
+                logger.info("free key: %s %s — через платный", response.status_code, response.text[:160])
+                if response.status_code in {429, 403, 400, 404}:
+                    _free_paused_until = _time.monotonic() + FREE_PAUSE_S
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                logger.info("free key: %s — через платный", type(exc).__name__)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 response = await self._client.post(url, json=payload)
