@@ -26,8 +26,11 @@ def test_lenient_name_when_voice_is_his(tmp_path, monkeypatch):
     assert ok("с")[0] and ok("эс")[0]                                   # хвост «Джес»
     assert not ok("прогноз")[0] and not ok("вот так")[0]
     assert not ok("какая погода")[0] and ok("какая погода", confident=True)[0]
-    # голос не его (или не уверен) — строго, как раньше
-    assert not wakeword.lenient("джой включи фонарик", strong=False, confident=True, uid=5)[0]
+    # голос прошёл проверку, но не «точно его»: имя на «дж» — да; команда без имени и «с» — только с уверенным детектором
+    assert wakeword.lenient("дж позвони мам", strong=False, confident=False, uid=5)[:2] == (True, "позвони мам")
+    assert not wakeword.lenient("позвони маме", strong=False, confident=True, uid=5)[0]
+    assert not wakeword.lenient("с", strong=False, confident=False, uid=5)[0]
+    assert wakeword.lenient("с", strong=False, confident=True, uid=5)[0]
 
 
 def test_learns_how_recognizer_hears_his_name(tmp_path, monkeypatch):

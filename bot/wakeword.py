@@ -182,14 +182,20 @@ def _learn(uid: int, word: str) -> None:
 
 
 def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None) -> tuple[bool, str, str]:
-    """Имя не распознано строго, но голос точно его: (принять?, что после имени, почему)."""
+    """Имя не распознано строго, а голос прошёл проверку (вызывать только тогда): (принять?, что после имени, почему).
+    «дж…»/выученное слово в начале — имя при любом его голосе («дж позвони мам» с похожестью 0.82 отказывали);
+    одна команда без имени или хвост «с» — только если голос точно его (strong) или детектор уверен в слове."""
     words = _words(text)
-    if not strong or not words:
+    if not words:
         return False, "", ""
     learned = variants(uid)
     for i, w in enumerate(words[: NAME_MAX_POS + 1]):
         if (w.startswith("дж") and len(w) <= 8) or w in learned:
             return True, " ".join(words[i + 1:]), f"имя как «{w}»"
+    if not strong:
+        if confident and len(words) == 1 and words[0] in _TAIL:
+            return True, "", "хвост имени (детектор уверен)"
+        return False, "", ""
     for i, w in enumerate(words[:2]):
         if w in _VERBS or (confident and w in _QUESTIONS):
             return True, " ".join(words[i:]), "имя обрезано — сразу команда"

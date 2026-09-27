@@ -203,7 +203,7 @@ async def wake_check(request: web.Request) -> web.Response:
         ok, after, why = bool(heard["name"]), heard["after"], ""
         # 27.09: голос точно его (банк его записей ≥ 0.8 или уверенный отпечаток) — имя принимаем и в кривом прочтении
         # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
-        strong = bool(voice.get("sure")) or float(voice.get("bank") or 0) >= 0.8 or (
+        strong = bool(voice.get("sure")) or float(voice.get("bank") or 0) >= 0.8 or float(voice.get("score") or 0) >= 0.6 or (
             float(voice.get("z") or 0) >= 3 and float(voice.get("score") or 0) >= 0.45)
         if not ok:
             ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid)
