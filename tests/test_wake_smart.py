@@ -321,3 +321,12 @@ def test_tts_goes_free_first_then_paid(monkeypatch):
 
     chunks = asyncio.run(run())
     assert seen == ["FREE", "PAID"] and chunks == [b"\x00\x00\x00"]
+
+
+def test_free_pause_follows_google_retry_delay():
+    minute = ('{"error": {"code": 429, "message": "Quota exceeded ... Please retry in 41.2s.", "details": '
+              '[{"violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]}, {"retryDelay": "41s"}]}}')
+    day = '{"error": {"code": 429, "details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}'
+    assert ai_mod._free_pause(minute) == 42.0
+    assert ai_mod._free_pause(day) == ai_mod.FREE_PAUSE_S
+    assert ai_mod._free_pause("quota") == 60.0

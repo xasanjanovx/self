@@ -72,6 +72,16 @@ _free_smart_blocked_until = 0.0   # умная модель на бесплат�
 _NO_MINIMAL: set[str] = {"gemini-3.8-flash", "gemini-3.7-flash"}
 
 
+def _free_pause(body: str) -> float:
+    """Сколько не трогать бесплатный ключ после «429»: дневной лимит — час; лимит в минуту — сколько просит Google
+    (retryDelay, обычно секунды; 28.09: пауза на час из-за минутного лимита уводила всё в платный)."""
+    text = str(body or "")
+    if "PerDay" in text or "per day" in text.lower():
+        return FREE_PAUSE_S
+    m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', text) or re.search(r"retry in (\d+(?:\.\d+)?)\s*s", text, re.IGNORECASE)
+    return min(float(m.group(1)) + 1.0, 120.0) if m else 60.0
+
+
 def _adapt(model: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Настройки запроса под модель: «minimal» размышлений → «low» там, где minimal не поддерживается."""
     gc = payload.get("generationConfig") or {}
@@ -339,10 +349,10 @@ class AIService:
                         continue
                     if use != model and not turn and response.status_code in {429, 400, 403, 404}:
                         # умной на бесплатном уровне нет или её лимит кончился — бесплатно той же, что и раньше
-                        _free_smart_blocked_until = _time.monotonic() + (FREE_PAUSE_S if response.status_code == 429 else 6 * FREE_PAUSE_S)
+                        _free_smart_blocked_until = _time.monotonic() + (_free_pause(response.text) if response.status_code == 429 else 6 * FREE_PAUSE_S)
                         continue
                     if response.status_code in {429, 403, 400, 404}:
-                        _free_paused_until = _time.monotonic() + FREE_PAUSE_S
+                        _free_paused_until = _time.monotonic() + (_free_pause(response.text) if response.status_code == 429 else FREE_PAUSE_S)
                     break
             # платный — той же моделью, какой начат ход (иначе Google отклонит чужие «подписи размышлений»)
             model = turn or model
@@ -531,7 +541,7 @@ class AIService:
                     if route == "free":
                         logger.info("free key TTS: %s %s — озвучиваю платным", response.status_code, body[:120])
                         if response.status_code in {429, 400, 403, 404}:
-                            _free_tts_paused_until = _time.monotonic() + FREE_PAUSE_S
+                            _free_tts_paused_until = _time.monotonic() + (_free_pause(body) if response.status_code == 429 else FREE_PAUSE_S)
                         continue
                     if response.status_code == 429:
                         billing.rate_limited()
