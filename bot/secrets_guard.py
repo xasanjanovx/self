@@ -24,6 +24,10 @@ _OTHER = [
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),  # JWT (ключи Supabase и т.п.)
 ]
 _LONG = re.compile(r"(?<![\w/.:@-])[A-Za-z0-9_\-]{36,}(?![\w/.-])")  # длинный «пароль» без пробелов
+# «пароль: …», «password=…», «parol …», «пин 1234», «код из смс 5678» — само значение (28.09: 24.09 в журнале агента
+# остался пароль от почты, присланный текстом)
+_PASSWORD = re.compile(r"(?i)\b(пароль|паролем|парол[ья]|password|passwd|parol[i]?|пин(?:-?код)?|pin|cvv|cvc|код из смс|sms kod[i]?)"
+                       r"(\s*(?:от\s+\S+\s*)?[:=\-–—]?\s*)((?=\S*[\d@#$%^&*!_.])\S{4,})")  # значение с цифрой/знаком — не «вчера»
 MASK = "«ключ скрыт»"
 
 
@@ -40,6 +44,8 @@ def find(text: str | None) -> tuple[str, str] | None:
     for rx in _OTHER:
         if m := rx.search(t):
             return "secret", m.group(0)
+    if m := _PASSWORD.search(t):
+        return "secret", m.group(3)
     whole = t.strip()
     if " " not in whole and len(whole) >= 36 and _LONG.fullmatch(whole) and _mixed(whole):
         return "secret", whole
@@ -51,6 +57,7 @@ def mask(text: str | None) -> str:
     t = _GEMINI.sub(MASK, str(text or ""))
     for rx in _OTHER:
         t = rx.sub(MASK, t)
+    t = _PASSWORD.sub(lambda m: m.group(1) + m.group(2) + MASK, t)
     return _LONG.sub(lambda m: MASK if _mixed(m.group(0)) else m.group(0), t)
 
 
@@ -139,12 +146,20 @@ async def scrub_existing(uids: list[int]) -> int:
     for uid in uids:
         try:
             mem = await services.user_memory(uid)
-            recent = str(mem.get("recent") or "")
-            if find(recent):
-                await services.save_user_memory(uid, {"recent": mask(recent)})
-                fixed += 1
+            for field in ("recent", "facts"):  # недавние реплики и факты о нём — оба идут в промпты
+                value = str(mem.get(field) or "")
+                if find(value):
+                    await services.save_user_memory(uid, {field: mask(value)})
+                    fixed += 1
         except Exception:
             logger.debug("scrub memory failed", exc_info=True)
+        try:
+            for note in await db.list_notes(uid):
+                if find(note.get("text")) and note.get("id") is not None:
+                    await db.update_note(uid, note["id"], {"text": mask(note.get("text"))})
+                    fixed += 1
+        except Exception:
+            logger.debug("scrub notes failed", exc_info=True)
         try:
             for row in await db.list_agent_log(uid, days=30, limit=500):
                 if (find(row.get("text")) or find(row.get("reply"))) and row.get("id") is not None:

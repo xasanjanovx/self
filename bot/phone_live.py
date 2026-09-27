@@ -1168,6 +1168,26 @@ def announce_prompt(name: str, app: str, lang: str, memory: str = "") -> str:
     )
 
 
+def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
+    """«Звонит мама», «Звонит Машхур бек ака в Telegram», «Звонит Джес» — без модели: быстро, бесплатно и без искажений
+    (28.09: модель читала «JES | AI» как «Джарвис», «Mashhur bek» как «Махурбек»)."""
+    one, anon = _ANNOUNCE_FALLBACK.get(lang, _ANNOUNCE_FALLBACK["ru"])
+    uz = lang == "uz"
+    messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
+    where = (f" ({messenger})" if uz else f" в {messenger}") if messenger else ""
+    if not name or phone.names.as_phone_number(name):
+        # 26.09: несохранённый номер — так и сказать
+        return ("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + where
+    if phone.names.ASSISTANT_NAMES.search(name):
+        return ("JES qo'ng'iroq qilyapti" if uz else "Звонит Джес") + where  # помощник JES (будильник, «позвони мне»)
+    kin = phone.kin_of(uid, name) or phone.names.kin_word(phone.names.kin_root(name) or "")
+    if kin:
+        # свои (он сказал, кто брат/мама, или так и записан) — «Звонит брат»
+        return (f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + where
+    spoken = phone.names.speakable(name, lang)
+    return (one.format(name=spoken) + where) if spoken else anon
+
+
 def clean_announcement(text: str) -> str:
     return str(text or "").strip().strip("«»\"'").splitlines()[0].strip() if str(text or "").strip() else ""
 
@@ -1176,13 +1196,13 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     """Фраза «Звонит мама» и её голос (WAV в base64). Кэш — по имени, приложению и голосу."""
     import hashlib
 
-    from . import agent_tools_extra as extra
     from .tg_user import data_dir
 
     persona = await services.persona(uid)
     name = str(name or "").strip()[:80]
     app = str(app or "").strip()[:30]
-    key = hashlib.sha1(f"{persona.voice}|{persona.lang}|{name}|{app}".encode()).hexdigest()[:16]
+    # v3 (28.09): фраза без модели, имя целиком — старый кэш («Джарвис звонит», «Махурбек») больше не берём
+    key = hashlib.sha1(f"v3|{persona.voice}|{persona.lang}|{name}|{app}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"
@@ -1190,29 +1210,7 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    one, anon = _ANNOUNCE_FALLBACK.get(persona.lang, _ANNOUNCE_FALLBACK["ru"])
-    text = ""
-    uz = persona.lang == "uz"
-    messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
-    kin = phone.kin_of(uid, name) if name else None
-    if not name or phone.names.as_phone_number(name):
-        # 26.09: несохранённый номер — так и сказать
-        text = ("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + (f" ({messenger})" if uz and messenger else
-                                                                                           f" в {messenger}" if messenger else "")
-    elif kin:
-        # свои (он сказал, кто брат/мама) — «Звонит брат», без модели
-        text = (f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + (f" в {messenger}" if messenger and not uz else "")
-    try:
-        if text:
-            raise LookupError("готовая фраза")
-        memory = await extra.memory_prompt(uid)
-        text = clean_announcement(await ai.generate([{"text": announce_prompt(name, app, persona.lang, memory)}],
-                                                    temperature=0.2, json_mode=False, max_tokens=60))
-    except LookupError:
-        pass
-    except Exception:
-        logger.warning("announce text failed", exc_info=True)
-    text = text or (one.format(name=name) if name else anon)
+    text = announcement_text(uid, name, app, persona.lang)
     pcm = await ai.synthesize(text, voice=persona.voice)
     out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else ""}
     if pcm:

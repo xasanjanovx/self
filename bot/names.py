@@ -228,6 +228,53 @@ def as_phone_number(value: Any) -> str | None:
     return digits if len(digits.lstrip("+")) >= 5 else None
 
 
+# ------------------------------------------------------------------ как имя произнести вслух (объявление «Звонит …»)
+# 28.09: раньше фразу придумывала модель — и путала: «Mashhur bek» → «Махурбек», «JES | AI» → «Джарвис». Теперь без ИИ:
+# узбекскую латиницу переписываем кириллицей по правилам и читаем имя ЦЕЛИКОМ; ЗАГЛАВНЫЕ — обычными (иначе голос
+# может читать по буквам); эмодзи, номера и приписки («new», «2», оператор) убираем.
+ASSISTANT_NAMES = re.compile(r"^\W*(jes|джес|zeki|зеки|nurai|нурай|jarvis|джарвис)\b", re.IGNORECASE)
+_JUNK_WORDS = {"new", "yangi", "новый", "work", "ish", "tel", "telefon", "nomer", "номер", "моб", "mob", "beeline", "ucell",
+               "uzmobile", "mobiuz", "humans", "perfectum", "uztelecom", "home", "uy", "дом"}
+_LAT2CYR = [("yo'", "ю"), ("yo‘", "ю"), ("o'", "у"), ("o‘", "у"), ("g'", "г"), ("g‘", "г"), ("sh", "ш"), ("ch", "ч"),
+            ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("yo", "ё"), ("ya", "я"), ("yu", "ю"), ("ye", "е")]
+_LAT1 = {"a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "х", "i": "и", "j": "ж", "k": "к",
+         "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у", "v": "в",
+         "w": "в", "x": "х", "y": "й", "z": "з"}
+
+
+def _word_to_cyr(word: str) -> str:
+    w = word.lower().replace("ʻ", "'").replace("ʼ", "'").replace("`", "'").replace("’", "'").replace("‘", "'")
+    out, i = [], 0
+    while i < len(w):
+        for lat, cyr in _LAT2CYR:
+            if w.startswith(lat.replace("‘", "'"), i):
+                out.append(cyr)
+                i += len(lat)
+                break
+        else:
+            ch = w[i]
+            if ch == "e" and i == 0:
+                out.append("э")  # «Elyor» → «Эльёр», а не «Ельёр»
+            elif ch in _LAT1:
+                out.append(_LAT1[ch])
+            elif ch != "'":
+                out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def speakable(name: Any, lang: str = "ru") -> str:
+    """Имя из контактов — как его сказать вслух: «SIROJIDDIN aka 📱2» → «Сирожиддин ака» (для узбекского — латиницей)."""
+    words = []
+    for raw in re.findall(r"[^\W\d_]+(?:['ʻʼ’‘`][^\W\d_]+)*", str(name or "")):
+        if raw.lower() in _JUNK_WORDS:
+            continue
+        if lang != "uz" and re.search(r"[a-zA-Z]", raw):
+            raw = _word_to_cyr(raw)
+        words.append(raw[:1].upper() + raw[1:].lower())
+    return " ".join(words)
+
+
 SELF_WORDS = {"mne", "menya", "sebe", "menga", "meni", "ozimga", "me", "myself"}
 
 

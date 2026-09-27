@@ -83,7 +83,23 @@ async def _auth(request: web.Request, handler):
     if not expected or not hmac.compare_digest(got.encode(), f"Bearer {expected}".encode()):
         await asyncio.sleep(0.5)
         return web.json_response({"error": "unauthorized"}, status=401)
+    _note_version(request.headers.get("X-JES-Version", ""))
     return await handler(request)
+
+
+_app_version = ""
+
+
+def _note_version(version: str) -> None:
+    """28.09: какая версия приложения стоит у него (раньше не знали — журнал 2.5/2.6 так и не пришёл)."""
+    global _app_version
+    version = (version or "до 2.7")[:40]
+    if version != _app_version:
+        _app_version = version
+        logger.info("phone app: версия %s", version)
+        from . import journal
+
+        journal.miss(owner_id() or 0, "app_info", f"версия приложения {version}")
 
 
 async def _json(request: web.Request) -> dict[str, Any]:

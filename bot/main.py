@@ -147,8 +147,41 @@ async def on_shutdown() -> None:
     await ai.close()
 
 
+class _MaskSecrets(logging.Filter):
+    """Ключи и пароли в файл ошибок не пишем."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from .secrets_guard import mask
+
+        try:
+            record.msg, record.args = mask(record.getMessage()), ()
+        except Exception:
+            pass
+        return True
+
+
+def _keep_errors() -> None:
+    """28.09: предупреждения и ошибки — ещё и в файл DATA_DIR/logs/errors.log (2 МБ × 4): логи контейнера пропадают при
+    каждой выкладке, и искать ошибки за прошлые дни было не по чему."""
+    from logging.handlers import RotatingFileHandler
+
+    from .tg_user import data_dir
+
+    try:
+        folder = data_dir() / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(folder / "errors.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        handler.setLevel(logging.WARNING)
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+        handler.addFilter(_MaskSecrets())
+        logging.getLogger().addHandler(handler)
+    except Exception:
+        logger.warning("errors.log не открылся", exc_info=True)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    _keep_errors()
     # httpx логирует каждый запрос на INFO — это шум
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

@@ -101,3 +101,14 @@ def test_agent_log_and_memory_never_keep_keys(monkeypatch):
     monkeypatch.setattr(db, "add_agent_log", add)
     asyncio.run(services.log_agent(1, text=FAKE_NEW, kind="agent", reply="ок"))
     assert FAKE_NEW not in stored["text"] and secrets_guard.MASK in stored["text"]
+
+
+def test_passwords_are_caught_but_not_ordinary_words():
+    fake = "почта test@example.com пароль: Qwerty2002X."        # заведомо ненастоящий
+    assert secrets_guard.find(fake) == ("secret", "Qwerty2002X.")
+    masked = secrets_guard.mask(fake)
+    assert "Qwerty2002X" not in masked and "пароль: " + secrets_guard.MASK in masked
+    assert secrets_guard.find("пин 4821")[0] == "secret"
+    assert secrets_guard.find("поменял пароль вчера вечером") is None
+    assert secrets_guard.find("забыл пароль от wifi") is None
+    assert secrets_guard.find("обед 45000, pass the salt") is None
