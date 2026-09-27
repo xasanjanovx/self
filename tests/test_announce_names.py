@@ -26,3 +26,10 @@ def test_announcement_text(tmp_path, monkeypatch):
     assert say("") == "Звонит незнакомый номер"
     assert say("Mashhur bek aka", "WhatsApp") == "Звонит Машхур Бек Ака в WhatsApp"
     assert say("Alisher", "Telegram", "uz") == "Alisher qo'ng'iroq qilyapti (Telegram)"
+
+
+def test_speakable_drops_contact_tags():
+    assert names.speakable("SIROJIDDIN AKA I") == "Сирожиддин Ака"
+    assert names.speakable("Bobur aka Inv") == "Бобур Ака"
+    assert names.speakable("I Muxtorjon aka Marhamat") == "Мухторжон Ака Мархамат"
+    assert names.speakable("Ali") == "Али"                 # короткое имя — не пометка

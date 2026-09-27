@@ -1138,17 +1138,31 @@ _KIN_UZ = {"мама": "Onangiz", "папа": "Dadangiz", "брат": "Akangiz",
            "сестрёнка": "Singlingiz", "жена": "Rafiqangiz", "муж": "Turmush o'rtog'ingiz", "бабушка": "Buvingiz", "дедушка": "Bobongiz"}
 
 
+PREFETCH_GAP_S = 7.0   # пауза между записью фраз (лимит озвучки Google в минуту)
+
+
 async def prefetch_announcements(uid: int) -> int:
     """«Звонит мама/брат…» и 20 самых частых — голосом заранее (один раз ~$0.0006 на человека): при звонке — сразу и бесплатно."""
     people = [v for k, v in (phone.aliases(uid).get("phone") or {}).items() if phone.names.kin_root(k) == k]
     people += [n for n in phone.frequent_contacts(uid) if n not in people]
     done = 0
     for name in [*people, ""]:  # "" — незнакомый номер
-        try:
-            await announce(uid, name, "")
-            done += 1
-        except Exception:
-            logger.warning("prefetch announce failed: %s", name, exc_info=True)
+        # 28.09: у озвучки Google лимит запросов в минуту — пачкой по 25 фраз часть не записывалась (429). Теперь по одной
+        # с паузой, не вышло — ещё раз через 20 с; уже записанные (кэш) — без паузы
+        for attempt in range(2):
+            started = time.monotonic()
+            try:
+                out = await announce(uid, name, "")
+            except Exception:
+                logger.warning("prefetch announce failed: %s", name, exc_info=True)
+                out = {}
+            if out.get("wav"):
+                done += 1
+                if time.monotonic() - started > 0.3:
+                    await asyncio.sleep(PREFETCH_GAP_S)
+                break
+            if attempt == 0:
+                await asyncio.sleep(20)
     logger.info("announce: заранее записано %s фраз", done)
     return done
 

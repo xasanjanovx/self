@@ -234,7 +234,8 @@ def as_phone_number(value: Any) -> str | None:
 # может читать по буквам); эмодзи, номера и приписки («new», «2», оператор) убираем.
 ASSISTANT_NAMES = re.compile(r"^\W*(jes|джес|zeki|зеки|nurai|нурай|jarvis|джарвис)\b", re.IGNORECASE)
 _JUNK_WORDS = {"new", "yangi", "новый", "work", "ish", "tel", "telefon", "nomer", "номер", "моб", "mob", "beeline", "ucell",
-               "uzmobile", "mobiuz", "humans", "perfectum", "uztelecom", "home", "uy", "дом"}
+               "uzmobile", "mobiuz", "humans", "perfectum", "uztelecom", "home", "uy", "дом", "inv", "invest", "investor",
+               "ofis", "office", "biz"}
 _LAT2CYR = [("yo'", "ю"), ("yo‘", "ю"), ("o'", "у"), ("o‘", "у"), ("g'", "г"), ("g‘", "г"), ("sh", "ш"), ("ch", "ч"),
             ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("yo", "ё"), ("ya", "я"), ("yu", "ю"), ("ye", "е")]
 _LAT1 = {"a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "х", "i": "и", "j": "ж", "k": "к",
@@ -267,7 +268,8 @@ def speakable(name: Any, lang: str = "ru") -> str:
     """Имя из контактов — как его сказать вслух: «SIROJIDDIN aka 📱2» → «Сирожиддин ака» (для узбекского — латиницей)."""
     words = []
     for raw in re.findall(r"[^\W\d_]+(?:['ʻʼ’‘`][^\W\d_]+)*", str(name or "")):
-        if raw.lower() in _JUNK_WORDS:
+        # пометки в записи: «I», «Inv», «ofis» — не имя (28.09: «Сирожиддин Ака И», «Бобур Ака Инв»)
+        if raw.lower() in _JUNK_WORDS or len(raw) <= 2:
             continue
         if lang != "uz" and re.search(r"[a-zA-Z]", raw):
             raw = _word_to_cyr(raw)
