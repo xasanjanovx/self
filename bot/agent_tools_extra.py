@@ -98,8 +98,10 @@ async def remember_exchange(uid: int, user_text: str, reply: str, *, when: str) 
     try:
         mem = await services.user_memory(uid)
         lines = [line for line in str(mem.get("recent") or "").splitlines() if line.strip()]
-        u = " ".join(user_text.split())[:90]
-        r = " ".join((reply or "").split())[:90]
+        from .secrets_guard import mask
+
+        u = " ".join(mask(user_text).split())[:90]  # ключи и пароли в память (и в промпты) не попадают
+        r = " ".join(mask(reply or "").split())[:90]
         lines.append(f"{when} · я: {u}" + (f" → бот: {r}" if r else ""))
         await services.save_user_memory(uid, {"recent": "\n".join(lines[-RECENT_MAX_LINES:])})
     except Exception:

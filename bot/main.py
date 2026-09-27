@@ -17,7 +17,7 @@ from . import i18n
 from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
-from .middlewares import AccessMiddleware, DedupeMiddleware, TidyMiddleware, global_error_handler
+from .middlewares import AccessMiddleware, DedupeMiddleware, SecretsMiddleware, TidyMiddleware, global_error_handler
 from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, wake_worker
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,10 @@ async def on_startup(bot: Bot) -> None:
     from . import access
 
     await access.refresh(force=True)
+    from . import secrets_guard
+
+    # ключи, которые раньше успели попасть в память и журнал (до перехвата), — замаскировать; фоном, запуск не ждёт
+    asyncio.get_running_loop().create_task(secrets_guard.scrub_existing(access.user_ids()), name="scrub-secrets")
     try:
         await ai.ensure_models()
     except Exception:
@@ -154,6 +158,7 @@ async def main() -> None:
 
     access = AccessMiddleware(settings)
     dp.message.outer_middleware(access)
+    dp.message.outer_middleware(SecretsMiddleware())  # ключи и пароли — мимо ИИ, журналов и памяти
     dp.callback_query.outer_middleware(access)
     dp.callback_query.middleware(DedupeMiddleware(window=1.2))
     tidy = TidyMiddleware()  # чистый чат: его сообщения и присланное «в чат» не копятся

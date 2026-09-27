@@ -540,6 +540,14 @@ async def _test_wake_call(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
     return {"calling": True, "mode": "wake_test", "note": "звонок будильника начнётся через пару секунд"}
 
 
+def asked_to_call(text: str | None) -> bool:
+    """Он правда просил позвонить? 27.09: прислал ключ Gemini (набор символов) — агент решил «обсудим дела» и позвонил."""
+    import re
+
+    low = re.sub(r"['`ʻʼ‘’]", "", str(text or "").lower())
+    return bool(re.search(r"позвон|набер|набир|звонок|звякн|созвон|перезвон|звони|qongiroq|telefon qil|gaplash|\bcall\b|\bring me\b", low))
+
+
 @tool("call_me", "Позвонить пользователю в Telegram прямо сейчас и поговорить голосом (он просит «позвони», «набери меня», «qo'ng'iroq qil»). "
       "Если просит проверить будильник/подъём — не это, а test_wake_call. "
       "В разговоре у тебя те же инструменты: можно ответить на вопросы по данным и записать траты/еду/задачи с голоса. "
@@ -549,6 +557,8 @@ async def _test_wake_call(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
 async def _call_me(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     from . import call_assistant
 
+    if not asked_to_call(ctx.text):
+        return {"error": "он не просил звонить — не звони. Ответь на его сообщение текстом; если непонятно, что это, — коротко спроси"}
     if not caller.available():
         return {"error": "звонки не настроены: в .env нужны TG_CALLER_API_ID / TG_CALLER_API_HASH / TG_CALLER_SESSION"}
     lang = _str(a.get("lang"))

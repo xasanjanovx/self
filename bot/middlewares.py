@@ -144,6 +144,33 @@ async def _welcome(message: Message, lang: str) -> None:
         logger.debug("helper intro on join failed", exc_info=True)
 
 
+class SecretsMiddleware(BaseMiddleware):
+    """Ключи и пароли — до всех обработчиков (27.09: ключ Gemini ушёл агенту, и тот позвонил): в ИИ, журналы и память
+    не попадают, сообщение удаляется; ключ Gemini владельца бот проверяет и сохраняет сам (bot/secrets_guard.py)."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if isinstance(event, Message) and (event.text or event.caption):
+            from . import secrets_guard
+
+            if secrets_guard.find(event.text or event.caption):
+                uid = event.from_user.id if event.from_user else 0
+                lang = "ru"
+                try:
+                    from .handlers.common import profile_by_id
+
+                    lang = (await profile_by_id(uid)).lang
+                except Exception:
+                    pass
+                await secrets_guard.handle(event, uid, lang)
+                return None
+        return await handler(event, data)
+
+
 class DedupeMiddleware(BaseMiddleware):
     """Гасит повторное нажатие той же кнопки в течение `window` секунд
     (иначе двойной тап по «быстрой» кнопке создаёт две операции)."""

@@ -565,6 +565,10 @@ class Database:
             "telegram_id": telegram_id, "text": text[:1000], "kind": kind, "tools": (tools or None), "reply": (reply or "")[:1000] or None, "ok": ok,
         }).execute()
 
+    async def mask_agent_log(self, row_id: Any, *, text: str, reply: str | None) -> None:
+        """Ключ, случайно попавший в журнал агента, — заменить маской (secrets_guard.scrub_existing)."""
+        await self._table("agent_log").update({"text": text[:1000], "reply": (reply or None)}).eq("id", row_id).execute()
+
     async def list_agent_log(self, telegram_id: int, *, days: int = 7, limit: int = 200) -> list[dict[str, Any]]:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         res = await self._table("agent_log").select("*").eq("telegram_id", telegram_id).gte("created_at", since).order("created_at", desc=True).limit(limit).execute()

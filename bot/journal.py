@@ -42,11 +42,17 @@ def _file(day: date) -> Path:
     return _dir() / f"{day.isoformat()}.jsonl"
 
 
+def _mask(text: str) -> str:
+    from .secrets_guard import mask
+
+    return mask(text)
+
+
 def miss(uid: int, kind: str, text: str, *, when: datetime | None = None) -> None:
     """Записать промах (не бросает исключений — журнал не должен ломать разговор)."""
     try:
         now = when or datetime.now()
-        line = json.dumps({"t": now.strftime("%H:%M:%S"), "uid": uid, "kind": kind, "text": str(text)[:300]}, ensure_ascii=False)
+        line = json.dumps({"t": now.strftime("%H:%M:%S"), "uid": uid, "kind": kind, "text": _mask(str(text))[:300]}, ensure_ascii=False)
         with _file(now.date()).open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:

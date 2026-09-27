@@ -37,6 +37,26 @@ import os as _os  # noqa: E402
 import time as _time  # noqa: E402
 
 FREE_API_KEY = (_os.getenv("GEMINI_FREE_API_KEY") or "").strip()
+_saved_free_key: str | None = None   # ключ, который он прислал боту (secrets_guard сохраняет в DATA_DIR)
+
+
+def free_key() -> str:
+    """Бесплатный ключ: из .env или присланный боту (проверенный и сохранённый)."""
+    global _saved_free_key
+    if FREE_API_KEY:
+        return FREE_API_KEY
+    if _saved_free_key is None:
+        from .secrets_guard import saved_free_key
+
+        _saved_free_key = saved_free_key()
+    return _saved_free_key
+
+
+def reload_free_key() -> None:
+    """Прислали новый ключ — перечитать и снять паузу бесплатного уровня."""
+    global _saved_free_key, _free_paused_until
+    _saved_free_key = None
+    _free_paused_until = 0.0
 FREE_PAUSE_S = 3600.0          # бесплатный ответил «лимит» — час идём через платный
 _free_mode: _cv.ContextVar[bool] = _cv.ContextVar("gemini_free", default=False)
 _free_paused_until = 0.0
@@ -266,9 +286,10 @@ class AIService:
         """POST generateContent с коротким retry на временные ошибки. Возвращает сырой JSON."""
         global _free_paused_until
         url = f"{self.base_url}/{model}:generateContent"
-        if _free_mode.get() and FREE_API_KEY and _time.monotonic() > _free_paused_until:
+        key = free_key() if _free_mode.get() else ""
+        if key and _time.monotonic() > _free_paused_until:
             try:
-                response = await self._client.post(url, json=payload, headers={"x-goog-api-key": FREE_API_KEY})
+                response = await self._client.post(url, json=payload, headers={"x-goog-api-key": key})
                 if response.status_code == 200:
                     data = response.json()
                     billing.record_free(model, data.get("usageMetadata"))

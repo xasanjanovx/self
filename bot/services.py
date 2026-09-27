@@ -428,8 +428,11 @@ async def log_agent(uid: int, *, text: str, kind: str = "agent", tools: str | No
     """Журнал ходов агента — не должен ломать основной поток."""
     if not db.available("agent_log") or not text:
         return
+    from .secrets_guard import mask
+
     try:
-        await db.add_agent_log(uid, text=text, kind=kind, tools=tools, reply=reply, ok=ok)
+        # ключи и пароли в журнал не пишем (27.09: ключ Gemini остался в журнале агента)
+        await db.add_agent_log(uid, text=mask(text), kind=kind, tools=tools, reply=mask(reply) if reply else reply, ok=ok)
     except Exception:
         logger.debug("agent log failed", exc_info=True)
 
