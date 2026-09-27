@@ -58,13 +58,21 @@ def reload_free_key() -> None:
     _saved_free_key = None
     _free_paused_until = 0.0
 FREE_PAUSE_S = 3600.0          # бесплатный ответил «лимит» — час идём через платный
-_free_mode: _cv.ContextVar[bool] = _cv.ContextVar("gemini_free", default=False)
+FREE_SMART_MODEL = (_os.getenv("GEMINI_FREE_MODEL") or "gemini-3.5-flash").strip()  # 28.09: умнее — Flash, а не Flash-Lite
+# None — бесплатный ключ не использовать; "" — той же моделью; "имя" — этой (умной) моделью через бесплатный ключ
+_free_mode: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_free", default=None)
+# какой моделью уже начат этот ход агента: «подписи размышлений» модели в истории хода другой модели не подходят —
+# поэтому весь ход (все шаги с инструментами) идёт одной моделью, даже если бесплатный лимит кончился посреди хода
+_turn_model: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_turn_model", default=None)
 _free_paused_until = 0.0
+_free_smart_blocked_until = 0.0   # умная модель на бесплатном уровне недоступна / её лимит кончился — до этого времени не пробуем
 
 
-def use_free() -> _cv.Token:
-    """Дальше в этой задаче запросы Gemini — сначала бесплатным ключом (если он задан)."""
-    return _free_mode.set(True)
+def use_free(model: str | None = None) -> _cv.Token:
+    """Дальше в этой задаче запросы Gemini — сначала бесплатным ключом (если он задан); model — какой моделью отвечать
+    через него (умнее), иначе той же. Новый ход — модель хода ещё не выбрана."""
+    _turn_model.set(None)
+    return _free_mode.set(model or "")
 
 
 def reset_free(token: _cv.Token) -> None:
@@ -284,21 +292,42 @@ class AIService:
     # ------------------------------------------------------------- core call
     async def _post(self, model: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST generateContent с коротким retry на временные ошибки. Возвращает сырой JSON."""
-        global _free_paused_until
+        global _free_paused_until, _free_smart_blocked_until
         url = f"{self.base_url}/{model}:generateContent"
-        key = free_key() if _free_mode.get() else ""
-        if key and _time.monotonic() > _free_paused_until:
-            try:
-                response = await self._client.post(url, json=payload, headers={"x-goog-api-key": key})
-                if response.status_code == 200:
-                    data = response.json()
-                    billing.record_free(model, data.get("usageMetadata"))
-                    return data
-                logger.info("free key: %s %s — через платный", response.status_code, response.text[:160])
-                if response.status_code in {429, 403, 400, 404}:
-                    _free_paused_until = _time.monotonic() + FREE_PAUSE_S
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                logger.info("free key: %s — через платный", type(exc).__name__)
+        mode = _free_mode.get()
+        if mode is not None:
+            turn = _turn_model.get()
+            key = free_key()
+            if key and _time.monotonic() > _free_paused_until:
+                if turn:
+                    tries = [turn]
+                else:
+                    tries = [mode] if mode and mode != model and _time.monotonic() > _free_smart_blocked_until else []
+                    tries.append(model)
+                for use in tries:
+                    try:
+                        response = await self._client.post(f"{self.base_url}/{use}:generateContent", json=payload,
+                                                           headers={"x-goog-api-key": key})
+                    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        logger.info("free key: %s — через платный", type(exc).__name__)
+                        break
+                    if response.status_code == 200:
+                        data = response.json()
+                        billing.record_free(use, data.get("usageMetadata"))
+                        _turn_model.set(use)
+                        return data
+                    logger.info("free key %s: %s %s", use, response.status_code, response.text[:160])
+                    if use != model and not turn and response.status_code in {429, 400, 403, 404}:
+                        # умной на бесплатном уровне нет или её лимит кончился — бесплатно той же, что и раньше
+                        _free_smart_blocked_until = _time.monotonic() + (FREE_PAUSE_S if response.status_code == 429 else 6 * FREE_PAUSE_S)
+                        continue
+                    if response.status_code in {429, 403, 400, 404}:
+                        _free_paused_until = _time.monotonic() + FREE_PAUSE_S
+                    break
+            # платный — той же моделью, какой начат ход (иначе Google отклонит чужие «подписи размышлений»)
+            model = turn or model
+            url = f"{self.base_url}/{model}:generateContent"
+            _turn_model.set(model)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 response = await self._client.post(url, json=payload)

@@ -340,13 +340,18 @@ async def run_agent(
     """Чистый цикл агента (без Telegram): историю + новую реплику → инструменты → финальный текст.
     `image` = (bytes, mime) — фото к реплике: модель видит его сама (чек, лист челленджа, скриншот…).
     `decls` / `system_extra` — другой набор инструментов и дополнение к промпту (голосовой режим, bot/phone.py)."""
-    from .. import billing
+    from .. import access, billing
+    from .. import ai as ai_module
 
     token = billing.set_user(profile.telegram_id)  # и из фоновых задач (напоминания, звонки) — расход на него
+    # 28.09 (его выбор): его чат — умной моделью (Flash) через бесплатный ключ; нет ключа / лимит — как раньше, платной
+    free = ai_module.use_free(ai_module.FREE_SMART_MODEL) if access.is_owner(profile.telegram_id) else None
     try:
         return await _run_agent(profile, text, history, snapshot=snapshot, memory=memory, step_fn=step_fn, run_tool=run_tool,
                                 max_steps=max_steps, image=image, reply_lang=reply_lang, decls=decls, system_extra=system_extra)
     finally:
+        if free is not None:
+            ai_module.reset_free(free)
         billing.reset_user(token)
 
 

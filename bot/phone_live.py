@@ -677,7 +677,7 @@ async def phone_task(sess, request: str) -> dict[str, Any]:  # noqa: ANN001
     """То же, что _phone_task, но сначала бесплатным ключом Gemini (27.09, если задан)."""
     from . import ai as ai_mod
 
-    free = ai_mod.use_free()
+    free = ai_mod.use_free(ai_mod.FREE_SMART_MODEL)
     try:
         return await _phone_task(sess, request)
     finally:

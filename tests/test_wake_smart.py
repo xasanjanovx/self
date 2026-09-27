@@ -179,3 +179,80 @@ def test_morning_awake_only_after_he_answers(monkeypatch):
     sess = asyncio.run(run())
     assert marked == ["app"] and not sess.morning_proof
     assert {"type": "awake"} in sess.phone_ws.sent
+
+
+def test_free_key_answers_with_smart_model_and_keeps_it_for_the_whole_turn(monkeypatch):
+    """28.09: его чат — Flash через бесплатный ключ; лимит кончился посреди хода — доделываем той же моделью (платно),
+    следующий ход — сразу платный Flash-Lite, как раньше."""
+    from bot import billing
+    from bot.context import ai
+
+    seen: list[tuple[str, str]] = []
+    free_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("x-goog-api-key")
+        model = request.url.path.rsplit("/", 1)[-1].split(":")[0]
+        seen.append((key, model))
+        if key == "FREE":
+            free_calls["n"] += 1
+            if free_calls["n"] > 1:
+                return httpx.Response(429, json={"error": {"message": "quota"}})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{}"}]}}], "usageMetadata": {}})
+
+    monkeypatch.setattr(ai_mod, "FREE_API_KEY", "FREE")
+    monkeypatch.setattr(ai_mod, "_free_paused_until", 0.0)
+    monkeypatch.setattr(billing, "record", lambda *a, **k: 0.0)
+    monkeypatch.setattr(billing, "record_free", lambda *a, **k: None)
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "PAID"}))
+
+    async def run():  # noqa: ANN202
+        token = ai_mod.use_free("smart")
+        try:
+            await ai._post("cheap", {"contents": []})   # шаг 1: бесплатно, умной
+            await ai._post("cheap", {"contents": []})   # шаг 2: бесплатный лимит → платно, но той же умной
+        finally:
+            ai_mod.reset_free(token)
+        token = ai_mod.use_free("smart")                 # новый ход: бесплатный на паузе — платный дешёвый
+        try:
+            await ai._post("cheap", {"contents": []})
+        finally:
+            ai_mod.reset_free(token)
+
+    asyncio.run(run())
+    assert seen == [("FREE", "smart"), ("FREE", "smart"), ("PAID", "smart"), ("PAID", "cheap")]
+
+
+def test_smart_model_missing_on_free_tier_falls_back_to_free_cheap(monkeypatch):
+    """Умной модели на бесплатном уровне нет (404) — бесплатно дешёвой, а не сразу платно."""
+    from bot import billing
+    from bot.context import ai
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers.get("x-goog-api-key")
+        model = request.url.path.rsplit("/", 1)[-1].split(":")[0]
+        seen.append((key, model))
+        if key == "FREE" and model == "smart":
+            return httpx.Response(404, json={"error": {"message": "model not found"}})
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{}"}]}}], "usageMetadata": {}})
+
+    monkeypatch.setattr(ai_mod, "FREE_API_KEY", "FREE")
+    monkeypatch.setattr(ai_mod, "_free_paused_until", 0.0)
+    monkeypatch.setattr(ai_mod, "_free_smart_blocked_until", 0.0)
+    monkeypatch.setattr(billing, "record", lambda *a, **k: 0.0)
+    monkeypatch.setattr(billing, "record_free", lambda *a, **k: None)
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "PAID"}))
+
+    async def run():  # noqa: ANN202
+        for _ in range(2):
+            token = ai_mod.use_free("smart")
+            try:
+                await ai._post("cheap", {"contents": []})
+            finally:
+                ai_mod.reset_free(token)
+
+    asyncio.run(run())
+    # 1-й ход: умная 404 → бесплатно дешёвая; 2-й ход: умную уже не пробуем
+    assert seen == [("FREE", "smart"), ("FREE", "cheap"), ("FREE", "cheap")]

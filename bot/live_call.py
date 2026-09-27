@@ -329,7 +329,7 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
     from . import ai as ai_mod
 
-    free = ai_mod.use_free()  # 27.09: простые просьбы голосом — сначала бесплатным ключом Gemini (если задан)
+    free = ai_mod.use_free(ai_mod.FREE_SMART_MODEL)  # простые просьбы голосом — умной моделью через бесплатный ключ (если задан)
     try:
         res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
     finally:
