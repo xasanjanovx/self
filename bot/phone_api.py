@@ -93,13 +93,14 @@ _app_version = ""
 def _note_version(version: str) -> None:
     """28.09: какая версия приложения стоит у него (раньше не знали — журнал 2.5/2.6 так и не пришёл)."""
     global _app_version
-    version = (version or "до 2.7")[:40]
-    if version != _app_version:
-        _app_version = version
-        logger.info("phone app: версия %s", version)
-        from . import journal
+    version = (version or "")[:40]
+    if not version or version == _app_version:  # без заголовка (разговор по websocket) — не значит «старая версия»
+        return
+    _app_version = version
+    logger.info("phone app: версия %s", version)
+    from . import journal
 
-        journal.miss(owner_id() or 0, "app_info", f"версия приложения {version}")
+    journal.miss(owner_id() or 0, "app_info", f"версия приложения {version}")
 
 
 async def _json(request: web.Request) -> dict[str, Any]:
@@ -219,8 +220,7 @@ async def wake_check(request: web.Request) -> web.Response:
         ok, after, why = bool(heard["name"]), heard["after"], ""
         # 27.09: голос точно его (банк его записей ≥ 0.8 или уверенный отпечаток) — имя принимаем и в кривом прочтении
         # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
-        strong = bool(voice.get("sure")) or float(voice.get("bank") or 0) >= 0.8 or float(voice.get("score") or 0) >= 0.6 or (
-            float(voice.get("z") or 0) >= 3 and float(voice.get("score") or 0) >= 0.45)
+        strong = wakeword.strong_voice(heard["text"], voice)
         if not ok:
             ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid)
             if ok:

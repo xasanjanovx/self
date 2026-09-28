@@ -186,22 +186,31 @@ def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None)
     «дж…»/выученное слово в начале — имя при любом его голосе («дж позвони мам» с похожестью 0.82 отказывали);
     одна команда без имени или хвост «с» — только если голос точно его (strong) или детектор уверен в слове."""
     words = _words(text)
-    if not words:
+    # 28.09: одиночное «с» («хвост имени») больше НЕ принимаем — за утро 7 раз так проснулся от звуков из видео:
+    # на коротком звуке сходство голоса случайно высокое. Всё мягкое — только когда голос точно его (strong)
+    if not words or not strong:
         return False, "", ""
     learned = variants(uid)
     for i, w in enumerate(words[: NAME_MAX_POS + 1]):
         if (w.startswith("дж") and len(w) <= 8) or w in learned:
             return True, " ".join(words[i + 1:]), f"имя как «{w}»"
-    if not strong:
-        if confident and len(words) == 1 and words[0] in _TAIL:
-            return True, "", "хвост имени (детектор уверен)"
-        return False, "", ""
     for i, w in enumerate(words[:2]):
         if w in _VERBS or (confident and w in _QUESTIONS):
             return True, " ".join(words[i:]), "имя обрезано — сразу команда"
-    if len(words) == 1 and words[0] in _TAIL:
-        return True, "", "хвост имени"
     return False, "", ""
+
+
+def words(text: str) -> list[str]:
+    return _words(text)
+
+
+def strong_voice(text: str, voice: dict[str, Any]) -> bool:
+    """Голос точно его. Одно короткое слово — только по сходству голоса (score): «банк» на коротком звуке случайно
+    высокий (у звуков из видео было 0.97); фраза — ещё и по банку или z."""
+    score, bank, z = float(voice.get("score") or 0), float(voice.get("bank") or 0), float(voice.get("z") or 0)
+    if len(_words(text)) <= 1:
+        return score >= 0.6
+    return bank >= 0.85 or score >= 0.6 or (z >= 3.5 and score >= 0.5)
 
 
 def note_reject(uid: int | None, text: str, strong: bool) -> None:
@@ -221,4 +230,4 @@ def note_accept(uid: int | None, after: str) -> None:
         _learn(uid, first)
 
 
-__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants"]
+__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants", "words", "strong_voice"]

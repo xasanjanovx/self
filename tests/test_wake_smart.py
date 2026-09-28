@@ -23,14 +23,12 @@ def test_lenient_name_when_voice_is_his(tmp_path, monkeypatch):
     assert ok("дж позвони мам")[:2] == (True, "позвони мам")
     assert ok("позвони маме")[:2] == (True, "позвони маме")            # имя обрезалось — сразу команда
     assert ok("сейчас позвони маме")[:2] == (True, "позвони маме")
-    assert ok("с")[0] and ok("эс")[0]                                   # хвост «Джес»
+    assert not ok("с")[0] and not ok("эс")[0]                          # 28.09: одиночное «с» — звуки из видео, не имя
     assert not ok("прогноз")[0] and not ok("вот так")[0]
     assert not ok("какая погода")[0] and ok("какая погода", confident=True)[0]
-    # голос прошёл проверку, но не «точно его»: имя на «дж» — да; команда без имени и «с» — только с уверенным детектором
-    assert wakeword.lenient("дж позвони мам", strong=False, confident=False, uid=5)[:2] == (True, "позвони мам")
-    assert not wakeword.lenient("позвони маме", strong=False, confident=True, uid=5)[0]
-    assert not wakeword.lenient("с", strong=False, confident=False, uid=5)[0]
-    assert wakeword.lenient("с", strong=False, confident=True, uid=5)[0]
+    # голос не «точно его» — ничего мягкого (28.09: иначе будили звуки из видео)
+    assert not wakeword.lenient("дж позвони мам", strong=False, confident=True, uid=5)[0]
+    assert not wakeword.lenient("с", strong=False, confident=True, uid=5)[0]
 
 
 def test_learns_how_recognizer_hears_his_name(tmp_path, monkeypatch):
@@ -330,3 +328,14 @@ def test_free_pause_follows_google_retry_delay():
     assert ai_mod._free_pause(minute) == 42.0
     assert ai_mod._free_pause(day) == ai_mod.FREE_PAUSE_S
     assert ai_mod._free_pause("quota") == 60.0
+
+
+def test_strong_voice_is_strict_on_single_short_words():
+    # одно короткое слово: только сходство голоса — «банк» у звуков из видео был 0.97
+    assert not wakeword.strong_voice("с", {"score": 0.43, "bank": 0.969, "z": 3.48})
+    assert not wakeword.strong_voice("джесап", {"score": 0.477, "bank": 0.983, "z": 2.21})
+    assert wakeword.strong_voice("джой", {"score": 0.69, "bank": 0.5, "z": 1.0})
+    # фраза: и по банку, и по сходству
+    assert wakeword.strong_voice("позвони маме", {"score": 0.39, "bank": 0.985, "z": 1.87})
+    assert wakeword.strong_voice("дж позвони мам", {"score": 0.822, "bank": 0.778, "z": 2.69})
+    assert not wakeword.strong_voice("сейчас позвони", {"score": 0.459, "bank": 0.707, "z": 1.08})
