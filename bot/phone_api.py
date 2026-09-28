@@ -368,6 +368,51 @@ def _reject(uid: int | None, why: str = "") -> None:
         journal.miss(uid, "false_wake", why)
 
 
+async def bank_notification(request: web.Request) -> web.Response:
+    """Уведомление банка/SMS об операции (2.9): {"app", "package", "title", "text", "t"} → вопрос в боте «Записать?».
+    Отвечаем сразу, разбор — фоном (телефону ждать нечего)."""
+    from . import bank_events
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+
+    async def run() -> None:
+        try:
+            res = await bank_events.receive(uid, data)
+            if res.get("skipped"):
+                logger.info("bank: пропустил (%s)", res["skipped"])
+        except Exception:
+            logger.exception("bank: уведомление не разобрано")
+
+    phone._later(run())
+    return web.json_response({"ok": True})
+
+
+async def calendar_sync(request: web.Request) -> web.Response:
+    """Календарь телефона (2.9): {"events": [...], "done": [ids выполненных просьб]} — ближайшие события для «что у меня
+    завтра?» и утренней сводки; в ответ — просьбы из чата («добавь встречу…»), которые телефон ещё не сделал."""
+    from . import calendar_sync as cal
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    events = data.get("events") if isinstance(data.get("events"), list) else []
+    cal.save_events(uid, events)
+    cal.mark_done(uid, [str(x) for x in data.get("done") or []])
+    return web.json_response({"ok": True, "pending": cal.pending(uid)})
+
+
+async def calendar_pending(request: web.Request) -> web.Response:
+    """Есть ли просьбы из чата для календаря телефона (телефон спрашивает при включении экрана)."""
+    from . import calendar_sync as cal
+
+    uid = owner_id()
+    return web.json_response({"pending": cal.pending(uid) if uid else []})
+
+
 async def app_log(request: web.Request) -> web.Response:
     """Журнал с телефона (2.5): {"events": [{"t": мс, "level": "error"|"crash"|"info", "tag", "msg"}]} — ошибки и сбои
     приложения попадают в ночной отчёт, чинить можно без скриншотов."""
@@ -548,6 +593,9 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/wake_plan", wake_plan)
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
     app.router.add_post("/jarvis/v1/log", app_log)
+    app.router.add_post("/jarvis/v1/bank", bank_notification)
+    app.router.add_post("/jarvis/v1/calendar", calendar_sync)
+    app.router.add_get("/jarvis/v1/calendar/pending", calendar_pending)
     app.router.add_post("/jarvis/v1/wake_settings", wake_settings)
     app.router.add_post("/jarvis/v1/announce", announce)
     app.router.add_post("/jarvis/v1/call_command", call_command)

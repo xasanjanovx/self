@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from . import agent, analytics, assistant, finance, finance_extra, inbox, members, menu, nutrition, settings, vacancy, wake
+from . import agent, analytics, assistant, bank, finance, finance_extra, inbox, members, menu, nutrition, settings, vacancy, wake
 
 
 def build_router() -> Router:
@@ -19,6 +19,7 @@ def build_router() -> Router:
     root.include_router(agent.router)
     root.include_router(vacancy.router)
     root.include_router(analytics.router)
+    root.include_router(bank.router)  # 28.09: «Записать трату из SMS банка?» (до inbox — он последний)
     root.include_router(inbox.router)
     return root
 

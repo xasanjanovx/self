@@ -709,6 +709,31 @@ _VAGUE_PLACE = re.compile(r"^\s*(на |в |до |к )?(эт[уоа]\w*|ту|сю
                           r"(геолокац\w*|локац\w*|мест\w*|точк\w*|адрес\w*|location|joy\w*)?\s*$", re.IGNORECASE)
 
 
+@ptool("calendar_add", "Добавить событие в календарь телефона сейчас («запиши встречу с Алишером в пятницу в 15:00»), "
+       "с напоминанием за 15 минут (или сколько скажет).",
+       {"title": P("STRING", "что за событие, коротко"), "date": P("STRING", "дата YYYY-MM-DD или today / tomorrow"),
+        "time": P("STRING", "ЧЧ:ММ"), "minutes": P("INTEGER", "длительность, мин (60)"),
+        "reminder_minutes": P("INTEGER", "напомнить за, мин (15)"), "location": P("STRING", "где (необязательно)")},
+       ("title", "date"))
+async def _calendar_add(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import calendar_sync as cal
+    from .agent_tools import _time_arg, parse_day
+
+    title = _str(a.get("title"))
+    day = parse_day(a.get("date"), ctx.profile.today)
+    if not title or day is None:
+        return {"error": "нужны название и дата"}
+    hhmm = _time_arg(a.get("time")) or "09:00"
+    try:
+        minutes = max(5, min(int(a.get("minutes") or 60), 24 * 60))
+        reminder = max(0, min(int(a.get("reminder_minutes") if a.get("reminder_minutes") is not None else 15), 7 * 24 * 60))
+    except (TypeError, ValueError):
+        minutes, reminder = 60, 15
+    res = _action(turn, "calendar_add", title=title, start=cal.start_ms(day, hhmm, ctx.profile.tz), minutes=minutes,
+                  reminder=reminder, location=_str(a.get("location")))
+    return {**res, "date": day.isoformat(), "time": hhmm}
+
+
 @ptool("taxi", "Такси через Яндекс Go: «вызови такси до Чорсу», «сколько до вокзала на такси». Откроется Яндекс Go с готовым маршрутом "
        "от того места, где он сейчас, — цену и время подачи видно сразу, «Заказать» он нажимает сам.",
        {"to": P("STRING", "куда ехать: адрес или место"), "tariff": P("STRING", "econom | comfort | business", enum=["econom", "comfort", "business"])},

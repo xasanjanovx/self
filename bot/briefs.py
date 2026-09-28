@@ -72,6 +72,18 @@ async def morning_brief(profile: Profile) -> str:
     if extra:
         lines.append("")
         lines.extend(extra)
+    try:
+        # 28.09: календарь телефона — что у него сегодня
+        from . import calendar_sync as cal
+
+        if cal.synced_at(profile.telegram_id) is not None:
+            rows = cal.day_lines(profile.telegram_id, today, profile.tz, lang)
+            if rows:
+                lines.append("")
+                lines.append(f"📅 <b>{'Bugun' if lang == 'uz' else 'Сегодня в календаре'}</b>")
+                lines.extend(f"   • {h(r)}" for r in rows[:8])
+    except Exception:
+        logger.debug("morning: календарь не прочитался", exc_info=True)
 
     lines.append("")
     if nutrition_profile:

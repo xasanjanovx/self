@@ -583,6 +583,47 @@ async def _prayer_times(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             "next": {"name": nxt[0], "at": nxt[1], "in_minutes": nxt[2]} if nxt else None}
 
 
+# ------------------------------------------------------------------ календарь телефона (28.09)
+@tool("calendar_events", "Его календарь на телефоне: встречи и события за день или период («что у меня завтра?», «какие встречи "
+      "на неделе?», «свободен ли я в пятницу в 15:00?»). Данные приходят с телефона.",
+      {"date_from": DATE, "date_to": P("STRING", "по какую дату включительно (YYYY-MM-DD); нет — только date_from")})
+async def _calendar_events(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import calendar_sync as cal
+
+    if cal.synced_at(ctx.uid) is None:
+        return {"error": "календарь телефона ещё не пришёл — нужен JES 2.9 на телефоне и разрешение «Календарь»"}
+    today = ctx.profile.today
+    start = parse_day(a.get("date_from"), today) or today
+    end = parse_day(a.get("date_to"), today) or start
+    if end < start:
+        start, end = end, start
+    end = min(end, start + timedelta(days=31))
+    events = cal.events_between(ctx.uid, start, end, ctx.profile.tz)
+    return {"from": start.isoformat(), "to": end.isoformat(), "events": events, "empty": not events}
+
+
+@tool("calendar_add_event", "Добавить событие в календарь его телефона («запиши встречу с Алишером в пятницу в 15:00», «в субботу "
+      "день рождения мамы»). С напоминанием за 15 минут (или сколько скажет). Телефон добавит при следующей связи — обычно сразу.",
+      {"title": P("STRING", "что за событие, коротко"), "date": DATE, "time": P("STRING", "ЧЧ:ММ; нет — на весь день не бывает, ставь 09:00"),
+       "minutes": P("INTEGER", "длительность в минутах (по умолчанию 60)"), "reminder_minutes": P("INTEGER", "за сколько минут напомнить (по умолчанию 15)"),
+       "location": P("STRING", "где (необязательно)")},
+      ("title", "date"))
+async def _calendar_add_event(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import calendar_sync as cal
+
+    title = _str(a.get("title"))
+    day = parse_day(a.get("date"), ctx.profile.today)
+    if not title or day is None:
+        return {"error": "нужны название и дата"}
+    hhmm = _time_arg(a.get("time")) or "09:00"
+    minutes = max(5, min(_int(a.get("minutes")) or 60, 24 * 60))
+    reminder = max(0, min(_int(a.get("reminder_minutes")) if a.get("reminder_minutes") is not None else 15, 7 * 24 * 60))
+    op_id = cal.queue_add(ctx.uid, title, cal.start_ms(day, hhmm, ctx.profile.tz), minutes, reminder, _str(a.get("location")) or "")
+    ctx.mutated = True
+    return {"queued": op_id, "title": title, "date": day.isoformat(), "time": hhmm,
+            "note": "телефон добавит событие в календарь при следующей связи (обычно в течение минут) — скажи это одной фразой"}
+
+
 # ------------------------------------------------------------------ snapshot fragment
 async def snapshot_lines(ctx_profile: Any) -> list[str]:
     """Строки для системного промпта: заметки, задачи, цели, сроки долгов."""
@@ -630,4 +671,14 @@ async def snapshot_lines(ctx_profile: Any) -> list[str]:
                 tail = ""
             return f"{r.get('person')} {'мне' if r.get('side') == 'lent' else 'я'} {fin.fmt_money(float(r.get('amount') or 0))} до {due}{tail}"
         parts.append("Сроки долгов (по займам): " + "; ".join(_d(r) for r in deadlines[:10]))
+    try:
+        # 28.09: календарь телефона — чтобы помощник знал его день («успею ли?», «когда свободен?»)
+        from . import calendar_sync as cal
+
+        if cal.synced_at(ctx_profile.telegram_id) is not None:
+            for label, day in (("сегодня", today), ("завтра", today + timedelta(days=1))):
+                rows = cal.day_lines(ctx_profile.telegram_id, day, ctx_profile.tz)
+                parts.append(f"Календарь {label}: " + ("; ".join(rows[:8]) if rows else "ничего"))
+    except Exception:
+        pass
     return parts
