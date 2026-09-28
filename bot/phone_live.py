@@ -1189,7 +1189,9 @@ def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
     uz = lang == "uz"
     messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
     where = (f" ({messenger})" if uz else f" в {messenger}") if messenger else ""
-    if not name or phone.names.as_phone_number(name):
+    if name and phone.names.as_phone_number(name):
+        name = phone.contact_by_number(uid, name) or ""  # номер из его книги — называем человека
+    if not name:
         # 26.09: несохранённый номер — так и сказать
         return ("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + where
     if phone.names.ASSISTANT_NAMES.search(name):
@@ -1215,8 +1217,10 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     persona = await services.persona(uid)
     name = str(name or "").strip()[:80]
     app = str(app or "").strip()[:30]
-    # v3 (28.09): фраза без модели, имя целиком — старый кэш («Джарвис звонит», «Махурбек») больше не берём
-    key = hashlib.sha1(f"v3|{persona.voice}|{persona.lang}|{name}|{app}".encode()).hexdigest()[:16]
+    # v4 (28.09): кэш по готовой фразе, а не по имени — фраза без модели и считается мгновенно. Номер из книги звучит
+    # именем, а все незнакомые номера — одной записью
+    text = announcement_text(uid, name, app, persona.lang)
+    key = hashlib.sha1(f"v4|{persona.voice}|{persona.lang}|{text}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"
@@ -1224,7 +1228,6 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    text = announcement_text(uid, name, app, persona.lang)
     pcm = await ai.synthesize(text, voice=persona.voice)
     out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else ""}
     if pcm:

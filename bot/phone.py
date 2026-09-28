@@ -89,6 +89,21 @@ def load_contacts(uid: int) -> list[dict[str, Any]]:
     return _contacts[uid]
 
 
+def contact_by_number(uid: int, number: Any) -> str | None:
+    """«+998 99 499 50 08» → имя из его телефонной книги (по последним 9 цифрам: в книге бывает и без +998); нет — None.
+    28.09: уведомление HyperOS о звонке пришло с номером, хотя человек в книге, — JES сказал «незнакомый номер»."""
+    digits = re.sub(r"\D", "", str(number or ""))
+    if len(digits) < 7:
+        return None
+    tail = digits[-9:]
+    for contact in load_contacts(uid):
+        for p in contact.get("phones") or []:
+            stored = re.sub(r"\D", "", str(p))[-9:]
+            if len(stored) >= 7 and (stored == tail or tail.endswith(stored)):
+                return str(contact.get("name") or "") or None
+    return None
+
+
 def find_contact(uid: int, who: Any, variants: Any, device: dict[str, Any] | None = None) -> dict[str, Any]:
     """Выученное имя («брат» → SIROJBEK AKAM) — сразу; иначе похожесть с поправкой на то, кому он чаще звонит.
     Двое почти одинаковых и оба редкие — {"ask": [первый, второй]}: переспросить коротко (его выбор 26.09)."""

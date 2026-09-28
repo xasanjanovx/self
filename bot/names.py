@@ -236,11 +236,16 @@ ASSISTANT_NAMES = re.compile(r"^\W*(jes|джес|zeki|зеки|nurai|нурай|
 _JUNK_WORDS = {"new", "yangi", "новый", "work", "ish", "tel", "telefon", "nomer", "номер", "моб", "mob", "beeline", "ucell",
                "uzmobile", "mobiuz", "humans", "perfectum", "uztelecom", "home", "uy", "дом", "inv", "invest", "investor",
                "ofis", "office", "biz"}
-_LAT2CYR = [("yo'", "ю"), ("yo‘", "ю"), ("o'", "у"), ("o‘", "у"), ("g'", "г"), ("g‘", "г"), ("sh", "ш"), ("ch", "ч"),
-            ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("yo", "ё"), ("ya", "я"), ("yu", "ю"), ("ye", "е")]
-_LAT1 = {"a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "х", "i": "и", "j": "ж", "k": "к",
+# 28.09: узбекское «j» звучит как «дж» — «Jasur», «Sirojiddin», «Akmaljon» читаем «Джасур», «Сироджиддин», «Акмалджон»
+# (с «ж» русский голос говорил «Жасур»); «dj»/«dzh» — то же самое в русской латинице, «gh» — английское «g'» («Ghayrat»)
+_LAT2CYR = [("yo'", "ю"), ("yo‘", "ю"), ("o'", "у"), ("o‘", "у"), ("g'", "г"), ("g‘", "г"), ("dzh", "дж"), ("dj", "дж"),
+            ("sh", "ш"), ("ch", "ч"), ("zh", "ж"), ("kh", "х"), ("gh", "г"), ("ts", "ц"), ("yo", "ё"), ("ya", "я"), ("yu", "ю"),
+            ("ye", "е")]
+_LAT1 = {"a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "х", "i": "и", "j": "дж", "k": "к",
          "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у", "v": "в",
          "w": "в", "x": "х", "y": "й", "z": "з"}
+# узбекская кириллица в книге («Ўткир», «Ғайрат», «Қодир») — русский голос этих букв не знает
+_UZ_CYR = str.maketrans({"ў": "у", "Ў": "У", "қ": "к", "Қ": "К", "ғ": "г", "Ғ": "Г", "ҳ": "х", "Ҳ": "Х"})
 
 
 def _word_to_cyr(word: str) -> str:
@@ -273,6 +278,8 @@ def speakable(name: Any, lang: str = "ru") -> str:
             continue
         if lang != "uz" and re.search(r"[a-zA-Z]", raw):
             raw = _word_to_cyr(raw)
+        elif lang != "uz":
+            raw = raw.translate(_UZ_CYR)
         words.append(raw[:1].upper() + raw[1:].lower())
     return " ".join(words)
 
