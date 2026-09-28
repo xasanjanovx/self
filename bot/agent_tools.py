@@ -1126,5 +1126,6 @@ from . import agent_tools_assistant  # noqa: E402  — регистрирует 
 from . import agent_tools_extra  # noqa: E402,F401  — ask_user, память, курсы валют, калькулятор, поиск, погода
 from . import agent_tools_bulk  # noqa: E402,F401  — найти любую запись, массовые правки
 from . import agent_tools_debts  # noqa: E402  — бухгалтер долгов: займы, погашения, сроки
+from . import agent_tools_daily  # noqa: E402,F401  — каждый день (дела с напоминанием и целью), «продолжи урок» YouTube
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

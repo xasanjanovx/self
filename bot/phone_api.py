@@ -402,6 +402,65 @@ def _reject(uid: int | None, why: str = "") -> None:
         journal.miss(uid, "false_wake", why)
 
 
+async def geo_zones(request: web.Request) -> web.Response:
+    """Напоминания по месту для телефона (2.13): {"version", "zones": [{"id", "lat", "lon", "radius", "when", "text"}]}."""
+    from . import geo
+
+    uid = owner_id()
+    return web.json_response(geo.for_phone(uid) if uid is not None else {"version": 0, "zones": []})
+
+
+async def geo_place(request: web.Request) -> web.Response:
+    """«Джес, запомни, здесь мой дом»: телефон прислал, где он сейчас — {"name", "lat", "lon", "accuracy"}."""
+    from . import geo
+
+    uid = owner_id()
+    data = await _json(request)
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "lat/lon required"}, status=400)
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    p = geo.save_place(uid, str(data.get("name") or "дом"), lat, lon)
+    return web.json_response({"ok": True, "place": p["name"]})
+
+
+async def geo_fired(request: web.Request) -> web.Response:
+    """Телефон: он пришёл в место / ушёл (зона Android). Совпало с напоминанием — бот пишет в чат."""
+    from . import geo
+
+    uid = owner_id()
+    data = await _json(request)
+    hit = geo.fired(uid, str(data.get("id") or ""), bool(data.get("entering"))) if uid is not None else None
+    if hit is None:
+        return web.json_response({"ok": False})
+
+    async def tell() -> None:
+        try:
+            from .context import bot_instance
+            from .profile import h
+
+            where = ("🏠 " if hit["place"] == "дом" else "📍 ") + hit["place"].capitalize()
+            await bot_instance().send_message(uid, f"{where}: <b>{h(hit['text'])}</b>")
+        except Exception:
+            logger.warning("geo: сообщение в чат не ушло", exc_info=True)
+
+    phone._later(tell())
+    return web.json_response({"ok": True, "text": hit["text"], "place": hit["place"]})
+
+
+async def media_progress(request: web.Request) -> web.Response:
+    """Где он остановился в YouTube (2.13, MediaWatcher): {"title", "channel", "position_s", "duration_s", "state"}."""
+    from . import lessons
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    item = lessons.note(uid, await _json(request))
+    return web.json_response({"ok": item is not None})
+
+
 async def bank_notification(request: web.Request) -> web.Response:
     """Уведомление банка/SMS об операции (2.9): {"app", "package", "title", "text", "t"} → вопрос в боте «Записать?».
     Отвечаем сразу, разбор — фоном (телефону ждать нечего)."""
@@ -628,6 +687,10 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
+    app.router.add_post("/jarvis/v1/media", media_progress)
+    app.router.add_get("/jarvis/v1/geo", geo_zones)
+    app.router.add_post("/jarvis/v1/geo/place", geo_place)
+    app.router.add_post("/jarvis/v1/geo/fired", geo_fired)
     app.router.add_post("/jarvis/v1/calendar", calendar_sync)
     app.router.add_get("/jarvis/v1/calendar/pending", calendar_pending)
     app.router.add_post("/jarvis/v1/wake_settings", wake_settings)

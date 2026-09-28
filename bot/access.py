@@ -42,8 +42,11 @@ def is_allowed(uid: int | None) -> bool:
 
 
 def user_ids() -> list[int]:
-    """Все, кому бот что-то шлёт сам (сводки, напоминания, будильник): владелец + приглашённые."""
-    return sorted(set(settings.allowed_telegram_ids) | _members)
+    """Все, кому бот что-то шлёт сам (сводки, напоминания, будильник): владелец + приглашённые, кроме заблокировавших бота
+    (29.09: им не шлём и ИИ на них не тратим — bot/blocked.py)."""
+    from . import blocked
+
+    return sorted((set(settings.allowed_telegram_ids) | _members) - blocked.ids())
 
 
 async def refresh(force: bool = False) -> None:

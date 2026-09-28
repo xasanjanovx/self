@@ -8,6 +8,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.methods import (AnswerCallbackQuery, EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto,
                              SendVoice, TelegramMethod)
 from aiogram.types import BotCommand
@@ -68,7 +69,16 @@ class PremiumBot(Bot):
                 method.caption = pe.premiumize(method.caption)
         except Exception:
             logger.debug("premiumize failed", exc_info=True)
-        return await super().__call__(method, request_timeout=request_timeout)
+        try:
+            return await super().__call__(method, request_timeout=request_timeout)
+        except TelegramForbiddenError as exc:
+            # 29.09: заблокировал бота — запоминаем, дальше ему ничего не шлём (и не тратим ИИ на его сводки)
+            chat_id = getattr(method, "chat_id", None)
+            if "blocked" in str(exc).lower() and isinstance(chat_id, int) and chat_id > 0:
+                from . import blocked
+
+                blocked.mark(chat_id, "bot was blocked")
+            raise
 
 
 async def on_startup(bot: Bot) -> None:

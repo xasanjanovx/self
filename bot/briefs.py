@@ -84,6 +84,16 @@ async def morning_brief(profile: Profile) -> str:
                 lines.extend(f"   • {h(r)}" for r in rows[:8])
     except Exception:
         logger.debug("morning: календарь не прочитался", exc_info=True)
+    try:
+        from . import daily_tasks
+
+        daily = daily_tasks.today_lines(profile.telegram_id, today)
+        if daily:
+            lines.append("")
+            lines.append(f"🔁 <b>{'Har kuni' if lang == 'uz' else 'Каждый день'}</b>")
+            lines.extend(f"   • {h(r)}" for r in daily[:8])
+    except Exception:
+        logger.debug("morning: ежедневные дела не прочитались", exc_info=True)
 
     lines.append("")
     if nutrition_profile:

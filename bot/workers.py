@@ -9,7 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import LinkPreviewOptions
 
-from . import access
+from . import access, blocked
 from . import cache
 from . import services
 from .context import db, settings
@@ -51,7 +51,7 @@ async def report_worker(bot: Bot) -> None:
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
-            users = await db.list_users()
+            users = [u for u in await db.list_users() if not blocked.is_blocked(u.get("telegram_id"))]
             for user in users:
                 telegram_id = int(user["telegram_id"])
                 if not access.is_allowed(telegram_id):
@@ -202,7 +202,7 @@ async def _reminder_tick(bot: Bot) -> None:
 
     now_utc = datetime.now(timezone.utc)
     try:
-        rows = await db.list_reminders_all()
+        rows = [r for r in await db.list_reminders_all() if not blocked.is_blocked(r.get("telegram_id"))]
     except Exception:
         logger.debug("reminders table unavailable", exc_info=True)
         return
@@ -254,7 +254,7 @@ async def _task_tick(bot: Bot) -> None:
     if not db.available("tasks"):
         return
     try:
-        rows = await db.list_tasks_all()
+        rows = [r for r in await db.list_tasks_all() if not blocked.is_blocked(r.get("telegram_id"))]
     except Exception:
         logger.debug("tasks table unavailable", exc_info=True)
         return
@@ -449,12 +449,43 @@ async def proactive_worker(bot: Bot) -> None:
         await asyncio.sleep(600)
 
 
+async def _daily_tick(bot: Bot) -> None:
+    """Каждый день (29.09): в срок — «🔁 Урок английского» с кнопками [✅ Сделал] [⏭ Не сегодня] и, если есть ссылка или
+    он смотрел YouTube, [▶️ Продолжить урок с 12:34] — ролик открывается с той секунды, где остановился."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    from . import daily_tasks, lessons
+    from .keyboards import _btn
+
+    for telegram_id in access.user_ids():
+        try:
+            profile = await profile_by_id(telegram_id)
+            now = profile.now
+            for item in daily_tasks.due(telegram_id, now):
+                daily_tasks.mark_reminded(telegram_id, item, now.date())  # сначала отметка — не повторим, даже если отправка упадёт
+                rows = [[_btn("✅ " + profile.tr("Сделал", "Bajardim"), f"daily:done:{item['id']}", style="success"),
+                         _btn("⏭ " + profile.tr("Не сегодня", "Bugun emas"), f"daily:skip:{item['id']}")]]
+                if item.get("link"):
+                    res = await lessons.resume(telegram_id, link=item["link"])
+                    if not res.get("error"):
+                        label = profile.tr("Продолжить урок", "Darsni davom ettirish") + (f" · {res['position']}" if res.get("start") else "")
+                        rows.append([InlineKeyboardButton(text="▶️ " + label, url=lessons.url(res))])
+                extra = daily_tasks.progress(item, now.date())
+                text = f"🔁 <b>{h(item['title'])}</b>" + (f"\n{extra}" if extra else "")
+                await bot.send_message(telegram_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        except TelegramForbiddenError:
+            logger.info("daily skipped: user %s blocked the bot", telegram_id)
+        except Exception:
+            logger.exception("daily reminder failed for %s", telegram_id)
+
+
 async def reminder_worker(bot: Bot) -> None:
     logger.info("Reminder worker started")
     while True:
         try:
             await _reminder_tick(bot)
             await _task_tick(bot)
+            await _daily_tick(bot)
             from . import screen as screen_mod
 
             await screen_mod.sweep(bot)  # временные сообщения с вышедшим сроком (переживает перезапуск)

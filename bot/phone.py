@@ -689,6 +689,34 @@ async def _youtube_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) 
     return {"videos": found} if found else {"error": "YouTube не ответил — попробуй другие слова"}
 
 
+@ptool("save_place_here", "Запомнить место, где он СЕЙЧАС: «запомни, здесь мой дом», «это мой офис» — для напоминаний по месту "
+       "(«когда приду домой — напомни…»).", {"name": P("STRING", "как назвать: дом / работа / офис / …")}, ("name",))
+async def _save_place_here(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import geo
+
+    name = geo.place_key(_str(a.get("name")) or "дом")
+    return _action(turn, "save_place", name=name) | {"place": name, "note": "телефон определит, где он, и сохранит (нужен доступ к геолокации)"}
+
+
+@ptool("resume_video", "Продолжить YouTube с того места, где он остановился: «продолжи урок», «продолжи уроки английского», «включи "
+       "видео, где я остановился». Досмотрел, а у ежедневного дела есть плейлист — следующий урок.",
+       {"query": P("STRING", "что именно: слова из названия, канал или ежедневное дело (необязательно)")})
+async def _resume_video(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import daily_tasks, lessons
+
+    query = _str(a.get("query")) or ""
+    habit = daily_tasks.find(turn.uid, query) if query else None
+    if habit is None and not query:
+        # «продолжи урок» без уточнения: последний ролик, а если его нет — дело на сегодня со ссылкой
+        today = ctx.profile.now.date()
+        habit = next((h for h in daily_tasks.all_items(turn.uid) if h.get("link") and daily_tasks.is_today(h, today)), None) if not lessons.items(turn.uid) else None
+    res = await lessons.resume(turn.uid, query if habit is None else "", link=(habit or {}).get("link") or "")
+    if res.get("error"):
+        return res
+    _action(turn, "play", query=res["title"], kind="video", video_id=res["video_id"], start=res["start"])
+    return {"ok": True, "title": res["title"], "from": res["position"], "next_lesson": res.get("next")}
+
+
 @ptool("play_media", "Включить музыку или видео: «поставь Шахзоду», «включи нашиды», «включи видео про…». Музыка — в YouTube Music, "
        "видео — в YouTube. video_id — если уже нашла через youtube_search.",
        {"query": P("STRING", "что включить: песня / исполнитель / тема"), "kind": P("STRING", "music | video", enum=["music", "video"]),

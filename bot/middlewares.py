@@ -33,7 +33,10 @@ class AccessMiddleware(BaseMiddleware):
         uid = user.id if user else None
         await access.refresh()
         if access.is_allowed(uid):
-            from . import billing
+            from . import billing, blocked
+
+            if blocked.is_blocked(uid):
+                blocked.unmark(uid)  # написал боту — значит, снова с нами
 
             if isinstance(event, CallbackQuery) and uid is not None:
                 from . import i18n
