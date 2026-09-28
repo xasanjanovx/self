@@ -108,6 +108,8 @@ async def send_morning(bot: Bot, profile, us: dict | None = None, *, late_ok: bo
             # «Утро голосом» — Джарвис рассказывает сам; не вышло — обычный текст
             if not (p.morning_voice and await voice_brief.send(bot, profile, p, text)):
                 await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+        except TelegramForbiddenError:
+            logger.info("morning brief skipped: user %s blocked the bot", telegram_id)  # не ошибка — он заблокировал бота
         except Exception:
             logger.exception("morning brief failed for %s", telegram_id)
     if db.available("recurring_payments"):
@@ -170,6 +172,8 @@ async def _brief_tick(bot: Bot) -> None:
                     text = await briefs.evening_brief(profile)
                     if text:
                         await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+                except TelegramForbiddenError:
+                    logger.info("evening brief skipped: user %s blocked the bot", telegram_id)
                 except Exception:
                     logger.exception("evening brief failed for %s", telegram_id)
 

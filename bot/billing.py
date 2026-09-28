@@ -465,8 +465,21 @@ def over_limit() -> bool:
 
 def live_allowed(mode: str = "phone") -> bool:
     """Жёсткий лимит (он выбрал): после дневного лимита живой голос (Gemini Live) до полуночи выключен —
-    телефон отвечает только в экономном режиме, звонков «позвони мне» нет. Подъём на фаджр — всегда."""
-    return mode == "wake" or not over_limit()
+    телефон отвечает в экономном режиме, звонки «позвони мне» — бесплатным голосом. Подъём на фаджр — всегда.
+    28.09: «включи лайв режим» — живой голос и после лимита, до полуночи (force_live)."""
+    return mode == "wake" or not over_limit() or live_forced()
+
+
+def force_live(on: bool = True) -> None:
+    """Он сам сказал «включи лайв (быстрый) режим» — живой голос до полуночи, даже после лимита; «выключи» — как обычно."""
+    st = _load()
+    st["live_forced"] = _today() if on else None
+    _schedule_save()
+    logger.info("billing: живой голос %s до полуночи (его просьба)", "включён" if on else "по лимиту")
+
+
+def live_forced() -> bool:
+    return _load().get("live_forced") == _today()
 
 
 def _maybe_limit_alert(st: dict[str, Any], day: dict[str, Any]) -> None:
@@ -679,5 +692,5 @@ def _notify(text: str) -> None:
 
 
 __all__ = ["record", "cost", "breakdown", "status", "set_balance", "exhausted", "is_billing_error", "rate_limited", "voice_note", "flush",
-           "PRICES", "Meter", "start_session", "end_session", "live_allowed", "set_user", "reset_user", "user_spent_today",
+           "PRICES", "Meter", "start_session", "end_session", "live_allowed", "force_live", "live_forced", "set_user", "reset_user", "user_spent_today",
            "user_over_limit", "clients_report", "clients_spent_today", "CLIENT_DAILY_LIMIT_USD", "record_free", "free_today"]

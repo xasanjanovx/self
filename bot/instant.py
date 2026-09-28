@@ -40,6 +40,13 @@ _VOLUME = [
     (re.compile(r"^(?:тише|потише|сделай тише|сделай потише|убавь(?: звук| громкость)?)$"), "down"),
     (re.compile(r"^(?:выключи звук|без звука|убери звук)$"), "mute"),
 ]
+# 28.09: «включи лайв режим» — живой голос до полуночи и после дневного лимита (его выбор); «выключи» — снова по лимиту
+_LIVE_ON = re.compile(r"^(?:включи|вруби|давай|перейди\s+(?:в|на))\s+(?:лайв|лайф|live|живой|быстрый)(?:\s+режим)?$|^(?:лайв|быстрый|живой)\s+режим$")
+_LIVE_OFF = re.compile(r"^(?:выключи|отключи|убери)\s+(?:лайв|лайф|live|живой|быстрый)(?:\s+режим)?$|^(?:включи\s+)?экономный\s+режим$")
+# «поставь музыку Шахзоды», «включи Бенома», «включи видео про…» — YouTube (Music) по запросу
+_PLAY = re.compile(r"^(?:поставь|включи|вруби|запусти|сыграй)\s+(?:(музыку|песню|песни|трек|клип|видео)\s*)?(.*)$")
+_PLAY_SKIP = {"будильник", "таймер", "фонарик", "звук", "громкость", "свет", "вайфай", "wifi", "блютуз", "bluetooth", "интернет",
+              "камеру", "камера", "экран", "режим", "не", "уведомления", "яркость", "геолокацию", "навигатор", "приложение", "задачу"}
 _ALARM = re.compile(r"^(?:поставь\s+|заведи\s+|установи\s+)?будильник\s+(?:на|в)\s+(.+)$|^разбуди(?:\s+меня)?\s+(?:в|на)\s+(.+)$")
 _TIMER = re.compile(r"^(?:поставь\s+|заведи\s+|установи\s+)?таймер\s+на\s+(.+)$|^засеки\s+(.+)$")
 
@@ -149,6 +156,16 @@ def parse(text: str) -> Command | None:
     if m := _TIMER.match(t):
         seconds = _timer_seconds((m.group(1) or m.group(2) or "").strip())
         return Command("set_timer", {"seconds": seconds}, t) if seconds else None
+    if _LIVE_ON.match(t):
+        return Command("live_mode", {"on": True}, t)
+    if _LIVE_OFF.match(t):
+        return Command("live_mode", {"on": False}, t)
+    if m := _PLAY.match(t):
+        what, query = m.group(1) or "", (m.group(2) or "").strip()
+        words = query.split()
+        if not words or words[0] in _PLAY_SKIP or len(words) > 6 or (not what and len(words) > 3):
+            return None
+        return Command("play_media", {"query": query, "kind": "video" if what in {"клип", "видео"} else "music"}, t)
     return None
 
 

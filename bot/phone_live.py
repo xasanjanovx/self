@@ -355,6 +355,8 @@ class PhoneLive(_Session):
         if cmd is None:
             kind = instant.quick(text)
             return bool(kind) and await self._quick(gem, heard["text"], text, kind)
+        if cmd.tool == "live_mode":
+            return await self._quick(gem, heard["text"], text, "live_on" if cmd.args.get("on") else "live_off")
         if self.turn.device.get("locked") and cmd.tool in NEED_UNLOCK:
             return False  # после разблокировки Gemini сам доделает — ему нужна фраза
         logger.info("phone live: мгновенная команда «%s» → %s %s (%s мс)", heard["text"], cmd.tool,
@@ -381,6 +383,10 @@ class PhoneLive(_Session):
             if kind in {"ask", "do"}:
                 res = await live_call.delegate(self.profile, text)
                 answer = str(res.get("reply") or "").strip()
+            elif kind in {"live_on", "live_off"}:
+                # «включи/выключи лайв режим» (28.09): живой голос до полуночи и после дневного лимита
+                billing.force_live(kind == "live_on")
+                answer = "Живой режим включён до полуночи." if kind == "live_on" else "Хорошо, дальше — по лимиту, экономно."
             else:
                 alarm = await app_alarm.next_plan(self.profile) if kind == "alarm" else None
                 answer = instant.local_answer(kind, self.profile.now, self.turn.device, alarm) or ""
@@ -941,8 +947,10 @@ def greeting_texts(lang: str, honorific: str) -> list[str]:
     if not hons:
         return list(_GREETINGS_PLAIN.get(lang, _GREETINGS_PLAIN["ru"]))
     texts: list[str] = []
-    for t in _GREETINGS.get(lang, _GREETINGS["ru"]):
-        for h in hons:
+    templates = _GREETINGS.get(lang, _GREETINGS["ru"])
+    for n, h in enumerate(hons):
+        # «mix» (28.09 его выбор): чаще «сэр» — все приветствия с ним, «шеф» и «босс» — только по паре
+        for t in (templates if honorific != "mix" or n == 0 else templates[:2]):
             text = t.format(hon=h[col])
             texts.append(text[0].upper() + text[1:])
     return list(dict.fromkeys(texts))
@@ -952,12 +960,13 @@ def greeting_items(persona) -> list[tuple[str, str]]:  # noqa: ANN001
     """[(текст, язык)]: говорит на нескольких языках (mirror) — по-русски и по-узбекски, много разных; иначе как раньше."""
     if not persona.mirror:
         return [(t, persona.lang) for t in greeting_texts(persona.lang, persona.honorific)]
-    # одно обращение везде (26.09 он выбрал «один характер и обращение»): «mix» (сэр/шеф/босс вперемешку) → «шеф»
-    hon = (_HON.get(persona.honorific if persona.honorific != "mix" else "shef") or _HON["shef"])[0]
+    # 28.09 его выбор: «иногда шеф, иногда босс, иногда сэр — побольше сэр»: по кругу сэр, сэр, шеф, босс
+    hons = _HON.get(persona.honorific) or _HON["mix"]
+    cycle = [hons[0], hons[0], *hons[1:]] if len(hons) > 1 else hons
     out: list[tuple[str, str]] = []
     for lang, col in (("ru", 0), ("uz", 1)):
-        for t in _GREETINGS_MANY[lang]:
-            text = t.format(hon=hon[col])
+        for i, t in enumerate(_GREETINGS_MANY[lang]):
+            text = t.format(hon=cycle[i % len(cycle)][col])
             out.append((text[0].upper() + text[1:], lang))
     return list(dict.fromkeys(out))
 

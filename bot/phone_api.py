@@ -201,6 +201,9 @@ _WAKE_PROMPT = (
 )
 
 
+MEDIA_MIN_VOICE = 0.5  # пока играет видео (без эхоподавления) — сходство с его голосом не ниже этого
+
+
 async def wake_check(request: web.Request) -> web.Response:
     """Телефон решил, что услышал «JES», — проверяем по записи, чтобы он не откликался на телевизор и похожие слова.
 
@@ -236,22 +239,31 @@ async def wake_check(request: web.Request) -> web.Response:
         # 27.09: голос точно его (банк его записей ≥ 0.8 или уверенный отпечаток) — имя принимаем и в кривом прочтении
         # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
         strong = wakeword.strong_voice(heard["text"], voice)
+        # media — на телефоне играет видео/музыка (2.11+); aec — телефон слушает с эхоподавлением и сам вычитает этот звук (2.12+)
+        media, aec = bool(data.get("media")), bool(data.get("aec"))
         if not ok:
-            # media — на телефоне играет видео/музыка (приложение 2.11+): только чёткое имя, без поблажек
+            # во время видео — только чёткое имя, без поблажек
             ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid,
-                                                      media=bool(data.get("media")))
+                                                      media=media)
             if ok:
                 after = lenient_after
             else:
                 wakeword.note_reject(uid, heard["text"], strong)
         else:
             wakeword.note_accept(uid, after)
+        if ok and media and (heard.get("pos", 0) > (1 if aec else 0) or (not aec and float(voice.get("score") or 0) < MEDIA_MIN_VOICE)):
+            # 28.09: «не реагировать на видео, даже если там я сам говорю «Джес»»: пока телефон играет видео, «Джес» — только
+            # первым словом и голосом, точно похожим на его живой (без эхоподавления звук видео доходит до микрофона целиком)
+            ok, why = False, "играет видео: имя не первым словом или голос не точно его"
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
-            if voice.get("sure"):
-                voiceprint.bank_add(uid, voice.get("_emb"))  # уверенно он — в банк его настоящих записей
-        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)%s", "да" if ok else "нет", took, heard["text"][:60],
-                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"], f" — {why}" if why else "")
+            if voice.get("sure") and heard["name"] and not media:
+                # в банк его настоящих записей — только чётко расслышанное имя и без видео на фоне (28.09: в банк попали
+                # записи из видео, и похожие голоса проходили по нему)
+                voiceprint.bank_add(uid, voice.get("_emb"))
+        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)%s%s", "да" if ok else "нет", took, heard["text"][:60],
+                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"],
+                    (" [видео" + (", эхоподавление]" if aec else "]")) if media else "", f" — {why}" if why else "")
         if not ok:
             _reject(uid, f"не «Джес»: «{heard['text'][:60]}»")
             return web.json_response({"ok": False, "text": heard["text"], "fast": True})
@@ -358,6 +370,11 @@ async def _instant_command(uid: int, said: str, after: str, device: dict[str, An
     first, _, rest = after.partition(" ")
     if cmd is None and rest and first[:1] in {"д", "ж", "ч"}:
         cmd = instant.parse(rest)  # имя расслышано как «джаз»/«жест» — команда после него
+    if cmd is not None and cmd.tool == "live_mode":
+        from . import billing
+
+        billing.force_live(bool(cmd.args.get("on")))
+        return None  # разговор откроется уже в нужном режиме — там JES и подтвердит голосом
     if cmd is None or (device.get("locked") and cmd.tool in phone_live.NEED_UNLOCK):
         return None  # заблокирован — после разблокировки доделает Gemini (ему нужна фраза)
     profile = await profile_by_id(uid)

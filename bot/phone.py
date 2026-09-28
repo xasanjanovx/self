@@ -302,7 +302,9 @@ def ptool(name: str, description: str, properties: dict[str, Any] | None = None,
     return deco
 
 
-def _action(turn: PhoneTurn, kind: str, **fields: Any) -> dict[str, Any]:
+def _action(turn: PhoneTurn, kind: str, /, **fields: Any) -> dict[str, Any]:
+    # «/»: kind — только по порядку, иначе поле действия kind=«music» (play_media) конфликтовало с ним — 28.09 «поставь
+    # музыку» падало TypeError 12 раз за вечер, каждая просьба — 10 с
     turn.actions.append({"type": kind, **{k: v for k, v in fields.items() if v not in (None, "")}})
     return {"ok": True, "done_on_phone": kind}
 

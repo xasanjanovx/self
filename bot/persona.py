@@ -53,11 +53,13 @@ class Persona:
         return cls(
             voice=voice if voice in VOICES else DEFAULT_VOICE,
             lang=str(row.get("lang")) if str(row.get("lang") or "") in {"uz", "ru", "en"} else "uz",
-            address="siz" if str(row.get("address") or "sen") == "siz" else "sen",
-            tone=str(row.get("tone") or "friendly") if str(row.get("tone") or "friendly") in TONES else "friendly",
-            verbosity=str(row.get("verbosity") or "short") if str(row.get("verbosity") or "short") in VERBOSITY else "short",
+            # 28.09 его выбор: настроек меньше — всегда на «вы», тон тёплый, ответы короткие, величать «сэр/шеф/босс»
+            # (чаще «сэр»); в таблице могли остаться старые значения — не берём их
+            address="siz",
+            tone="friendly",
+            verbosity="short",
             call_name=(str(row.get("call_name")).strip() or None) if row.get("call_name") else None,
-            honorific=str(row.get("honorific") or "mix") if str(row.get("honorific") or "mix") in HONORIFICS else "mix",
+            honorific="mix",
             morning_voice=bool(row.get("morning_voice")),
             alert_calls=bool(row.get("alert_calls")),
             mirror=bool(row.get("voice_mirror")),
@@ -96,7 +98,7 @@ def honorific_rule(p: Persona) -> str:
     """«Шеф / Сэр / Босс» — к месту, а не в каждой фразе (как JES у Тони Старка)."""
     if p.honorific == "none":
         return "Обращайся к нему по имени, без «шеф/сэр/босс»."
-    words = {"mix": "«Шеф», «Сэр» или «Босс» (по-узбекски «Shef», «Ser», «Boss»), чередуя",
+    words = {"mix": "чаще всего «Сэр», иногда «Шеф» или «Босс» (по-узбекски «Ser», «Shef», «Boss»)",
              "shef": "«Шеф» (по-узбекски «Shef»)", "ser": "«Сэр» (по-узбекски «Ser»)", "boss": "«Босс» (по-узбекски «Boss»)"}[p.honorific]
     return (f"Иногда, к месту, величай его {words}: в приветствии, когда докладываешь о сделанном, "
             "в шутку, при важной новости. Не в каждой фразе — примерно раз в 3–4 реплики, естественно.")

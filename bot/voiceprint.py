@@ -203,12 +203,11 @@ async def enroll(uid: int, wake_wavs: list[bytes], reading_wav: bytes | None) ->
         # итоговый отпечаток — и чтение, и короткие (ближе к тому, что услышим утром)
         full = np.mean(long_emb + short_emb, axis=0)
         full /= np.linalg.norm(full) + 1e-9
+        # 28.09: банк — заново, из его же «Джес» этой записи (рядом и издалека). Старый банк не берём: туда попали записи из видео,
+        # и похожие голоса проходили по нему
         data = {"vp": [round(float(v), 6) for v in full], "threshold": threshold, "z_threshold": z_threshold, "created": time.time(),
-                "short": len(short_emb), "reading_s": round(sum(len(x) for x in long_parts) / RATE, 1)}
-        try:
-            data["bank"] = json.loads(_file(uid).read_text(encoding="utf-8")).get("bank") or []
-        except (OSError, ValueError):
-            pass
+                "short": len(short_emb), "reading_s": round(sum(len(x) for x in long_parts) / RATE, 1),
+                "bank": [[round(float(v), 5) for v in e] for e in short_emb[-BANK_MAX:]]}
         _file(uid).write_text(json.dumps(data), encoding="utf-8")
         return {"ok": True, "threshold": threshold, "z_threshold": z_threshold, "scores": [round(s, 3) for s in scores],
                 "z": [round(z, 2) for z in zs], "short": len(short_emb), "reading_s": data["reading_s"]}
@@ -275,6 +274,22 @@ BANK_ADD_SCORE = 0.40    # в банк — только уверенные (чт
 BANK_MAX = 24
 BANK_EVERY_S = 30.0
 _bank_at: dict[int, float] = {}
+
+
+def clean_bank(uid: int, min_similarity: float = 0.55) -> tuple[int, int]:
+    """Выбросить из банка записи, непохожие на его отпечаток (чужие голоса, попавшие туда с видео). → (было, осталось)."""
+    import numpy as np
+
+    try:
+        data = json.loads(_file(uid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0, 0
+    vp = np.array(data["vp"], dtype=np.float32)
+    bank = list(data.get("bank") or [])
+    keep = [b for b in bank if float(vp @ np.array(b, dtype=np.float32)) >= min_similarity]
+    data["bank"] = keep
+    _file(uid).write_text(json.dumps(data), encoding="utf-8")
+    return len(bank), len(keep)
 
 
 def bank_add(uid: int, emb: Any) -> bool:

@@ -374,12 +374,10 @@ def place_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
-                             honorific: str = "mix", voice_model: str = "gemini", qwen_voice: str = "Tina",
-                             voice_mode: str = "live", call_mode: str = "live") -> InlineKeyboardMarkup:
-    """«Голос и характер» JES: режим телефона, модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
-    from .persona import HONORIFICS, VOICES
-    from .qwen_live import VOICES as QWEN_VOICES
+def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mode: str = "live", **_old: object) -> InlineKeyboardMarkup:
+    """«Голос и характер» JES — коротко (28.09 его выбор): голос, язык, режим. Всегда на «вы», «сэр/шеф/босс», тон и длина —
+    по умолчанию; модели Qwen больше нет в настройках."""
+    from .persona import VOICES
 
     uz = lang == "uz"
 
@@ -387,17 +385,9 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
         return _btn(label + (" ✓" if on else ""), data, style="primary" if on else None)
 
     rows: list[list[InlineKeyboardButton]] = []
-    # телефон: облегчённый Live (быстро, понимает речь) или экономно (без Live, медленнее)
-    rows.append([pick("⚡ " + ("Jonli (yengil)" if uz else "Живой (облегчённый)"), "jarvis:vmode:live", voice_mode == "live"),
-                 pick("💸 " + ("Tejamkor" if uz else "Экономно"), "jarvis:vmode:economy", voice_mode == "economy")])
-    # звонки Telegram (28.09): облегчённый Live или бесплатный голос (ответ через 1.5–3 с)
-    rows.append([pick("📞 " + ("Qo'ng'iroq: jonli" if uz else "Звонок: живой"), "jarvis:cmode:live", call_mode == "live"),
-                 pick("📞 " + ("Qo'ng'iroq: tekin" if uz else "Звонок: бесплатно"), "jarvis:cmode:economy", call_mode == "economy")])
-    # модель живого голоса — чтобы сравнить: Gemini (как было) или Qwen (Alibaba, в 3–6 раз дешевле)
-    rows.append([pick("🧠 Gemini", "jarvis:vmodel:gemini", voice_model == "gemini"),
-                 pick("🧠 Qwen · " + ("arzon" if uz else "дешевле"), "jarvis:vmodel:qwen", voice_model == "qwen")])
-    if voice_model == "qwen":
-        rows.append([pick(name, f"jarvis:qvoice:{name}", name == qwen_voice) for name in QWEN_VOICES])
+    # режим — сразу для телефона и звонков: быстрый (живой голос; после дневного лимита — экономно) или всегда экономный
+    rows.append([pick("⚡ " + ("Tezkor" if uz else "Быстрый"), "jarvis:mode:live", voice_mode == "live"),
+                 pick("💸 " + ("Tejamkor" if uz else "Экономный"), "jarvis:mode:economy", voice_mode == "economy")])
     voice_row: list[InlineKeyboardButton] = []
     for key, (ru_name, uz_name) in VOICES.items():
         voice_row.append(pick(uz_name if uz else ru_name, f"jarvis:voice:{key}", key == voice))
@@ -409,16 +399,6 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
     rows.append([_btn("🔊 " + ("Ovozni eshitish" if uz else "Послушать голос"), "jarvis:sample")])
     rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru"),
                  pick("🇬🇧 English", "jarvis:lang:en", call_lang == "en")])
-    rows.append([pick("Sen (ты)" if uz else "На «ты»", "jarvis:address:sen", address == "sen"),
-                 pick("Siz (вы)" if uz else "На «вы»", "jarvis:address:siz", address == "siz")])
-    rows.append([pick(HONORIFICS[k][1] if uz else HONORIFICS[k][0], f"jarvis:honorific:{k}", honorific == k) for k in ("shef", "ser", "boss")])
-    rows.append([pick(HONORIFICS[k][1] if uz else HONORIFICS[k][0], f"jarvis:honorific:{k}", honorific == k) for k in ("mix", "none")])
-    rows.append([pick("🙂 " + ("Do'stona" if uz else "Дружелюбный"), "jarvis:tone:friendly", tone == "friendly"),
-                 pick("😌 " + ("Xotirjam" if uz else "Спокойный"), "jarvis:tone:calm", tone == "calm"),
-                 pick("🧐 " + ("Qat'iy" if uz else "Строгий"), "jarvis:tone:strict", tone == "strict")])
-    rows.append([pick("Qisqa" if uz else "Коротко", "jarvis:verbosity:short", verbosity == "short"),
-                 pick("O'rtacha" if uz else "Обычно", "jarvis:verbosity:normal", verbosity == "normal"),
-                 pick("Batafsil" if uz else "Подробно", "jarvis:verbosity:detailed", verbosity == "detailed")])
     rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

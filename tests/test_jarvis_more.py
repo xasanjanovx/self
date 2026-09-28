@@ -15,12 +15,11 @@ def _profile(lang: str = "ru") -> Profile:
 
 # ------------------------------------------------------------------ обращение и характер
 def test_honorific_from_row_and_rule():
-    p = persona.Persona.from_row({"honorific": "boss", "morning_voice": True, "alert_calls": True})
-    assert p.honorific == "boss" and p.morning_voice and p.alert_calls
-    assert "«Босс»" in persona.style_rules(p)
-    assert persona.Persona.from_row({"honorific": "weird"}).honorific == "mix"
-    mix = persona.honorific_rule(persona.Persona())
-    assert "Шеф" in mix and "Сэр" in mix and "Босс" in mix and "Не в каждой фразе" in mix
+    # 28.09 его выбор: настроек обращения больше нет — всегда «mix», чаще «сэр», и всегда на «вы»
+    p = persona.Persona.from_row({"honorific": "boss", "address": "sen", "morning_voice": True, "alert_calls": True})
+    assert p.honorific == "mix" and p.address == "siz" and p.morning_voice and p.alert_calls
+    mix = persona.honorific_rule(p)
+    assert "чаще всего «Сэр»" in mix and "Шеф" in mix and "Босс" in mix and "Не в каждой фразе" in mix
     assert "без «шеф/сэр/босс»" in persona.honorific_rule(persona.Persona(honorific="none"))
     assert not persona.Persona().alert_calls and not persona.Persona().morning_voice  # по умолчанию выключено
 

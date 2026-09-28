@@ -779,7 +779,7 @@ _WAKE_HELLO = {"ru": "Доброе утро, {t}! Проснулись?", "uz": 
 
 def wake_clip_text(persona: Persona, first_name: str) -> str:
     lang = persona.lang if persona.lang in _WAKE_HELLO else "ru"
-    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "shef") or first_name or _WAKE_TITLES[lang]["shef"]
+    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "ser") or first_name or _WAKE_TITLES[lang]["ser"]
     return _WAKE_HELLO[lang].format(t=title)
 
 
@@ -797,7 +797,7 @@ async def hello_clip(profile: Profile, persona: Persona) -> tuple[str, bytes] | 
     """«Алло, шеф! Слушаю.» для звонка «позвони мне» (28.09, облегчённый Live): звучит сразу, как взяли трубку, а Gemini
     подключается только после ответа — «занято», «отклонил» и пропущенные звонки больше ничего не стоят."""
     lang = persona.lang if persona.lang in _CALL_HELLO else "ru"
-    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "shef") or profile.first_name or _WAKE_TITLES[lang]["shef"]
+    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "ser") or profile.first_name or _WAKE_TITLES[lang]["ser"]
     return await voice_clip(persona, _CALL_HELLO[lang].format(t=title))
 
 
@@ -941,27 +941,29 @@ async def run(profile: Profile, *, mode: str = "assistant", topic: str = "", wak
     Gemini готовит приветствие, пока телефон звонит. Взяли трубку — голос через полсекунды.
     pregreet=False — приветствие не готовим заранее (повторные звонки будильника: 26.09 он не взял 20 звонков подряд,
     и каждое заготовленное приветствие стоило ~$0.003–0.009); Gemini подключается, когда взяли трубку (~1 с).
-    После дневного лимита — не звоним (кроме подъёма на фаджр)."""
+    После дневного лимита — бесплатным голосом (bot/cheap_voice.py): 28.09 он трижды просил «позвони мне», а бот молча
+    не звонил."""
     from . import billing
 
     uid = profile.telegram_id
-    if not billing.live_allowed(mode):
-        logger.info("call %s: дневной лимит живого голоса — не звоню (%s)", uid, mode)
-        return LiveResult(error="daily_limit")
+    cheap = not billing.live_allowed(mode)
+    if cheap:
+        logger.info("call %s: дневной лимит живого голоса — звоню бесплатным голосом (%s)", uid, mode)
     if mode != "wake" and billing.user_over_limit(uid):
         logger.info("call %s: клиент исчерпал дневной лимит ИИ — не звоню (%s)", uid, mode)
         return LiveResult(error="daily_limit")
     meter = billing.start_session("wake" if mode == "wake" else "call")
     who = billing.set_user(uid)  # звонок из фоновой задачи (подъём, «позвони мне») — расход на него
     try:
-        return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang, pregreet=pregreet)
+        return await _run(profile, mode=mode, topic=topic, wake=wake, ring_seconds=ring_seconds, lang=lang, pregreet=pregreet,
+                          cheap=cheap)
     finally:
         billing.end_session(meter)
         billing.reset_user(who)
 
 
 async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] | None, ring_seconds: int, lang: str | None,
-               pregreet: bool = True) -> LiveResult:
+               pregreet: bool = True, cheap: bool = False) -> LiveResult:
     import aiohttp
 
     from . import billing
@@ -975,7 +977,7 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
         persona = replace(persona, lang=lang)
     from . import cheap_voice
 
-    if cheap_voice.wanted(mode, persona):
+    if cheap or cheap_voice.wanted(mode, persona):
         # 28.09 его выбор: будильник — всегда бесплатным голосом; звонок — если в настройках «экономный голос»
         return await cheap_voice.run_call(profile, persona, dial, mode=mode, topic=topic, wake=wake)
     system = system_instruction(profile, persona, mode=mode, snapshot=snapshot, memory=memory, wake=wake, topic=topic)
@@ -1045,8 +1047,8 @@ async def _answer(profile: Profile) -> LiveResult:
     persona, snapshot, memory = await _prompt_parts(profile, "assistant")
     from . import cheap_voice
 
-    if cheap_voice.wanted("assistant", persona):
-        return await cheap_voice.answer_call(profile, persona)  # в настройках «экономный голос» — без Live
+    if cheap_voice.wanted("assistant", persona) or not billing.live_allowed("assistant"):
+        return await cheap_voice.answer_call(profile, persona)  # «экономный голос» в настройках или дневной лимит — без Live
     system = system_instruction(profile, persona, mode="assistant", snapshot=snapshot, memory=memory) + billing.voice_note()
     sess = _Session(profile, persona, mode="assistant", system=system)
     async with aiohttp.ClientSession() as http:

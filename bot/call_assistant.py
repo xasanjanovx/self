@@ -359,11 +359,7 @@ async def on_incoming_call(user_id: int) -> bool:
         return False
     if uid in _running:
         return False  # уже разговариваем (или звоним ему сами)
-    from . import billing
-
-    if not billing.live_allowed("assistant"):
-        logger.info("call %s: входящий — дневной лимит живого голоса, не беру", uid)
-        return False
+    # после дневного лимита — тоже берём, но бесплатным голосом (live_call.answer → cheap_voice)
     from .handlers.common import profile_by_id
 
     profile = await profile_by_id(uid)

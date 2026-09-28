@@ -26,7 +26,8 @@ def test_app_alarm_holds_telegram_only_until_grace(monkeypatch, tmp_path):
 
 def test_wake_clip_text():
     assert live_call.wake_clip_text(Persona(lang="ru", honorific="shef"), "Тест") == "Доброе утро, шеф! Проснулись?"
-    assert live_call.wake_clip_text(Persona(lang="uz", honorific="mix"), "Test") == "Xayrli tong, shef! Uyg'ondingizmi?"
+    # 28.09 его выбор: «mix» — чаще «сэр»
+    assert live_call.wake_clip_text(Persona(lang="uz", honorific="mix"), "Test") == "Xayrli tong, ser! Uyg'ondingizmi?"
 
 
 def test_main_menu_alarm_instead_of_refresh():

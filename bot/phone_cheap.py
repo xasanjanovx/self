@@ -68,8 +68,10 @@ _LIVE_MODE = {
     "name": "live_mode",
     "description": "Перейти в живой голосовой разговор (Gemini Live) и продолжить там: посмотреть камерой («посмотри», «что это?», "
                    "«прочитай, что написано»), экран («что на экране», «переведи это»), фото из галереи, «давай поговорим», "
-                   "долгая беседа, урок, игра. Живой режим дороже — только когда без него никак.",
-    "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "что он просит, своими словами"}},
+                   "долгая беседа, урок, игра. Живой режим дороже — только когда без него никак. Сказал «включи лайв / быстрый / "
+                   "живой режим» — fast=true (живой голос до полуночи, даже после дневного лимита).",
+    "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "что он просит, своими словами"},
+                                                    "fast": {"type": "BOOLEAN", "description": "он сам попросил живой/быстрый режим"}},
                    "required": ["request"]},
 }
 
@@ -522,9 +524,75 @@ class PhoneCheap:
                 logger.info("phone cheap: чужой голос — не отвечаю (сходство %s, z %s)", verdict.get("score"), verdict.get("z"))
                 await self.to_phone({"type": "turn_complete"})
                 return
+        if await self._try_instant(wav):
+            return
         stt = asyncio.create_task(self._transcribe(wav), name="phone-stt")
         audio = {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode()}}
         await self._turn([{"text": self._stamp()}, audio], stt=stt)
+
+    async def _try_instant(self, wav: bytes) -> bool:
+        """28.09 «приказы стали медленными» (весь вечер после лимита — экономный режим, каждая команда ~2–3 с):
+        частые команды и здесь — без модели. Локальный распознаватель ~0.1 с + разбор (bot/instant.py): «позвони маме»,
+        «открой ютуб», «поставь музыку…», «фонарик», «будильник на…», время/дата/заряд; «включи лайв режим» — живой голос
+        до полуночи. Не команда — дальше модель, как раньше."""
+        from . import app_alarm, instant, wakeword
+        from .phone_live import NEED_UNLOCK
+
+        started = time.monotonic()
+        try:
+            heard = await wakeword.check(wav)
+        except Exception:
+            logger.warning("phone cheap: распознаватель", exc_info=True)
+            return False
+        if not heard or not heard.get("text"):
+            return False
+        said = heard["text"]
+        text = heard["after"] if heard.get("name") else said
+        cmd = instant.parse(text)
+        first, _, rest = text.partition(" ")
+        if cmd is None and rest and first[:1] in {"д", "ж", "ч"}:
+            cmd = instant.parse(rest)  # имя расслышано как «джаз»/«жест» — команда после него
+        answer = ""
+        if cmd is None:
+            kind = instant.quick(text)
+            if kind not in {"time", "date", "battery", "alarm"}:
+                return False
+            alarm = await app_alarm.next_plan(self.profile) if kind == "alarm" else None
+            answer = instant.local_answer(kind, self.profile.now, self.turn.device, alarm) or ""
+            if not answer:
+                return False
+        elif cmd.tool == "live_mode":
+            on = bool(cmd.args.get("on"))
+            billing.force_live(on)
+            if on:
+                self.upgrade = Upgrade(request="[Он включил живой режим. Одной короткой фразой скажи, что живой режим включён до "
+                                               "полуночи, и слушай.]", context="")
+                await self.to_phone({"type": "status", "text": "Подключаю живой режим…"})
+                logger.info("phone cheap: «%s» → живой режим до полуночи", said)
+                return True
+            answer = "Хорошо, дальше экономно."
+        else:
+            if self.turn.device.get("locked") and cmd.tool in NEED_UNLOCK:
+                return False
+            result = await exec_tool(self, cmd.tool, cmd.args)
+            if not instant.succeeded(result):
+                logger.info("phone cheap: мгновенная команда не вышла (%s) — решает модель", str(result)[:160])
+                return False
+        self.user_lines.append(said)
+        self.log.append(("Он", said))
+        await self.to_phone({"type": "user", "text": said, "final": True})
+        done = f"(сделано: {cmd.tool})" if cmd is not None and cmd.tool != "live_mode" else answer
+        # модель знает, что уже сделано, — если разговор продолжится
+        self.contents += [{"role": "user", "parts": [{"text": f"{self._stamp()} {said}"}]}, {"role": "model", "parts": [{"text": done}]}]
+        logger.info("phone cheap: мгновенно «%s» → %s за %.2f с", said, cmd.tool if cmd else "ответ", time.monotonic() - started)
+        if answer:
+            self.jarvis_lines.append(answer)
+            self.log.append(("Ты", answer))
+            await self.to_phone({"type": "jarvis", "text": answer})
+            await self.speaker.say(answer)
+        await self.to_phone({"type": "turn_complete"})
+        self.turns += 1
+        return True
 
     async def _on_text(self, text: str, *, visible: bool) -> None:
         if visible:
@@ -612,9 +680,11 @@ class PhoneCheap:
         await self.to_phone({"type": "turn_complete"})
 
     async def _go_live(self, args: dict[str, Any], stt: asyncio.Task | None, said: str) -> dict[str, Any]:
+        if args.get("fast"):
+            billing.force_live(True)  # сам сказал «включи лайв/быстрый режим» — живой голос до полуночи, и после лимита
         if not billing.live_allowed("phone"):
             return {"error": "живой режим (камера, экран, долгий разговор) до полуночи выключен — дневной лимит расходов. "
-                             "Скажи ему это одной фразой и предложи, что можно сделать без него."}
+                             "Скажи ему это одной фразой: включить можно, сказав «включи лайв режим»."}
         if stt is not None:
             try:
                 said = await asyncio.wait_for(asyncio.shield(stt), timeout=STT_WAIT_S)

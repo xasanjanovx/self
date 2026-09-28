@@ -177,16 +177,15 @@ def test_voice_model_choice_is_saved_in_data_dir(tmp_path, monkeypatch):
     assert services.persona_overrides(5, Persona()).voice_model == "gemini"
 
 
-def test_settings_keyboard_offers_both_models():
+def test_settings_keyboard_is_short():
+    """28.09 его выбор: в настройках JES — только режим, голос и язык (ты/вы, обращение, тон, длина, Qwen — убраны)."""
     from bot.keyboards import jarvis_settings_keyboard
 
-    kb = jarvis_settings_keyboard("ru", voice="Sulafat", call_lang="ru", address="siz", tone="friendly", verbosity="short",
-                                  voice_model="qwen", qwen_voice="Tina")
-    data = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert "jarvis:vmodel:gemini" in data and "jarvis:vmodel:qwen" in data
-    assert {"jarvis:qvoice:Tina", "jarvis:qvoice:Katerina"} <= set(data)
-    plain = jarvis_settings_keyboard("ru", voice="Sulafat", call_lang="ru", address="siz", tone="friendly", verbosity="short")
-    assert not any(str(b.callback_data).startswith("jarvis:qvoice") for row in plain.inline_keyboard for b in row)
+    kb = jarvis_settings_keyboard("ru", voice="Sulafat", call_lang="ru", voice_mode="live")
+    data = {str(b.callback_data) for row in kb.inline_keyboard for b in row}
+    assert {"jarvis:mode:live", "jarvis:mode:economy", "jarvis:voice:Sulafat", "jarvis:lang:ru", "jarvis:sample"} <= data
+    assert not any(d.split(":")[1] in {"address", "honorific", "tone", "verbosity", "vmodel", "qvoice", "vmode", "cmode"}
+                   for d in data if d.startswith("jarvis:"))
 
 
 def test_key_is_kept_in_data_dir(tmp_path, monkeypatch):

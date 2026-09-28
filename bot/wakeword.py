@@ -87,17 +87,25 @@ async def recognizer() -> Any | None:
 
 def match(text: str) -> tuple[bool, str]:
     """(есть ли «JES», что сказано после имени)."""
+    found, after, _ = match_at(text)
+    return found, after
+
+
+def match_at(text: str) -> tuple[bool, str, int]:
+    """(есть ли «JES», что после имени, каким словом по счёту оно стоит; -1 — нет)."""
     words = re.findall(r"[a-zа-яё]+", text.lower().replace("ё", "е"))
     for i, word in enumerate(words):
         if i > NAME_MAX_POS:
             break  # имя — в начале фразы («Джес, позвони…»), а не посреди разговора («…вот такой жест…»)
-        if _JES.match(word):
-            return True, " ".join(words[i + 1:])
+        # «жес/жест/жаз» — обычные слова: именем считаем только первым словом (28.09: «…мышки жёст за…» из видео
+        # прошло как «Джес» и заказало такси); дальше в фразе — только «дж…»
+        if _JES.match(word) and (i == 0 or not word.startswith("ж")):
+            return True, " ".join(words[i + 1:]), i
         # «эй джес» склеилось в одно слово
         for hey in ("эй", "хей", "hey"):
             if word.startswith(hey) and _JES.match(word[len(hey):]):
-                return True, " ".join(words[i + 1:])
-    return False, ""
+                return True, " ".join(words[i + 1:]), i
+    return False, "", -1
 
 
 def _transcribe_sync(rec: Any, x) -> str:  # noqa: ANN001
@@ -120,8 +128,8 @@ async def check(wav: bytes) -> dict[str, Any] | None:
     except Exception:
         logger.warning("wakeword: не распознал", exc_info=True)
         return None
-    found, after = match(text)
-    return {"text": text, "name": found, "after": after, "ms": round((time.monotonic() - started) * 1000)}
+    found, after, pos = match_at(text)
+    return {"text": text, "name": found, "after": after, "pos": pos, "ms": round((time.monotonic() - started) * 1000)}
 
 
 async def warm() -> None:
@@ -248,4 +256,4 @@ def note_accept(uid: int | None, after: str) -> None:
         _learn(uid, first)
 
 
-__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants", "words", "strong_voice", "name_like"]
+__all__ = ["check", "match", "match_at", "warm", "lenient", "note_reject", "note_accept", "variants", "words", "strong_voice", "name_like"]

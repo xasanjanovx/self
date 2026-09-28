@@ -515,42 +515,21 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     uz = profile.lang == "uz"
     p = await services.persona(profile.telegram_id)
     voice_ru, voice_uz = persona_mod.VOICES.get(p.voice, ("", ""))
-    tone = {"friendly": ("Дружелюбный", "Do'stona"), "calm": ("Спокойный", "Xotirjam"), "strict": ("Строгий", "Qat'iy")}[p.tone]
-    length = {"short": ("коротко", "qisqa"), "normal": ("обычно", "o'rtacha"), "detailed": ("подробно", "batafsil")}[p.verbosity]
+    fast = p.voice_mode == "live"
     lines = [
         f"🔊 {'Ovoz' if uz else 'Голос'}: <b>{voice_uz if uz else voice_ru}</b>",
-        f"🗣 {'JES tili' if uz else 'Язык JES'}: <b>{i18n.LANG_NAMES[p.lang]}</b> "
-        f"<i>({'chat, qo`ng`iroq, ovoz — qaysi tilda gapirsangiz ham' if uz else 'чат, звонки, голос — на каком бы языке ты ни говорил'})</i>",
-        f"🤝 {'Murojaat' if uz else 'Обращение'}: <b>{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')}</b>"
-        f" · <b>{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}</b>",
-        f"🎭 {'Ohang' if uz else 'Тон'}: <b>{tone[1] if uz else tone[0]}</b> · {'javoblar' if uz else 'ответы'}: <b>{length[1] if uz else length[0]}</b>",
-        f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}",
-        f"🧠 {'Jonli ovoz modeli' if uz else 'Модель живого голоса'}: <b>"
-        + ("Qwen3.8 Omni (Alibaba)" + f" · {p.qwen_voice}" if p.voice_model == "qwen" else "Gemini 3.8 Live") + "</b>",
-        f"💸 {'Telefonda' if uz else 'На телефоне'}: <b>"
-        + (profile.tr("экономно — без Live, медленнее; камера и беседа — вживую",
-                      "tejamkor — Live'siz, sekinroq; kamera va suhbat — jonli")
-           if p.voice_mode == "economy" else profile.tr("живой голос, облегчённый (после дневного лимита — экономно)",
-                                                        "jonli ovoz, yengil (kunlik limitdan keyin — tejamkor)")) + "</b>",
-        f"📞 {'Qo`ng`iroqda' if uz else 'В звонке Telegram'}: <b>"
-        + (profile.tr("бесплатный голос — ответ через 1.5–3 с", "tekin ovoz — javob 1.5–3 soniyada")
-           if p.call_mode == "economy" else profile.tr("живой голос, облегчённый", "jonli ovoz, yengil")) + "</b>"
-        + profile.tr(" · будильник — всегда бесплатно", " · budilnik — doim tekin"),
+        f"🗣 {'Til' if uz else 'Язык'}: <b>{i18n.LANG_NAMES[p.lang]}</b>",
+        f"{'⚡' if fast else '💸'} {'Rejim' if uz else 'Режим'}: <b>"
+        + (profile.tr("быстрый — живой голос; после дневного лимита экономно (скажите «включи лайв режим» — снова быстро)",
+                      "tezkor — jonli ovoz; kunlik limitdan keyin tejamkor")
+           if fast else profile.tr("экономный — дешевле, отвечает на 1–2 с дольше", "tejamkor — arzonroq, 1–2 soniya sekinroq")) + "</b>",
+        f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}"
+        + profile.tr(" · будильник — бесплатным голосом", " · budilnik — tekin ovoz"),
     ]
-    from .. import qwen_live
-
-    if p.voice_model == "qwen" and not qwen_live.available():
-        lines.append(profile.tr("⚠️ Ключа Alibaba нет — пришлите боту <code>/qwen ВАШ_КЛЮЧ</code>. Пока говорю через Gemini.",
-                                "⚠️ Alibaba kaliti yo'q — botga <code>/qwen KALIT</code> yuboring. Hozircha Gemini orqali."))
-    elif p.voice_model == "qwen":
-        lines.append(profile.tr("<i>Телефон и звонки «позвони мне» — Qwen, подъём на фаджр — Gemini (точные арабские дуа).</i>",
-                                "<i>Telefon va «qo'ng'iroq qil» — Qwen, bomdodga uyg'otish — Gemini.</i>"))
     text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
     if notice:
         text += f"\n\n{notice}"
-    kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
-                                  verbosity=p.verbosity, honorific=p.honorific, voice_model=p.voice_model, qwen_voice=p.qwen_voice,
-                                  voice_mode=p.voice_mode, call_mode=p.call_mode)
+    kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, voice_mode=p.voice_mode)
     await _show(target, text, kb)
 
 
@@ -574,8 +553,10 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_edit(callback, profile.tr("⏰ Во сколько будить? Например <code>6:30</code>", "⏰ Soat nechada uyg'otay? Masalan <code>6:30</code>"),
                         InlineKeyboardMarkup(inline_keyboard=[[_btn(profile.tr("Отмена", "Bekor"), "settings:wake")]]))
         return
-    if action in {"vmode", "cmode"} and value in {"economy", "live"}:  # экономный режим телефона/звонков — в файле, не в таблице
-        services.save_persona_extra(profile.telegram_id, {"voice_mode" if action == "vmode" else "call_mode": value})
+    if action in {"mode", "vmode", "cmode"} and value in {"economy", "live"}:  # режим — в файле, не в таблице
+        # 28.09: один переключатель — сразу телефон и звонки (старые кнопки vmode/cmode — из прошлых сообщений)
+        fields = {"voice_mode": value, "call_mode": value} if action == "mode" else {"voice_mode" if action == "vmode" else "call_mode": value}
+        services.save_persona_extra(profile.telegram_id, fields)
         await answer_now(callback, "✅")
         await render_jarvis(callback, profile)
         return
@@ -716,8 +697,7 @@ async def render_jarvis_hub(target: Message | CallbackQuery, profile: Profile, *
     facts = extra.parse_facts((mem or {}).get("facts") or "")
     char_lines = [
         f"🔊 {voice_uz if uz else voice_ru} · {i18n.LANG_NAMES[p.lang]} · "
-        f"{('siz' if p.address == 'siz' else 'sen') if uz else ('на «вы»' if p.address == 'siz' else 'на «ты»')} · "
-        f"{persona_mod.HONORIFICS[p.honorific][1] if uz else persona_mod.HONORIFICS[p.honorific][0]}",
+        + (("⚡ tezkor" if uz else "⚡ быстрый") if p.voice_mode == "live" else ("💸 tejamkor" if uz else "💸 экономный")),
         f"📞 {'Muhim bo`lsa qo`ng`iroq' if uz else 'Звонок о важном'}: <b>{on if p.alert_calls else off}</b> · "
         f"🎙 {'Ertalab ovozli' if uz else 'Утро голосом'}: <b>{on if p.morning_voice else off}</b>",
     ]

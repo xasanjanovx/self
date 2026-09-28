@@ -12,7 +12,7 @@ def _profile(lang: str = "ru") -> Profile:
 def test_persona_from_row_sanitizes_values():
     p = persona.Persona.from_row({"voice": "NoSuchVoice", "lang": "ru", "address": "siz", "tone": "weird", "verbosity": "detailed", "call_name": "  Hasanjon "})
     assert p.voice == persona.DEFAULT_VOICE and p.lang == "ru" and p.address == "siz"
-    assert p.tone == "friendly" and p.verbosity == "detailed"
+    assert p.tone == "friendly" and p.verbosity == "short"  # 28.09: тон и длина — по умолчанию, настроек больше нет
     assert p.name_for("Хасан") == "Hasanjon"
     assert persona.Persona.from_row(None).name_for("Хасан") == "Хасан"
 

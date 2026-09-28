@@ -79,10 +79,33 @@ def test_hard_daily_limit_turns_live_off_except_wake(fresh_billing, monkeypatch)
     assert "выключен" in billing.status()["live_voice_today"]
 
 
-def test_telegram_call_refused_after_limit(monkeypatch):
+def test_telegram_call_after_limit_uses_free_voice(monkeypatch):
+    """28.09: после лимита бот молча не звонил (он трижды просил «позвони мне») — теперь звонит бесплатным голосом."""
+    from bot import caller, cheap_voice
+
     monkeypatch.setattr(billing, "over_limit", lambda: True)
+    monkeypatch.setattr(billing, "live_forced", lambda: False)
+    seen = {}
+
+    async def dial(uid, **kw):  # noqa: ANN001, ANN003
+        return {"answered": False, "error": None}
+
+    async def run_call(profile, persona, task, **kw):  # noqa: ANN001, ANN003
+        seen["cheap"] = True
+        await task
+        return live_call.LiveResult(dialed=True)
+
+    async def parts(profile, mode):  # noqa: ANN001
+        return Persona(lang="ru"), "", ""
+
+    monkeypatch.setattr(caller, "open_stream_call", dial)
+    monkeypatch.setattr(cheap_voice, "run_call", run_call)
+    monkeypatch.setattr(live_call, "_prompt_parts", parts)
     res = asyncio.run(live_call.run(_profile(), mode="assistant"))
-    assert res.error == "daily_limit" and not res.answered
+    assert seen.get("cheap") and res.dialed
+    # «включи лайв режим» — живой голос и после лимита
+    monkeypatch.setattr(billing, "live_forced", lambda: True)
+    assert billing.live_allowed("assistant")
 
 
 # ------------------------------------------------------------------ Live: сжатие памяти, «размышления», промпт звонка
