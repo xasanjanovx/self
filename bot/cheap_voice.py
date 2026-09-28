@@ -32,8 +32,9 @@ MAX_STEPS = 4                  # инструмент → ответ → инс�
 MAX_SECONDS = 420              # звонок — 7 минут максимум
 WAKE_MAX_SECONDS = 240         # будильник — 4 минуты
 SILENCE_NUDGE_S = 8.0          # будильник: столько тишины в начале — зовём снова (уже разговаривали — втрое дольше)
-BARGE_IN_S = 0.6               # столько его речи поверх ответа — перебил: замолкаем (эхо из трубки короче и тише)
-STT_WAIT_S = 4.0
+BARGE_IN_S = 0.8               # столько его речи поверх ответа — перебил: замолкаем (эхо из трубки короче и тише)
+ECHO_WINDOW_S = 1.2            # фраза началась во время ответа JES или сразу после — сначала проверяем, не эхо ли это
+STT_WAIT_S = 2.5            # расшифровка обычно готова вместе с ответом; дольше не держим ответ
 HISTORY_MESSAGES = 16
 HISTORY_CHARS = 10000
 SAY_CHUNK = 9600               # голос Microsoft — кусками по 0.2 с
@@ -74,7 +75,8 @@ class CheapSession(_Session):
         super().__init__(profile, persona, mode=mode, system=system)
         self.decls = decls
         self.contents: list[dict[str, Any]] = []
-        self.queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.queue: asyncio.Queue[tuple[bytes, bool]] = asyncio.Queue()   # (фраза, началась поверх ответа JES)
+        self._voice_at = -1e9          # когда JES последний раз звучал (для проверки эха)
         self.last_said = ""
         self.speaking = False
         # end_call/snooze: положить трубку, когда договорит прощание. Не hangup_after_speech: playout Live кладёт трубку через
@@ -89,13 +91,19 @@ class CheapSession(_Session):
         from .phone_cheap import Segmenter
 
         seg = Segmenter(RATE)
+        loop = asyncio.get_running_loop()
         overlap_s = 0.0
+        overlapped = False
         while not self.stop.is_set():
             try:
                 chunk = await asyncio.wait_for(incoming.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
+            if self.out or self.speaking:
+                self._voice_at = loop.time()
             started, phrase, _noise = seg.feed(chunk)
+            if started:
+                overlapped = loop.time() - self._voice_at < ECHO_WINDOW_S
             if seg.active and (self.out or self.speaking):
                 overlap_s += len(chunk) / 2 / RATE
                 if overlap_s >= BARGE_IN_S:
@@ -107,7 +115,7 @@ class CheapSession(_Session):
             if phrase:
                 self.last_activity = asyncio.get_running_loop().time()
                 self.heard_user = True
-                self.queue.put_nowait(phrase)
+                self.queue.put_nowait((phrase, overlapped))
 
     def interrupt(self) -> None:
         if self.out or self.speaking:
@@ -134,29 +142,37 @@ class CheapSession(_Session):
             self._say_task = None
 
     async def _speak(self, text: str) -> None:
-        from . import phone
+        """Голос JES через бесплатный ключ Google; его дневная квота кончилась (28.09 — к вечеру) — бесплатный голос
+        Microsoft; и он не смог — Google платно. Арабские дуа будильника — только Google (Microsoft их не прочтёт)."""
+        from . import ai as ai_mod
+        from . import free_voice, phone
 
         spoken = phone.speakable(text)
+        arabic = bool(re.search(r"[؀-ۿ]", spoken))
+        order = ["google", "microsoft"] if (ai_mod.free_tts_ready() or arabic or not free_voice.available()) else ["microsoft", "google"]
         self.speaking = True
         try:
-            got = False
-            stream = ai.speak_stream(spoken, voice=self.persona.voice)
-            try:
-                async for pcm in stream:
-                    got = True
-                    self.out.extend(pcm)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("cheap voice: озвучка не удалась: %s", str(exc)[:160])
-            finally:
-                await stream.aclose()
-            if not got:
-                from . import free_voice
-
-                pcm = await free_voice.synthesize(spoken)
-                if pcm:
-                    self.out.extend(pcm)
+            for how in order:
+                if how == "microsoft":
+                    pcm = await free_voice.synthesize(spoken)
+                    if pcm:
+                        self.out.extend(pcm)
+                        return
+                    continue
+                got = False
+                stream = ai.speak_stream(spoken, voice=self.persona.voice)
+                try:
+                    async for pcm in stream:
+                        got = True
+                        self.out.extend(pcm)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("cheap voice: озвучка не удалась: %s", str(exc)[:160])
+                finally:
+                    await stream.aclose()
+                if got:
+                    return
         finally:
             self.speaking = False
 
@@ -170,9 +186,9 @@ class CheapSession(_Session):
     # --- ход разговора
     async def worker(self) -> None:
         while not self.stop.is_set():
-            pcm = await self.queue.get()
+            pcm, overlapped = await self.queue.get()
             try:
-                await self.on_phrase(pcm)
+                await self.on_phrase(pcm, overlapped=overlapped)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -183,12 +199,25 @@ class CheapSession(_Session):
                 await asyncio.sleep(0.5)  # последние кадры прощания — до телефона
                 self.stop.set()
 
-    async def on_phrase(self, pcm: bytes) -> None:
+    async def on_phrase(self, pcm: bytes, *, overlapped: bool = False) -> None:
+        from . import ai as ai_mod
         from .phone_live import pcm_to_wav
 
-        from . import ai as ai_mod
-
         wav = pcm_to_wav(pcm, RATE)
+        if overlapped:
+            # началась поверх ответа JES (или сразу после): может быть эхо из трубки — сначала расшифровка, и эхо до модели
+            # не доходит (иначе «Записала сорок тысяч» эхом записалось бы второй раз)
+            free = ai_mod.use_free("")
+            try:
+                heard = await self._transcribe(wav)
+            finally:
+                ai_mod.reset_free(free)
+            if not heard or is_echo(heard, self.last_said):
+                logger.info("cheap voice: эхо/шум поверх ответа — пропускаю «%s»", heard[:60])
+                return
+            self.result.transcript.append("он: " + heard)
+            await self.turn([{"text": f"{_stamp(self.profile)} {heard}"}], stt=None)
+            return
         free = ai_mod.use_free("")  # расшифровка — тоже через бесплатный ключ (задача берёт это с собой)
         try:
             stt = asyncio.create_task(self._transcribe(wav), name="cheap-stt")

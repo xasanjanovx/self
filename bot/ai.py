@@ -64,6 +64,11 @@ def free_status() -> dict[str, Any]:
             "smart_blocked": left(_free_smart_blocked_until)}
 
 
+def free_tts_ready() -> bool:
+    """Бесплатная озвучка Google сейчас доступна (ключ есть и дневная квота не кончилась)."""
+    return bool(free_key()) and _time.monotonic() > _free_tts_paused_until
+
+
 def reload_free_key() -> None:
     """Прислали новый ключ — перечитать и снять паузу бесплатного уровня."""
     global _saved_free_key, _free_paused_until

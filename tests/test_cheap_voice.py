@@ -47,6 +47,7 @@ def test_turn_speaks_runs_tools_and_hangs_up_after_goodbye(monkeypatch):
     monkeypatch.setattr(ai, "agent_step", agent_step)
     monkeypatch.setattr(ai, "speak_stream", speak)
     monkeypatch.setattr(ai, "transcribe_audio", transcribe)
+    monkeypatch.setattr(ai_mod, "free_tts_ready", lambda: True)  # квота бесплатной озвучки есть — голос Google
 
     async def run():
         sess = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="wake", system="x",
@@ -93,3 +94,60 @@ def test_light_live_call_prompt_is_small():
 
     tools = json.dumps(live_call.tool_declarations("assistant"), ensure_ascii=False)
     assert len(tools) < 3500
+
+
+def test_voice_falls_back_to_free_microsoft_when_google_quota_is_out(monkeypatch):
+    from bot import ai as ai_mod
+    from bot import free_voice
+    from bot.context import ai
+
+    used = []
+
+    async def speak(text, voice="Kore"):  # noqa: ANN001
+        used.append("google")
+        yield b"\x01\x00" * 10
+
+    async def ms(text, lang=None):  # noqa: ANN001
+        used.append("microsoft")
+        return b"\x02\x00" * 10
+
+    monkeypatch.setattr(ai, "speak_stream", speak)
+    monkeypatch.setattr(free_voice, "synthesize", ms)
+    monkeypatch.setattr(free_voice, "available", lambda: True)
+    monkeypatch.setattr(ai_mod, "free_tts_ready", lambda: False)
+    sess = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="assistant", system="x", decls=[])
+    asyncio.run(sess._speak("Готово, шеф."))
+    assert used == ["microsoft"]
+    used.clear()
+    asyncio.run(sess._speak("Дуа: اللهم"))  # арабский — только Google
+    assert used == ["google"]
+
+
+def test_echo_over_own_answer_never_reaches_the_model(monkeypatch):
+    """Фраза началась поверх ответа JES: «Записала сорок тысяч» эхом из трубки не должно записаться второй раз."""
+    from bot.context import ai
+
+    calls = []
+
+    async def agent_step(contents, **kw):  # noqa: ANN001, ANN003
+        calls.append(contents[-1])
+        return AgentStep(parts=[{"text": "Хорошо."}], text="Хорошо.", calls=[], finish="STOP")
+
+    async def transcribe(data, mime, prompt=None):  # noqa: ANN001
+        return "записала сорок тысяч на обед"
+
+    async def speak(text, voice="Kore"):  # noqa: ANN001
+        yield bytes(20)
+
+    monkeypatch.setattr(ai, "agent_step", agent_step)
+    monkeypatch.setattr(ai, "transcribe_audio", transcribe)
+    monkeypatch.setattr(ai, "speak_stream", speak)
+
+    async def run():
+        sess = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="assistant", system="x", decls=[])
+        sess.last_said = "Записала сорок тысяч на обед."
+        await sess.on_phrase(bytes(4800), overlapped=True)
+        return sess
+
+    sess = asyncio.run(run())
+    assert calls == [] and not sess.out
