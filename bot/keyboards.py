@@ -376,7 +376,7 @@ def place_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: str, tone: str, verbosity: str,
                              honorific: str = "mix", voice_model: str = "gemini", qwen_voice: str = "Tina",
-                             voice_mode: str = "live") -> InlineKeyboardMarkup:
+                             voice_mode: str = "live", call_mode: str = "live") -> InlineKeyboardMarkup:
     """«Голос и характер» JES: режим телефона, модель живого голоса, голос, язык, ты/вы, как величать, тон, длина ответов."""
     from .persona import HONORIFICS, VOICES
     from .qwen_live import VOICES as QWEN_VOICES
@@ -390,6 +390,9 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, address: 
     # телефон: облегчённый Live (быстро, понимает речь) или экономно (без Live, медленнее)
     rows.append([pick("⚡ " + ("Jonli (yengil)" if uz else "Живой (облегчённый)"), "jarvis:vmode:live", voice_mode == "live"),
                  pick("💸 " + ("Tejamkor" if uz else "Экономно"), "jarvis:vmode:economy", voice_mode == "economy")])
+    # звонки Telegram (28.09): облегчённый Live или бесплатный голос (ответ через 1.5–3 с)
+    rows.append([pick("📞 " + ("Qo'ng'iroq: jonli" if uz else "Звонок: живой"), "jarvis:cmode:live", call_mode == "live"),
+                 pick("📞 " + ("Qo'ng'iroq: tekin" if uz else "Звонок: бесплатно"), "jarvis:cmode:economy", call_mode == "economy")])
     # модель живого голоса — чтобы сравнить: Gemini (как было) или Qwen (Alibaba, в 3–6 раз дешевле)
     rows.append([pick("🧠 Gemini", "jarvis:vmodel:gemini", voice_model == "gemini"),
                  pick("🧠 Qwen · " + ("arzon" if uz else "дешевле"), "jarvis:vmodel:qwen", voice_model == "qwen")])

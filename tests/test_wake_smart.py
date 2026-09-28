@@ -21,8 +21,10 @@ def test_lenient_name_when_voice_is_his(tmp_path, monkeypatch):
     assert ok("джой включи фонарик")[:2] == (True, "включи фонарик")
     assert ok("джесси открой камера")[:2] == (True, "открой камера")
     assert ok("дж позвони мам")[:2] == (True, "позвони мам")
-    assert ok("позвони маме")[:2] == (True, "позвони маме")            # имя обрезалось — сразу команда
-    assert ok("сейчас позвони маме")[:2] == (True, "позвони маме")
+    # имя обрезалось — сразу команда, но только если и телефон уверен, что слышал «Джес» (28.09: видео)
+    assert ok("позвони маме", confident=True)[:2] == (True, "позвони маме")
+    assert ok("сейчас позвони маме", confident=True)[:2] == (True, "позвони маме")
+    assert not ok("позвони маме")[0]
     assert not ok("с")[0] and not ok("эс")[0]                          # 28.09: одиночное «с» — звуки из видео, не имя
     assert not ok("прогноз")[0] and not ok("вот так")[0]
     assert not ok("какая погода")[0] and ok("какая погода", confident=True)[0]
@@ -339,3 +341,29 @@ def test_strong_voice_is_strict_on_single_short_words():
     assert wakeword.strong_voice("позвони маме", {"score": 0.39, "bank": 0.985, "z": 1.87})
     assert wakeword.strong_voice("дж позвони мам", {"score": 0.822, "bank": 0.778, "z": 2.69})
     assert not wakeword.strong_voice("сейчас позвони", {"score": 0.459, "bank": 0.707, "z": 1.08})
+
+
+def test_learned_variant_must_sound_like_the_name(tmp_path, monkeypatch):
+    """28.09: выучилось «не» — и JES просыпался на фразы из видео («а не дома на шапку…»)."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "wake_variants.json").write_text(json.dumps({"3": ["не", "бжес"]}), encoding="utf-8")
+    assert wakeword.variants(3) == {"бжес"}                        # старое «не» отброшено
+    assert not wakeword.lenient("а не дома на шапку", strong=True, confident=False, uid=3)[0]
+    assert not wakeword.lenient("не на разрешение", strong=True, confident=True, uid=3)[0]
+    assert wakeword.lenient("бжес позвони маме", strong=True, confident=False, uid=3)[:2] == (True, "позвони маме")
+    assert not wakeword.lenient("вот бжес позвони", strong=True, confident=False, uid=3)[0]  # выученное — только первым
+    for word in ("не", "дома", "там", "шапку"):
+        assert not wakeword.name_like(word), word
+    for word in ("джесси", "жес", "бжес", "чес", "дес"):
+        assert wakeword.name_like(word), word
+    wakeword.note_reject(4, "не включи фонарик", strong=True)
+    wakeword.note_accept(4, "включи фонарик")
+    assert wakeword.variants(4) == set()
+
+
+def test_media_playing_only_clear_name(tmp_path, monkeypatch):
+    """На телефоне играет видео — никаких поблажек: только чётко расслышанное «Джес» (строгое совпадение — до lenient)."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert not wakeword.lenient("дж позвони мам", strong=True, confident=True, uid=5, media=True)[0]
+    assert not wakeword.lenient("позвони маме", strong=True, confident=True, uid=5, media=True)[0]
+    assert wakeword.match("джес позвони маме") == (True, "позвони маме")

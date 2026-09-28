@@ -379,7 +379,11 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
         # раньше висело в общем событии, и новый, уже принятый звонок бот сразу же клал сам
         _ended[uid] = asyncio.Event()
         stats = call_net.begin(uid)
-        logger.info("call %s: набираю (поток, попытка %s, гудки до %s с)", uid, attempt, ring_seconds)
+        from .phone_api import phone_net
+
+        # сеть телефона владельца (из приложения JES) — 28.09 звонки рвались «на Wi-Fi»: видно, на какой сети сорвалось
+        logger.info("call %s: набираю (поток, попытка %s, гудки до %s с, телефон: %s)", uid, attempt, ring_seconds,
+                    phone_net() or "сеть неизвестна")
         try:
             await _calls.play(uid, MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioQuality.LOW), config=CallConfig(timeout=ring_seconds))
             last_exc = None

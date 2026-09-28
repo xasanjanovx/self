@@ -532,6 +532,10 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
                       "tejamkor — Live'siz, sekinroq; kamera va suhbat — jonli")
            if p.voice_mode == "economy" else profile.tr("живой голос, облегчённый (после дневного лимита — экономно)",
                                                         "jonli ovoz, yengil (kunlik limitdan keyin — tejamkor)")) + "</b>",
+        f"📞 {'Qo`ng`iroqda' if uz else 'В звонке Telegram'}: <b>"
+        + (profile.tr("бесплатный голос — ответ через 1.5–3 с", "tekin ovoz — javob 1.5–3 soniyada")
+           if p.call_mode == "economy" else profile.tr("живой голос, облегчённый", "jonli ovoz, yengil")) + "</b>"
+        + profile.tr(" · будильник — всегда бесплатно", " · budilnik — doim tekin"),
     ]
     from .. import qwen_live
 
@@ -546,7 +550,7 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
         text += f"\n\n{notice}"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, address=p.address, tone=p.tone,
                                   verbosity=p.verbosity, honorific=p.honorific, voice_model=p.voice_model, qwen_voice=p.qwen_voice,
-                                  voice_mode=p.voice_mode)
+                                  voice_mode=p.voice_mode, call_mode=p.call_mode)
     await _show(target, text, kb)
 
 
@@ -570,8 +574,8 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await safe_edit(callback, profile.tr("⏰ Во сколько будить? Например <code>6:30</code>", "⏰ Soat nechada uyg'otay? Masalan <code>6:30</code>"),
                         InlineKeyboardMarkup(inline_keyboard=[[_btn(profile.tr("Отмена", "Bekor"), "settings:wake")]]))
         return
-    if action == "vmode" and value in {"economy", "live"}:  # экономный режим телефона — в файле, не в таблице
-        services.save_persona_extra(profile.telegram_id, {"voice_mode": value})
+    if action in {"vmode", "cmode"} and value in {"economy", "live"}:  # экономный режим телефона/звонков — в файле, не в таблице
+        services.save_persona_extra(profile.telegram_id, {"voice_mode" if action == "vmode" else "call_mode": value})
         await answer_now(callback, "✅")
         await render_jarvis(callback, profile)
         return

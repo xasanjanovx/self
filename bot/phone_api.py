@@ -84,10 +84,25 @@ async def _auth(request: web.Request, handler):
         await asyncio.sleep(0.5)
         return web.json_response({"error": "unauthorized"}, status=401)
     _note_version(request.headers.get("X-JES-Version", ""))
+    _note_net(request.headers.get("X-JES-Net", ""))
     return await handler(request)
 
 
 _app_version = ""
+_net: tuple[str, float] = ("", 0.0)
+
+
+def _note_net(kind: str) -> None:
+    """28.09: звонки Telegram рвались «на Wi-Fi» — по какой сети телефон (приложение 2.11+), для журнала звонка."""
+    global _net
+    if kind in {"wifi", "cell", "other", "none"}:
+        _net = (kind, time.time())
+
+
+def phone_net(max_age_s: float = 900) -> str:
+    """wifi | cell | other | "" (не знаем: приложение молчало дольше 15 минут)."""
+    kind, at = _net
+    return kind if kind and time.time() - at <= max_age_s else ""
 
 
 def _note_version(version: str) -> None:
@@ -222,7 +237,9 @@ async def wake_check(request: web.Request) -> web.Response:
         # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
         strong = wakeword.strong_voice(heard["text"], voice)
         if not ok:
-            ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid)
+            # media — на телефоне играет видео/музыка (приложение 2.11+): только чёткое имя, без поблажек
+            ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid,
+                                                      media=bool(data.get("media")))
             if ok:
                 after = lenient_after
             else:
@@ -618,10 +635,13 @@ async def start() -> bool:
     if _runner is not None:
         return True
     port = int(os.getenv("JARVIS_PORT") or 8097)
+    # 28.09: контейнер — в сети хоста (голос звонков Telegram напрямую по UDP), поэтому слушаем только 127.0.0.1 (JARVIS_HOST):
+    # снаружи — через nginx, как и раньше
+    host = os.getenv("JARVIS_HOST") or "0.0.0.0"
     _runner = web.AppRunner(build_app(), access_log=None)
     await _runner.setup()
-    await web.TCPSite(_runner, "0.0.0.0", port).start()
-    logger.info("phone api listening on :%s (owner %s)", port, owner_id())
+    await web.TCPSite(_runner, host, port).start()
+    logger.info("phone api listening on %s:%s (owner %s)", host, port, owner_id())
     global _warm
     if owner_id() is not None:
         _warm = asyncio.create_task(phone.keep_warm(owner_id()), name="jarvis-warm")

@@ -51,8 +51,8 @@ def test_prompts_require_expect_photo_and_honesty():
     chat = system_prompt(_profile(), "")
     assert "expect_photo" in chat and "ФОТО" in chat and "ЧЕСТНОСТЬ" in chat
     call = live_call.system_instruction(_profile(), persona.Persona(), mode="assistant")
-    assert "expect_photo" in call
-    assert "expect_photo" in {d["name"] for d in live_call.tool_declarations("assistant")}
+    assert "Не обещай того, чего не сделаешь" in call  # облегчённый звонок: фото-договорённости — через bot_task
+    assert "expect_photo" in {d["name"] for d in live_call.tool_declarations("assistant", full=True)}
 
 
 # ------------------------------------------------------------------ звонок о важном

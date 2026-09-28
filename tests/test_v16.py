@@ -243,7 +243,8 @@ def test_formal_address_in_every_language():
 def test_answers_in_the_language_of_the_question():
     p = persona_mod.Persona(lang="ru", mirror=True, address="siz")
     rule = persona_mod.lang_rule(p)
-    assert "на том языке, на котором он сейчас" in rule and "по-узбекски, по-русски и по-английски" in rule
+    # 28.09 «зеркало, но строже»: основной — из настроек, смена только на целую фразу
+    assert "основной — русский" in rule and "ЦЕЛУЮ фразу" in rule and "по-узбекски, по-русски и по-английски" in rule
     assert "Не расслышала, повтори" not in rule and "пойми по смыслу" in rule
     sess = live_call._Session(_profile_stub(), p, mode="phone", system="x")
     speech = sess.setup_payload("m", rich=True)["setup"]["generationConfig"]["speechConfig"]

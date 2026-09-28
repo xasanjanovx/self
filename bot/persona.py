@@ -44,6 +44,7 @@ class Persona:
     voice_model: str = "gemini"  # живой голос: gemini (Gemini 3.8 Live) | qwen (Qwen3.8-Omni, Alibaba — дешевле)
     qwen_voice: str = "Tina"     # голос Qwen (женские, говорят по-русски)
     voice_mode: str = "live"     # телефон: live — облегчённый Gemini Live (по умолчанию) | economy — без Live (bot/phone_cheap.py)
+    call_mode: str = "live"      # звонки Telegram: live — облегчённый Gemini Live | economy — бесплатный голос (bot/cheap_voice.py)
 
     @classmethod
     def from_row(cls, row: dict[str, Any] | None) -> "Persona":
@@ -121,10 +122,15 @@ def lang_rule(p: Persona) -> str:
     """Язык разговора: один, из настроек, или (mirror) — язык, на котором он сейчас спросил."""
     formal = p.address == "siz"
     if p.mirror:
-        return (LANGS_NOTE + "ЯЗЫК ОТВЕТА: отвечай на том языке, на котором он сейчас к тебе обратился: по-узбекски — "
-                "по-узбекски (литературный с живой андижанской интонацией), по-русски — по-русски, по-английски — по-английски. "
-                "Смешал языки — отвечай на том, которого в его фразе больше. Никогда не переходи на другие языки (турецкий, "
-                "казахский, испанский…). " + unclear_rule(p, "«Кому написать?», «Kimga yozay?»" if formal else "«Кому написать?»"))
+        # 28.09 его выбор «зеркало, но строже»: в звонке Telegram JES сам переходил на узбекский — от узбекского имени,
+        # «hop», «rahmat» или криво расслышанного русского. Теперь основной язык — из настроек, смена — только на целую фразу
+        base = {"ru": "русский", "uz": "узбекский", "en": "английский"}.get(p.lang, "русский")
+        return (LANGS_NOTE + f"ЯЗЫК ОТВЕТА: основной — {base}, говори на нём. На другой язык (узбекский — литературный с "
+                "андижанской интонацией, русский, английский) переходи, только если он сказал на нём ЦЕЛУЮ фразу (3+ слова, "
+                "ясно и уверенно). Имя, «hop», «rahmat», «xo'p», одно слово или неразборчивый кусок — НЕ повод менять язык. "
+                f"Сомневаешься — отвечай на основном ({base}). Сказал следующую фразу на основном — сразу возвращайся на него. "
+                "Никогда не переходи на другие языки (турецкий, казахский, испанский…). "
+                + unclear_rule(p, "«Кому написать?», «Kimga yozay?»" if formal else "«Кому написать?»"))
     if p.lang == "en":
         return ("LANGUAGE: speak ONLY English — every phrase, always, until the end of the conversation. "
                 "He speaks only Uzbek, Russian and English (often mixed) — understand all three, but answer in English. "

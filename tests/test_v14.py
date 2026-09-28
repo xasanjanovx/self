@@ -98,7 +98,10 @@ def test_ai_status_tool_reports_money_and_version(fresh_billing):
     out = _run(tools.run("set_ai_balance", {"topup_usd": 10}, ctx))
     assert out["balance_usd"] == 10.0
     out = _run(tools.run("ai_status", {}, ctx))
-    assert out["money"]["balance_usd"] == 10.0 and out["version"]["version"] and "voice_calls" in out["models"]
+    assert out["balance"]["balance_usd"] == 10.0 and out["version"]["version"] and out["models"] and out["services"]
+    assert out["spend"]["period"] and "by_model_usd" in out["spend"] and "free_key" in out
+    week = _run(tools.run("ai_status", {"period": "week"}, ctx))
+    assert "–" in week["spend"]["period"]
     assert "error" in _run(tools.run("set_ai_balance", {}, ctx))
 
 

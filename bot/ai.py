@@ -52,6 +52,18 @@ def free_key() -> str:
     return _saved_free_key
 
 
+def free_status() -> dict[str, Any]:
+    """Бесплатный ключ Google — для отчёта «на чём работаем»: есть ли, не на паузе ли по лимиту."""
+    now = _time.monotonic()  # паузы считаются по monotonic
+
+    def left(until: float) -> str | None:
+        return f"ещё {round((until - now) / 60)} мин" if until > now else None
+
+    return {"configured": bool(free_key()), "smart_model": FREE_SMART_MODEL,
+            "paused": left(_free_paused_until), "tts_paused": left(_free_tts_paused_until),
+            "smart_blocked": left(_free_smart_blocked_until)}
+
+
 def reload_free_key() -> None:
     """Прислали новый ключ — перечитать и снять паузу бесплатного уровня."""
     global _saved_free_key, _free_paused_until
@@ -476,6 +488,9 @@ class AIService:
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
         }
+        from . import billing
+
+        billing.count_search()
         candidate = self._first_candidate(await self._post(self.text_model, payload))
         texts = [str(p.get("text")) for p in (candidate.get("content") or {}).get("parts") or [] if isinstance(p, dict) and p.get("text") and not p.get("thought")]
         return "\n".join(texts).strip()

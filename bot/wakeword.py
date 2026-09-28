@@ -155,14 +155,27 @@ def _variants_file():  # noqa: ANN202
     return data_dir() / "wake_variants.json"
 
 
+def name_like(word: str) -> bool:
+    """Похоже ли слово на «Джес» в ушах распознавателя («джесси», «жес», «чес», «дес», «тез»). 28.09 выучилось «не» —
+    и JES просыпался на любую фразу из видео, где в начале было «не» («а не дома на шапку…»)."""
+    w = str(word or "").lower().replace("ё", "е")
+    if not 3 <= len(w) <= 8 or w in _STOP or w in _VERBS or w in _QUESTIONS:
+        return False
+    # шипящий/«дж» перед гласной — «джесси», «жес», «бжес», «чес», «зэс», «jes»
+    if re.search(r"(дж|ж|ч|ш|з|j|g|z)[еэиeiy]", w):
+        return True
+    # «дес», «тес», «дэз» — глухое начало, но конец как у имени
+    return w[0] in "дт" and w.rstrip("иы")[-1:] in {"с", "з", "ш"} and len(w) <= 5
+
+
 def variants(uid: int | None) -> set[str]:
-    """Выученные написания его «Джес» (как их слышит распознаватель)."""
+    """Выученные написания его «Джес» (как их слышит распознаватель). Непохожие на имя — отбрасываем (и старые тоже)."""
     if uid is None:
         return set()
     try:
         import json
 
-        return set(json.loads(_variants_file().read_text(encoding="utf-8")).get(str(uid)) or [])
+        return {w for w in json.loads(_variants_file().read_text(encoding="utf-8")).get(str(uid)) or [] if name_like(w)}
     except Exception:
         return set()
 
@@ -181,22 +194,27 @@ def _learn(uid: int, word: str) -> None:
         logger.warning("wakeword: не запомнил вариант", exc_info=True)
 
 
-def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None) -> tuple[bool, str, str]:
+def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None, media: bool = False) -> tuple[bool, str, str]:
     """Имя не распознано строго, а голос прошёл проверку (вызывать только тогда): (принять?, что после имени, почему).
-    «дж…»/выученное слово в начале — имя при любом его голосе («дж позвони мам» с похожестью 0.82 отказывали);
-    одна команда без имени или хвост «с» — только если голос точно его (strong) или детектор уверен в слове."""
+    «дж…» в начале — имя при его голосе («дж позвони мам» с похожестью 0.82 отказывали); выученное слово — только
+    первым; команда без имени — только если ещё и детектор телефона уверен, что слышал «Джес».
+    media — на телефоне играет видео/музыка: тогда никаких поблажек, только чётко расслышанное имя (28.09: в видео
+    его же голос или похожий — голос проверку проходит, спасает только само слово)."""
     words = _words(text)
     # 28.09: одиночное «с» («хвост имени») больше НЕ принимаем — за утро 7 раз так проснулся от звуков из видео:
     # на коротком звуке сходство голоса случайно высокое. Всё мягкое — только когда голос точно его (strong)
-    if not words or not strong:
+    if not words or not strong or media:
         return False, "", ""
     learned = variants(uid)
     for i, w in enumerate(words[: NAME_MAX_POS + 1]):
-        if (w.startswith("дж") and len(w) <= 8) or w in learned:
+        if w.startswith("дж") and len(w) <= 8:
             return True, " ".join(words[i + 1:]), f"имя как «{w}»"
-    for i, w in enumerate(words[:2]):
-        if w in _VERBS or (confident and w in _QUESTIONS):
-            return True, " ".join(words[i:]), "имя обрезано — сразу команда"
+    if words[0] in learned:
+        return True, " ".join(words[1:]), f"имя как «{words[0]}»"
+    if confident:
+        for i, w in enumerate(words[:2]):
+            if w in _VERBS or w in _QUESTIONS:
+                return True, " ".join(words[i:]), "имя обрезано — сразу команда"
     return False, "", ""
 
 
@@ -226,8 +244,8 @@ def note_accept(uid: int | None, after: str) -> None:
     if not rej or time.monotonic() - rej[0] > LEARN_WINDOW_S or len(rej[1]) < 2:
         return
     first, tail = rej[1][0], {w for w in rej[1][1:] if len(w) >= 3}
-    if tail & set(_words(after)) and 2 <= len(first) <= 8 and first not in _STOP and first not in _VERBS and first not in _QUESTIONS:
+    if tail & set(_words(after)) and name_like(first):
         _learn(uid, first)
 
 
-__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants", "words", "strong_voice"]
+__all__ = ["check", "match", "warm", "lenient", "note_reject", "note_accept", "variants", "words", "strong_voice", "name_like"]

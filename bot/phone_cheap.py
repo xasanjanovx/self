@@ -113,7 +113,8 @@ class Segmenter:
     """Звук с телефона → фразы: от ~0.3 с до начала речи до паузы VAD_SILENCE_MS. Порог — как у SpeechGate
     (шум подстраивается сам). Тишина, щелчки и кашель никуда не уходят — за них не платим."""
 
-    def __init__(self) -> None:
+    def __init__(self, rate: int = INPUT_RATE) -> None:
+        self.rate = rate  # телефон — 16 кГц; звонок Telegram (bot/cheap_voice.py) — 24 кГц
         self.floor = 300.0
         self.active = False
         self._pre: deque[bytes] = deque()
@@ -128,7 +129,7 @@ class Segmenter:
         x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
         if not len(x):
             return False, None, False
-        dur = len(x) / INPUT_RATE
+        dur = len(x) / self.rate
         rms = float(np.sqrt(np.mean(x * x)))
         loud = rms > max(self.floor * 2.5, 350.0)
         if not loud and rms > 0:
@@ -138,13 +139,13 @@ class Segmenter:
                 self._pre.append(pcm)
                 self._pre_s += dur
                 while self._pre_s > PREROLL_S and self._pre:
-                    self._pre_s -= len(self._pre.popleft()) / 2 / INPUT_RATE
+                    self._pre_s -= len(self._pre.popleft()) / 2 / self.rate
                 return False, None, False
             self.active = True
             self._buf = bytearray(b"".join(self._pre) + pcm)
             self._pre.clear()
             self._pre_s = 0.0
-            self._speech_s, self._quiet_s, self._len_s = dur, 0.0, len(self._buf) / 2 / INPUT_RATE
+            self._speech_s, self._quiet_s, self._len_s = dur, 0.0, len(self._buf) / 2 / self.rate
             return True, None, False
         self._buf.extend(pcm)
         self._len_s += dur
@@ -156,7 +157,7 @@ class Segmenter:
         if self._quiet_s < VAD_SILENCE_MS / 1000 and self._len_s < MAX_UTTERANCE_S:
             return False, None, False
         self.active = False
-        cut = int(max(0.0, self._quiet_s - TAIL_S) * INPUT_RATE) * 2
+        cut = int(max(0.0, self._quiet_s - TAIL_S) * self.rate) * 2
         audio = bytes(self._buf[: len(self._buf) - cut] if cut else self._buf)
         self._buf = bytearray()
         if self._speech_s < MIN_SPEECH_S:

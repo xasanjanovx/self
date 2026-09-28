@@ -328,18 +328,50 @@ async def _weather(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ баланс Gemini и версия
 @tool(
     "ai_status",
-    "Про самого JES: остаток предоплаты Gemini (AI Studio), на сколько дней хватит, расход сегодня/за месяц/в среднем, "
-    "нужно ли пополнять, какая версия бота и приложения, какие модели. «Сколько осталось на балансе?», «когда пополнять?», «какая у тебя версия?».",
+    "ВСЁ про самого JES и наш проект: сколько потрачено на ИИ (сегодня/вчера/неделя/месяц) и НА ЧТО — по назначению "
+    "(звонки, телефон, чат, озвучка…), по моделям (какая версия сколько стоила), самые дорогие разговоры, сколько сделал "
+    "бесплатный ключ и сколько этим сэкономил, клиенты; остаток предоплаты и на сколько дней хватит; какие модели и версии "
+    "на чём работают; все сервисы, на которых мы работаем (Google AI Studio, сервер, база, Telegram, погода, поиск…); "
+    "версия бота и приложения. «Сколько потратили за звонки?», «на что ушли деньги?», «какая модель у голоса?», «какая версия?».",
+    {"period": P("STRING", "today | yesterday | week | month | 30d (по умолчанию today)", enum=["today", "yesterday", "week", "month", "30d"])},
 )
 async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    from . import billing, version
+    from . import billing, caller, phone_api, version
+    from . import ai as ai_mod
     from .context import ai
     from .live_call import MODELS
 
-    out: dict[str, Any] = {"money": billing.status(), "version": version.info(),
-                           "models": {"chat": ai.agent_model, "text": ai.text_model, "voice_calls": MODELS[0], "tts": ai.tts_model}}
-    out["how_counted"] = ("остаток считает сам бот по ценам Google из каждого ответа Gemini; точный — в AI Studio → Billing. "
-                          "Скажет фактический остаток — вызови set_ai_balance, счёт станет точнее")
+    money = billing.status()
+    out: dict[str, Any] = {
+        "spend": billing.period_report(_str(a.get("period")) or "today"),
+        "balance": {k: money.get(k) for k in ("balance_usd", "balance_known_at", "days_left", "daily_average_usd", "need_topup",
+                                                "urgent", "daily_limit_usd", "live_voice_today", "note", "exhausted") if money.get(k) is not None},
+        "version": {**version.info(), "phone_app_installed": phone_api._app_version or "неизвестно", "phone_net": phone_api.phone_net() or "неизвестно"},
+        # на чём что работает — версии моделей и платно ли (цены — за 1 млн токенов, $)
+        "models": {
+            "чат с владельцем (сообщения, задачи из голоса, bot_task)": f"{ai_mod.FREE_SMART_MODEL} через бесплатный ключ; кончился лимит — {ai.agent_model} платно",
+            "чат клиентов": f"{ai.agent_model} (платно, лимит ${billing.CLIENT_DAILY_LIMIT_USD}/день на клиента)",
+            "живой голос: JES на телефоне и звонки Telegram": f"{MODELS[0]} (Gemini Live, платно: текст $0.75, звук вход $3, звук выход $12)",
+            "экономный голос (звонки по выбору, будильник)": f"{ai.agent_model} + озвучка через бесплатный ключ",
+            "озвучка фраз": f"{ai_mod.FAST_TTS_MODEL} (сначала бесплатный ключ)",
+            "распознавание голосовых": ai.transcribe_model,
+            "поиск в интернете": f"{ai.text_model} + Google Search",
+            "«Джес» — проверка слова и голоса": "на нашем сервере, бесплатно (sherpa-onnx, отпечаток голоса CAM++)",
+            "траты из SMS банков": f"{ai_mod.FREE_SMART_MODEL} через бесплатный ключ",
+        },
+        "free_key": ai_mod.free_status(),
+        "services": {
+            "Google AI Studio (Gemini API)": "два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)",
+            "сервер": "Hetzner, 167.235.249.200, Docker: бот JES (codex-self-bot) и бот Ishdasiz (codex-ishdasiz-bot)",
+            "база данных": "Supabase (Postgres): траты, задачи, заметки, напоминания, настройки",
+            "Telegram": "бот @flowuzrobot; аккаунт-помощник для звонков @djes_ai" + ("" if caller.available() else " (сейчас не подключён)"),
+            "приложение JES (Android)": "uz.flow.jes — слушает «Джес», звонки, SMS, календарь",
+            "бесплатные": "погода Open-Meteo, намаз aladhan.com, курс cbu.uz, адреса OpenStreetMap, такси — Yandex Go",
+            "Alibaba Qwen": "запасной живой голос (отдельный счёт), сейчас не основной",
+        },
+        "how_counted": ("расход бот считает сам по ценам Google из каждого ответа; точный остаток — в AI Studio → Billing. "
+                        "Назовёт фактический остаток — вызови set_ai_balance. Поиски Google: у Google бесплатный месячный лимит, сверх — отдельно"),
+    }
     return out
 
 

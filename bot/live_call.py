@@ -181,10 +181,25 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         opening = f"Начни разговор с темы, которую он попросил: «{topic}». Поздоровайся одной фразой и сразу к делу.\n"
     else:
         opening = "Поздоровайся одной короткой живой фразой (по имени, учитывая время суток) и жди.\n"
+    if mode == "assistant":
+        # облегчённый звонок (28.09): короткие правила вместо ~4 тыс. знаков, память — только факты (без прошлых реплик)
+        facts = facts_only(memory)
+        return (base + CALL_RULES.replace("{year}", str(now.year)) + opening
+                + (f"\n{facts}\n" if facts else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
     return (base + rules + opening + "\n" + ABOUT_SELF
             + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
 
 
+# Звонок Telegram (облегчённый, 28.09): те же правила коротко — Live оплачивает их в каждом ответе
+CALL_RULES = (
+    "\nТы полноценный помощник: отвечай на любые вопросы коротко и по-человечески (1–2 фразы), без «не могу». Свежие факты "
+    "(новости, цены, спорт, версии, «последний/новый») — web_search, сейчас {year} год; погода — weather; курс — currency_rates.\n"
+    "ЕГО ДАННЫЕ И ДЕЙСТВИЯ — bot_task, просьбой целиком с числами и датами: трата, еда, задача, напоминание, «сколько потратил», "
+    "исправить/удалить, цели, долги, отчёты, будильник, запомнить о нём; про тебя саму (расходы на ИИ, модели, версии, сервисы) — тоже "
+    "bot_task. Выполняй сразу, без «точно?»; после — одной фразой, что сделано. Не обещай того, чего не сделаешь.\n"
+    "Длинное (список, рецепт, план) — send_to_chat и скажи, что отправила. Прощается («всё», «пока», «rahmat», «xayr», "
+    "«bo'ldi») — коротко попрощайся и end_call.\n"
+)
 # Телефон: Gemini Live заново оплачивает инструкцию и описания инструментов в КАЖДОМ ответе — поэтому здесь коротко
 # (раньше ~40 тысяч знаков вместе с блоком «О себе» и данными бота; данные теперь — через инструменты и bot_task).
 PHONE_RULES = (
@@ -210,7 +225,8 @@ PHONE_RULES = (
 # «открой айгра» JES ответил по-узбекски — отсюда жёсткое «язык последней фразы»
 PHONE_LANG_MIRROR = (
     "ЯЗЫК — язык его ПОСЛЕДНЕЙ фразы: сказал по-русски — отвечай по-русски, даже если до этого звучал узбекский; "
-    "по-узбекски (литературный, андижанская интонация) — только в ответ на узбекскую фразу; английский — на английский. "
+    "по-узбекски (литературный, андижанская интонация) — только в ответ на целую узбекскую фразу (имя, «hop», одно "
+    "узбекское слово — не повод); английский — на английский. "
     "Других языков у него нет: непонятное слово — пойми по смыслу и сделай, переспрашивай одним коротким вопросом, "
     "только если смысл совсем неясен.\n"
 )
@@ -310,6 +326,13 @@ _DELEGATE = {"name": "bot_task",
              "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "просьба целиком, своими словами, со всеми числами, датами и именами"}},
                             "required": ["request"]}}
 _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_me", "test_wake_call"}
+# 28.09 он выбрал «облегчённый Live» для звонков Telegram: 20 инструментов (8 тыс. знаков) и инструкция (8 тыс.) оплачивались
+# в КАЖДОМ ответе — звонок 2 мин 42 с стоил $0.087. В звонке — только частое, всё с его данными — через bot_task
+# (умная модель через бесплатный ключ), как на телефоне с 27.09
+CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat"}
+_CALL_DELEGATE_DESC = ("Помощник из чата со ВСЕМИ инструментами бота: трата, еда, задача, напоминание, «сколько потратил», исправить/удалить, "
+                       "цели, долги, отчёты, будильник, запомнить о нём; и про тебя саму — расходы на ИИ, модели, версии, сервисы. "
+                       "Вернёт готовый ответ — перескажи коротко.")
 
 
 async def delegate(profile: Profile, request: str) -> dict[str, Any]:
@@ -359,9 +382,12 @@ def tool_declarations(mode: str, *, full: bool = False) -> list[dict[str, Any]]:
             if not full:
                 decls = [d for d in decls if d["name"] in PHONE_LIVE_CORE] + [_PHONE_TASK]
                 decls = [{**d, "behavior": "NON_BLOCKING"} if d["name"] in SILENT_TOOLS else d for d in decls]
-        # голос: описания короткие — они оплачиваются в каждом ответе Gemini Live (телефон — ещё короче)
-        tight = mode == "phone" and not full
-        decls = [compact_declaration(d, PHONE_DESC_LIMIT, PHONE_PARAM_LIMIT) if tight else compact_declaration(d) for d in decls]
+        if mode == "assistant" and not full:
+            decls = [({**d, "description": _CALL_DELEGATE_DESC} if d["name"] == "bot_task" else d) for d in decls if d["name"] in CALL_LIVE_CORE]
+        # голос: описания короткие — они оплачиваются в каждом ответе Gemini Live (телефон и звонок — ещё короче)
+        tight = mode in {"phone", "assistant"} and not full
+        decls = [compact_declaration(d, PHONE_DESC_LIMIT if mode == "phone" else 200, PHONE_PARAM_LIMIT) if tight else compact_declaration(d)
+                 for d in decls]
     else:
         decls += [d for d in agent_tools.declarations() if d["name"] in {"prayer_times", "get_wake", "weather"}]
     return decls
@@ -761,12 +787,27 @@ async def wake_clip(profile: Profile, persona: Persona) -> tuple[str, bytes] | N
     """«Доброе утро, шеф! Проснулись?» его голосом JES — записано один раз (Gemini TTS, ~$0.0005) и лежит на диске.
     Будильник (его выбор 26.09 «бесплатно, пока не взяли»): звучит в ту же секунду, как взяли трубку, а Gemini Live
     подключается только после ответа — пропущенный звонок ничего не стоит."""
+    return await voice_clip(persona, wake_clip_text(persona, profile.first_name))
+
+
+_CALL_HELLO = {"ru": "Алло, {t}! Слушаю.", "uz": "Allo, {t}! Eshitaman.", "en": "Hello, {t}! I'm listening."}
+
+
+async def hello_clip(profile: Profile, persona: Persona) -> tuple[str, bytes] | None:
+    """«Алло, шеф! Слушаю.» для звонка «позвони мне» (28.09, облегчённый Live): звучит сразу, как взяли трубку, а Gemini
+    подключается только после ответа — «занято», «отклонил» и пропущенные звонки больше ничего не стоят."""
+    lang = persona.lang if persona.lang in _CALL_HELLO else "ru"
+    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "shef") or profile.first_name or _WAKE_TITLES[lang]["shef"]
+    return await voice_clip(persona, _CALL_HELLO[lang].format(t=title))
+
+
+async def voice_clip(persona: Persona, text: str) -> tuple[str, bytes] | None:
+    """Короткая фраза его голосом JES — записана один раз (озвучка через бесплатный ключ) и лежит на диске."""
     import hashlib
 
     from .context import ai
     from .tg_user import data_dir
 
-    text = wake_clip_text(persona, profile.first_name)
     folder = data_dir() / "wake_clips"
     path = folder / (hashlib.sha1(f"{persona.voice}|{text}".encode()).hexdigest()[:16] + ".pcm")
     try:
@@ -932,14 +973,26 @@ async def _run(profile: Profile, *, mode: str, topic: str, wake: dict[str, Any] 
         from dataclasses import replace
 
         persona = replace(persona, lang=lang)
+    from . import cheap_voice
+
+    if cheap_voice.wanted(mode, persona):
+        # 28.09 его выбор: будильник — всегда бесплатным голосом; звонок — если в настройках «экономный голос»
+        return await cheap_voice.run_call(profile, persona, dial, mode=mode, topic=topic, wake=wake)
     system = system_instruction(profile, persona, mode=mode, snapshot=snapshot, memory=memory, wake=wake, topic=topic)
     if mode == "assistant":
         system += billing.voice_note()
+        # 28.09 облегчённый звонок: Gemini заранее не готовим (занято/отклонил стоили ~$0.006 за попытку) — на «взял трубку»
+        # сразу звучит записанное «Алло, шеф! Слушаю.», а Gemini подключается за ~1 с
+        pregreet = False
     sess = _Session(profile, persona, mode=mode, system=system)
 
     async with aiohttp.ClientSession() as http:
         early = asyncio.create_task(_pregreet(sess, http, KICK) if pregreet else _not_prepared(), name="live-connect")
-        clip = asyncio.create_task(wake_clip(profile, persona), name="wake-clip") if (mode == "wake" and not pregreet) else None
+        clip = None
+        if mode == "wake" and not pregreet:
+            clip = asyncio.create_task(wake_clip(profile, persona), name="wake-clip")
+        elif mode == "assistant" and not topic:
+            clip = asyncio.create_task(hello_clip(profile, persona), name="hello-clip")
         try:
             call = await dial
         except BaseException:
@@ -990,6 +1043,10 @@ async def _answer(profile: Profile) -> LiveResult:
     from . import billing
 
     persona, snapshot, memory = await _prompt_parts(profile, "assistant")
+    from . import cheap_voice
+
+    if cheap_voice.wanted("assistant", persona):
+        return await cheap_voice.answer_call(profile, persona)  # в настройках «экономный голос» — без Live
     system = system_instruction(profile, persona, mode="assistant", snapshot=snapshot, memory=memory) + billing.voice_note()
     sess = _Session(profile, persona, mode="assistant", system=system)
     async with aiohttp.ClientSession() as http:

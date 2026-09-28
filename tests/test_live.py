@@ -40,7 +40,7 @@ def test_assistant_instruction_has_data_topic_and_tools_rule():
     text = live_call.system_instruction(_profile(), persona.Persona(voice="Kore"), mode="assistant",
                                         snapshot="Балансы: карта 100", memory="ПАМЯТЬ: брат Алишер", topic="разберём траты")
     assert "разберём траты" in text and "Балансы: карта 100" in text and "брат Алишер" in text
-    assert "add_calorie_logs" in text and "end_call" in text
+    assert "bot_task" in text and "end_call" in text  # 28.09 облегчённый звонок: данные — через bot_task
     assert "ПО ТЕЛЕФОНУ" in text
 
 
@@ -49,7 +49,10 @@ def test_tool_declarations_per_mode():
     assert {"end_call", "confirm_awake", "snooze", "prayer_times"} <= wake_names
     assert "add_finance_entries" not in wake_names  # при подъёме операций не пишем
     assistant_names = {d["name"] for d in live_call.tool_declarations("assistant")}
-    assert {"end_call", "bot_task", "add_finance_entries", "add_calorie_logs", "send_to_chat"} <= assistant_names
+    # 28.09 облегчённый Live в звонке: только частое, остальное — bot_task
+    assert assistant_names == live_call.CALL_LIVE_CORE
+    full = {d["name"] for d in live_call.tool_declarations("assistant", full=True)}  # экономный голос — всё сразу
+    assert {"end_call", "bot_task", "add_finance_entries", "add_calorie_logs", "send_to_chat"} <= full
     # экономно: редкое (цели, правки старых записей) — через bot_task, а не описаниями в каждой реплике
     assert not {"add_goal", "delete_finance_entries", "list_goals", "set_wake"} & assistant_names
     # в голосе нет чатовых инструментов: парсеры с экранами, кнопки, звонок самому себе
@@ -67,8 +70,8 @@ def test_language_is_locked_to_settings():
 
 def test_assistant_is_general_and_knows_itself():
     text = live_call.system_instruction(_profile(), persona.Persona(), mode="assistant")
-    assert "не только финансовый" in text.lower() or "НЕ ТОЛЬКО ФИНАНСОВЫЙ" in text
-    assert "О СЕБЕ" in text and "в месяц" in text
+    assert "полноценный помощник" in text and "web_search" in text
+    assert "про тебя саму" in text and "bot_task" in text  # расходы, модели, версии — через bot_task (ai_status)
     assert "шутит" in text  # живой характер
     from bot.handlers.agent import system_prompt
 

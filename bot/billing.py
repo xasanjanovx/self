@@ -335,6 +335,8 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
         users = day.setdefault("users", {})
         users[str(who)] = round(float(users.get(str(who)) or 0) + usd, 6)
     day["kinds"][kind] = round(float(day["kinds"].get(kind) or 0) + usd, 6)
+    models = day.setdefault("models", {})  # 28.09: «на что потрачено» — и по моделям (какая версия сколько стоила)
+    models[model] = round(float(models.get(model) or 0) + usd, 6)
     detail = day.setdefault("detail", {}).setdefault(kind, {})
     counts = day.setdefault("tokens", {}).setdefault(kind, {})
     for part in PARTS:
@@ -361,11 +363,94 @@ def record_free(model: str, usage: dict[str, Any] | None) -> None:
     free = day.setdefault("free", {"calls": 0, "saved_usd": 0.0})
     free["calls"] = int(free.get("calls") or 0) + 1
     free["saved_usd"] = round(float(free.get("saved_usd") or 0) + sum(parts.values()), 6)
+    by_model = free.setdefault("models", {})
+    by_model[model] = int(by_model.get(model) or 0) + 1
+    _schedule_save()
+
+
+def count_search() -> None:
+    """Поиск Google (grounding) — у Google отдельный счёт поисков сверх бесплатного месячного лимита; считаем, сколько их."""
+    st = _load()
+    day = st["days"].setdefault(_today(), {"usd": 0.0, "calls": 0, "kinds": {}})
+    day["searches"] = int(day.get("searches") or 0) + 1
     _schedule_save()
 
 
 def free_today() -> dict[str, Any]:
     return dict(((_load().get("days") or {}).get(_today()) or {}).get("free") or {})
+
+
+# что как называется по-человечески — для отчёта «на что потрачено»
+KIND_NAMES = {"live": "живой голос (Gemini Live: телефон и звонки)", "agent": "чат-агент (сообщения боту, задачи из голоса)",
+              "text": "короткие текстовые задачи", "stt": "распознавание голосовых", "tts": "озвучка фраз",
+              "voice": "голосовые ответы", "vision": "фото и камера"}
+SESSION_NAMES = {"phone": "JES на телефоне", "call": "звонки Telegram («позвони мне»)", "wake": "будильник (звонок на фаджр)",
+                 "incoming": "он сам звонил JES в Telegram"}
+
+
+def period_report(period: str = "today") -> dict[str, Any]:
+    """Расход за период: today | yesterday | week (7 дней) | month (с 1-го числа) | 30d. Всё уже в долларах с поправкой."""
+    st = _load()
+    factor = float(st.get("factor") or 1.0)
+    today = datetime.now(timezone(timedelta(hours=5))).date()
+    start, end = {
+        "yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
+        "week": (today - timedelta(days=6), today),
+        "month": (today.replace(day=1), today),
+        "30d": (today - timedelta(days=29), today),
+    }.get(period, (today, today))
+    keys = [k for k in (st.get("days") or {}) if start.isoformat() <= k <= end.isoformat()]
+    total = calls = searches = free_calls = 0.0
+    saved = clients = 0.0
+    kinds: dict[str, float] = {}
+    models: dict[str, float] = {}
+    free_models: dict[str, int] = {}
+    per_day: dict[str, float] = {}
+    for key in sorted(keys):
+        day = st["days"][key]
+        usd = float(day.get("usd") or 0) * factor
+        total += usd
+        per_day[key] = round(usd, 3)
+        calls += int(day.get("calls") or 0)
+        searches += int(day.get("searches") or 0)
+        for k, v in (day.get("kinds") or {}).items():
+            kinds[k] = kinds.get(k, 0.0) + float(v) * factor
+        for k, v in (day.get("models") or {}).items():
+            models[k] = models.get(k, 0.0) + float(v) * factor
+        free = day.get("free") or {}
+        free_calls += int(free.get("calls") or 0)
+        saved += float(free.get("saved_usd") or 0)
+        for k, v in (free.get("models") or {}).items():
+            free_models[k] = free_models.get(k, 0) + int(v)
+        clients += sum(float(v) for u, v in (day.get("users") or {}).items() if not _is_owner(int(u))) * factor
+    out: dict[str, Any] = {
+        "period": f"{start:%d.%m}–{end:%d.%m}" if start != end else f"{start:%d.%m.%Y}",
+        "spent_usd": round(total, 3), "paid_requests": int(calls),
+        "by_purpose_usd": {KIND_NAMES.get(k, k): round(v, 3) for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]) if v >= 0.0005},
+        "by_model_usd": {k: round(v, 3) for k, v in sorted(models.items(), key=lambda kv: -kv[1]) if v >= 0.0005},
+        "free_key": {"requests": int(free_calls), "would_cost_usd": round(saved, 3), "by_model": free_models},
+        "google_searches": int(searches),
+        "clients_usd": round(clients, 3), "owner_usd": round(total - clients, 3),
+    }
+    if len(per_day) > 1:
+        out["per_day_usd"] = per_day
+    if not models and total > 0:
+        out["note"] = "по моделям считается с 28.09 — раньше только по видам"
+    # разговоры (журнал хранит последние 60): сколько каких и во что обошлись
+    sess = [s for s in st.get("sessions") or [] if start.isoformat() <= str(s.get("at") or "")[:10] <= end.isoformat()]
+    if sess:
+        agg: dict[str, dict[str, float]] = {}
+        for s in sess:
+            row = agg.setdefault(SESSION_NAMES.get(str(s.get("kind")), str(s.get("kind"))), {"count": 0, "usd": 0.0, "minutes": 0.0})
+            row["count"] += 1
+            row["usd"] += float(s.get("usd") or 0)
+            row["minutes"] += float(s.get("sec") or 0) / 60
+        out["conversations"] = {k: {"count": int(v["count"]), "usd": round(v["usd"], 3), "minutes": round(v["minutes"], 1)}
+                                for k, v in sorted(agg.items(), key=lambda kv: -kv[1]["usd"])}
+        top = sorted(sess, key=lambda s: -float(s.get("usd") or 0))[:3]
+        out["costliest"] = [{"at": str(s.get("at"))[5:16].replace("T", " "), "what": SESSION_NAMES.get(str(s.get("kind")), s.get("kind")),
+                             "sec": s.get("sec"), "usd": s.get("usd"), "said": (s.get("said") or "")[:80]} for s in top if s.get("usd")]
+    return out
 
 
 def spent_today() -> float:
