@@ -560,7 +560,7 @@ def tokens_text(profile: Profile, period: str) -> str:
         lines += ["", "🧩 " + profile.tr("По работе", "Ish bo`yicha") + ": " + " · ".join(purposes)]
     if r.get("before_29_09_usd_only"):
         old = " · ".join(f"{h(k)} ${v:.3f}" for k, v in r["before_29_09_usd_only"].items())
-        lines += ["", "🕰 " + profile.tr("До 29.09 (только деньги)", "29.09 gacha") + f": {old}"]
+        lines += ["", "🕰 " + profile.tr("Раньше — только деньги (токены по моделям считаются с 29.09, 20:20)", "Oldin — faqat pul") + f": {old}"]
     return "\n".join(lines)[:3900]
 
 
