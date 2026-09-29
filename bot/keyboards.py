@@ -402,6 +402,7 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mod
                  pick("🇬🇧 English", "jarvis:lang:en", call_lang == "en")])
     if gai is not None:  # 29.09, только владельцу: через что работает Gemini — его баланс AI Studio или кредит Vertex ($300 / 90 дней)
         rows.append([pick("🟦 AI Studio", "jarvis:gai:studio", gai == "studio"), pick("☁️ Vertex · $300", "jarvis:gai:vertex", gai == "vertex")])
+        rows.append([_btn("🩺 " + ("Vertexni tekshirish" if uz else "Проверить Vertex"), "jarvis:gtest")])
         if gai == "vertex":
             rows.append([pick(f"${v:g}/" + ("kun" if uz else "день"), f"jarvis:glimit:{v:g}", gai_limit == v) for v in (1.0, 2.0, 3.0, 5.0)])
     rows.append([_back(lang, "menu:jarvis")])

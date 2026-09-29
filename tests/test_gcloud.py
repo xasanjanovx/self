@@ -104,3 +104,20 @@ def test_admin_switch_buttons_only_when_passed():
     kb = jarvis_settings_keyboard("ru", voice="Sulafat", call_lang="ru", gai="vertex", gai_limit=3.0)
     data = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert "jarvis:gai:studio" in data and "jarvis:gai:vertex" in data and "jarvis:glimit:3" in data
+
+
+def test_probe_explains_missing_iam_role_and_clears_on_success(monkeypatch, tmp_path):
+    state = {"ok": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not state["ok"]:
+            return httpx.Response(403, json={"error": {"code": 403, "status": "PERMISSION_DENIED", "message":
+                                  "Permission 'aiplatform.endpoints.predict' denied on resource ...", "details": [{"reason": "IAM_PERMISSION_DENIED"}]}})
+        return httpx.Response(200, json=_OK)
+
+    ai, _ = _setup(monkeypatch, tmp_path, handler)
+    good, why = asyncio.run(gcloud.probe(ai._client))
+    assert not good and "Vertex AI User" in why
+    state["ok"] = True
+    good, why = asyncio.run(gcloud.probe(ai._client))
+    assert good and gcloud.status()["error"] is None

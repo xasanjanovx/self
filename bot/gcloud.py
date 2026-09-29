@@ -157,7 +157,9 @@ def failed(model: str, status: int | None, text: str) -> None:
                                          or "billing" in low or "unauthenticated" in low):
         _paused_until = time.monotonic() + KEY_PAUSE_S
         why = "ключ не пускают в Vertex AI: " + (
-            "в Google Cloud у ключа ограничение API — добавьте «Vertex AI API»" if "blocked" in low
+            "у сервисного аккаунта ключа нет роли «Vertex AI User» (Agent Platform User)" if "iam_permission_denied" in low
+            or "permission 'aiplatform" in low
+            else "в Google Cloud у ключа ограничение API — добавьте «Vertex AI API»" if "blocked" in low
             else "включите Vertex AI API в проекте" if "disabled" in low or "has not been used" in low
             else "нет оплаты/кредита на проекте" if "billing" in low else low[:120])
     else:
@@ -166,6 +168,25 @@ def failed(model: str, status: int | None, text: str) -> None:
     st = _load()
     st["error"], st["error_at"] = why, datetime.now(timezone.utc).isoformat()
     _save()
+
+
+async def probe(client, model: str = "gemini-3.5-flash-lite") -> tuple[bool, str]:  # noqa: ANN001 — httpx.AsyncClient
+    """Кнопка «Проверить Vertex» (29.09): один крошечный запрос (~$0.00001) — пускают ли ключ и есть ли модель."""
+    global _paused_until
+    if not vertex_key():
+        return False, "нет VERTEX_API_KEY на сервере"
+    body = {"contents": [{"role": "user", "parts": [{"text": "Ответь одним словом: да"}]}], "generationConfig": {"maxOutputTokens": 5}}
+    try:
+        response = await client.post(url(model, "generateContent"), json=body, headers=headers())
+    except Exception as exc:
+        return False, f"сеть: {type(exc).__name__}"
+    if response.status_code == 200:
+        _paused_until = 0.0
+        _bad_models.discard(model)
+        ok()
+        return True, f"Vertex работает ({model})"
+    failed(model, response.status_code, response.text)
+    return False, str(_load().get("error") or response.status_code)
 
 
 def status() -> dict[str, Any]:

@@ -606,6 +606,13 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         await answer_now(callback, "✅")
         await render_jarvis(callback, profile)
         return
+    if action == "gtest" and access.is_owner(profile.telegram_id):  # 29.09: пускают ли ключ в Vertex — одним запросом
+        from ..context import ai
+
+        await answer_now(callback, profile.tr("Проверяю…", "Tekshiryapman…"))
+        good, why = await gcloud.probe(ai._client)
+        await render_jarvis(callback, profile, notice=("✅ " if good else "⚠️ ") + h(why))
+        return
     if action in {"gai", "glimit"} and access.is_owner(profile.telegram_id):  # 29.09: AI Studio ↔ Vertex, лимит на кредите
         if action == "gai" and value in {"studio", "vertex"}:
             gcloud.set_provider(value)
