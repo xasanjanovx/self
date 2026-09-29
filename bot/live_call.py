@@ -109,12 +109,16 @@ def engine_line(engine: str) -> str:
     if engine == "live":
         live = MODELS[0].replace("gemini-", "Gemini ").replace("-live", " Live")
         how = (f"живой голос {live} (Google): слышит и отвечает сама, за ~1 с; платно — около $0.01–0.02 за минуту. "
-               f"После дневного лимита (${billing.DAILY_LIMIT_USD:g}) — экономный режим до полуночи, если он не скажет «включи лайв режим»")
+               f"После дневного лимита (${billing.limit_usd():g}) — экономный режим до полуночи, если он не скажет «включи лайв режим»")
     else:
         how = (f"экономный режим: его речь понимает и отвечает {ai.agent_model}, говорит голос {ai_mod.FAST_TTS_MODEL} (Google); "
                "платно, но в 5–10 раз дешевле живого голоса. Ответ — через 2–3 с после его фразы, с поиском или делами — 3–5 с. "
                "Частые фразы («алло», «спасибо», «секунду») звучат записанными — мгновенно и бесплатно")
-    return (f"\nТВОЙ РЕЖИМ СЕЙЧАС: {how}. Сегодня на ИИ потрачено ${billing.spent_today():.2f}. Бесплатный уровень Gemini в голосе не "
+    from . import gcloud
+
+    via = ("через Vertex AI — кредит Google Cloud ($300 до " + f"{gcloud.trial_until():%d.%m})" if gcloud.active()
+           else "через AI Studio — его баланс")
+    return (f"\nТВОЙ РЕЖИМ СЕЙЧАС: {how}; {via}. Сегодня на ИИ потрачено ${billing.spent_today():.2f}. Бесплатный уровень Gemini в голосе не "
             "используется — он перегружен и тормозил. Спросит, на какой ты модели, платно ли, почему то быстро, то медленно — "
             "отвечай этим, БЕЗ поиска; подробный расход по дням и сервисам — bot_task.\n")
 
@@ -345,7 +349,8 @@ VOICE_CORE = {"add_finance_entries", "get_finance_stats", "add_reminder", "add_t
 _DELEGATE = {"name": "bot_task",
              "description": "Помощник из чата со ВСЕМИ инструментами бота: любая работа с его данными, для которой у тебя нет своего инструмента — "
                             "исправить, удалить, найти, перенести записи (операции, задачи, заметки, еда, вес), массовые правки, цели, долги, бюджеты, "
-                            "регулярные платежи, настройки, будильник, отчёты и анализ. Вернёт готовый ответ — перескажи его коротко.",
+                            "регулярные платежи, настройки, будильник, отчёты и анализ; его история («что я делал вчера», «когда звонил Алишеру»). "
+                            "Вернёт готовый ответ — перескажи его коротко.",
              "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "просьба целиком, своими словами, со всеми числами, датами и именами"}},
                             "required": ["request"]}}
 _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_me", "test_wake_call"}
@@ -354,7 +359,8 @@ _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_m
 # (Flash-Lite платным ключом; 29.09 — без бесплатного, он тормозил), как на телефоне
 CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat"}
 _CALL_DELEGATE_DESC = ("Помощник из чата со ВСЕМИ инструментами бота: трата, еда, задача, напоминание, «сколько потратил», исправить/удалить, "
-                       "цели, долги, отчёты, будильник, запомнить о нём; и про тебя саму — расходы на ИИ, модели, версии, сервисы. "
+                       "цели, долги, отчёты, будильник, запомнить о нём, его история («что я делал вчера», «когда звонил Алишеру»); "
+                       "и про тебя саму — расходы на ИИ, модели, версии, сервисы. "
                        "Вернёт готовый ответ — перескажи коротко.")
 
 
@@ -432,6 +438,7 @@ class _Session:
 
         self.profile = profile
         self.persona = persona
+        self.provider = "studio"               # 29.09: через что идёт живой голос (studio | vertex) — для учёта кредита
         self.mode = mode
         self.system = system
         self.uid = profile.telegram_id
@@ -483,6 +490,11 @@ class _Session:
                 except Exception as exc:
                     logger.warning("live: Qwen недоступен (%s) — Gemini", str(exc)[:200])
                     qwen_live.report_failure(str(exc))
+        # 29.09: выбран Vertex AI (кредит Google Cloud) — сначала он; не вышло — как обычно, AI Studio
+        from . import gcloud
+
+        if gcloud.use_vertex(MODELS[0]) and (ws := await self._connect_vertex(session, MODELS[0])) is not None:
+            return ws
         # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него.
         # Не приняла экономные настройки (_extras_level) — та же попытка проще (запоминаем до перезапуска).
         attempts = [(m, r) for m in MODELS for r in (True, False)]
@@ -526,6 +538,40 @@ class _Session:
                 continue
             i += 1
         raise RuntimeError(last_error or "live setup failed")
+
+    async def _connect_vertex(self, session, model: str):  # noqa: ANN001, ANN202
+        """Живой голос через Vertex AI (ключ VERTEX_API_KEY). Отказ — None: вызывающий подключится к AI Studio."""
+        from . import gcloud
+
+        for rich in (True, False):
+            try:
+                ws = await session.ws_connect(gcloud.VERTEX_LIVE_URL, headers=gcloud.headers(), heartbeat=20, max_msg_size=0)
+            except Exception as exc:
+                gcloud.failed(model, getattr(exc, "status", None), f"live connect: {exc}")
+                return None
+            setup = self.setup_payload(model, rich=rich)
+            setup["setup"]["model"] = f"publishers/google/models/{gcloud.vertex_model(model)}"
+            await ws.send_str(json.dumps(setup))
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=15)
+            except asyncio.TimeoutError:
+                await ws.close()
+                gcloud.failed(model, None, "live setup timeout")
+                return None
+            data = _decode(msg)
+            if data is not None and "setupComplete" in data:
+                self.provider = "vertex"
+                self.result.model = model
+                gcloud.ok()
+                logger.info("live: Vertex AI, модель %s, голос %s, язык %s, расширенный режим %s", model, self.persona.voice,
+                            self.persona.lang, rich)
+                return ws
+            error = f"{getattr(msg, 'extra', None) or getattr(msg, 'data', '')!s}"[:300]
+            await ws.close()
+            if rich:
+                continue  # без жёсткого языка — вдруг Vertex не принял его
+            gcloud.failed(model, None, f"live setup: {error}")
+        return None
 
     def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
         """rich — жёсткий язык речи (languageCode из настроек). Не включаем: enableAffectiveDialog
@@ -609,7 +655,7 @@ class _Session:
                     return
                 continue
             if "usageMetadata" in data:
-                billing.record(self.result.model or MODELS[0], data["usageMetadata"], kind="live")
+                billing.record(self.result.model or MODELS[0], data["usageMetadata"], kind="live", provider=self.provider)
             sc = data.get("serverContent") or {}
             if sc.get("interrupted"):
                 self.out.clear()  # перебили — замолкаем сразу
@@ -693,10 +739,11 @@ class _Session:
 
     # --- инструменты
     async def _run_one(self, call: dict[str, Any]) -> dict[str, Any]:
-        from . import agent_tools
+        from . import agent_tools, deeds
 
         name, args, cid = call.get("name"), call.get("args") or {}, call.get("id")
         logger.info("live tool %s %s", name, json.dumps(args, ensure_ascii=False)[:200])
+        token = deeds.source.set("телефон" if self.mode == "phone" else "звонок")
         try:
             if name == "end_call":
                 self.hangup_after_speech = True
@@ -722,6 +769,8 @@ class _Session:
         except Exception as exc:
             logger.exception("live tool %s failed", name)
             result = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        finally:
+            deeds.source.reset(token)
         return {"id": cid, "name": name, "response": _jsonable(result)}
 
     async def _run_tools(self, ws, calls: list[dict[str, Any]]) -> None:  # noqa: ANN001

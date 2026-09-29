@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from aiogram import F, Router
@@ -16,7 +16,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
-from .. import cache
+from .. import access, billing, cache, gcloud
 from .. import i18n
 from .. import emoji as pe
 from .. import services
@@ -517,7 +517,7 @@ def engine_lines(profile: Profile, p) -> list[str]:  # noqa: ANN001
     phone_live = p.voice_mode == "live" and billing.live_allowed("phone")
     call_live = getattr(p, "call_mode", "live") != "economy" and billing.live_allowed("assistant")
     fast, slow = profile.tr("~1 с", "~1 s"), profile.tr("2–3 с", "2–3 s")
-    spent, limit = billing.spent_today(), billing.DAILY_LIMIT_USD
+    spent, limit = billing.spent_today(), billing.limit_usd()
     lines = [
         f"📱 {profile.tr('Телефон', 'Telefon')}: <b>" + (f"⚡ {live}</b> · {fast}" if phone_live else f"🌿 {cheap}</b> · {slow}")
         + ("" if phone_live or p.voice_mode != "live" else profile.tr(" (лимит дня — «включи лайв режим»)", " (kunlik limit)")),
@@ -527,6 +527,23 @@ def engine_lines(profile: Profile, p) -> list[str]:  # noqa: ANN001
         "⏱ " + profile.tr("Медленнее бывает: экономный режим, поиск/погода (+1–2 с), слабая сеть",
                           "Sekinroq: tejamkor rejim, qidiruv/ob-havo (+1–2 s), zaif internet"),
     ]
+    return lines
+
+
+def gcloud_lines(profile: Profile) -> list[str]:
+    """29.09: его $300 Google Cloud работают только через Vertex AI — что выбрано, сколько осталось, что не так."""
+    s = gcloud.status()
+    used = billing.vertex_spent()
+    until = date.fromisoformat(s["trial_until"])
+    lines = [f"{'☁️' if s['chosen'] == 'vertex' else '🟦'} {profile.tr('Сейчас', 'Hozir')}: <b>"
+             + ("Vertex AI — " + profile.tr("кредит Google Cloud", "Google Cloud krediti") if s["chosen"] == "vertex"
+                else "AI Studio — " + profile.tr("ваш баланс", "sizning balansingiz")) + "</b>",
+             f"💳 Vertex: ${used['total']:.2f} {profile.tr('из', '/')} ${gcloud.TRIAL_USD:g} · {profile.tr('до', 'gacha')} {until:%d.%m.%Y}"
+             + f" ({max(0, s['days_left'])} {profile.tr('дн.', 'kun')})"]
+    if s["chosen"] == "vertex":
+        lines.append(f"📈 {profile.tr('Лимит в день', 'Kunlik limit')}: ${s['limit']:g} · {profile.tr('сегодня', 'bugun')} ${billing.spent_today():.2f}")
+    if s.get("error"):
+        lines.append(f"⚠️ {h(s['error'])} — {profile.tr('пока идёт через AI Studio', 'hozircha AI Studio orqali')}")
     return lines
 
 
@@ -551,9 +568,14 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     ]
     text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines),
                    ui.card(f"<b>{profile.tr('Кто отвечает прямо сейчас', 'Hozir kim javob beradi')}</b>", engine_lines(profile, p)))
+    gai = None
+    if access.is_owner(profile.telegram_id) and gcloud.vertex_key():
+        gai = gcloud.chosen()
+        text += "\n\n" + ui.card(f"<b>🧠 Google AI</b> · {profile.tr('видно только вам', 'faqat sizga')}", gcloud_lines(profile))
     if notice:
         text += f"\n\n{notice}"
-    kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, voice_mode=p.voice_mode)
+    kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, voice_mode=p.voice_mode, gai=gai,
+                                  gai_limit=gcloud.daily_limit())
     await _show(target, text, kb)
 
 
@@ -581,6 +603,17 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         # 28.09: один переключатель — сразу телефон и звонки (старые кнопки vmode/cmode — из прошлых сообщений)
         fields = {"voice_mode": value, "call_mode": value} if action == "mode" else {"voice_mode" if action == "vmode" else "call_mode": value}
         services.save_persona_extra(profile.telegram_id, fields)
+        await answer_now(callback, "✅")
+        await render_jarvis(callback, profile)
+        return
+    if action in {"gai", "glimit"} and access.is_owner(profile.telegram_id):  # 29.09: AI Studio ↔ Vertex, лимит на кредите
+        if action == "gai" and value in {"studio", "vertex"}:
+            gcloud.set_provider(value)
+        elif action == "glimit":
+            try:
+                gcloud.set_limit(float(value))
+            except ValueError:
+                pass
         await answer_now(callback, "✅")
         await render_jarvis(callback, profile)
         return

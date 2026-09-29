@@ -341,6 +341,11 @@ async def mark_awake(bot: Bot, profile: Profile, *, source: str, notify: bool = 
     fields: dict[str, Any] = {"woke_at": now.isoformat(), "woke_source": source, "before_takbir": before,
                               "takbir_at": plan.takbir, "planned_at": plan.wake_at.isoformat() if plan.wake_at else None}
     await services.save_wake_log(uid, plan.day, fields)
+    if source != "skip":
+        from . import deeds
+
+        deeds.note(uid, "awake", src={"app": "телефон", "call": "звонок"}.get(source, "чат"), dedupe_s=3600,
+                   text=f"подъём в {local_now:%H:%M}" + (" — до такбира" if before else ""))
     history = await services.wake_history(uid, days=60)
     rows = [r for r in history if str(r.get("day"))[:10] != plan.day.isoformat()]
     rows.append({"day": plan.day.isoformat(), "woke_at": fields["woke_at"], "before_takbir": before})

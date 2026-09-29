@@ -336,7 +336,7 @@ async def _weather(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     {"period": P("STRING", "today | yesterday | week | month | 30d (по умолчанию today)", enum=["today", "yesterday", "week", "month", "30d"])},
 )
 async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    from . import billing, caller, phone_api, version
+    from . import billing, caller, gcloud, phone_api, version
     from . import ai as ai_mod
     from .context import ai
     from .live_call import MODELS
@@ -360,6 +360,8 @@ async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             "траты из SMS банков": f"{ai_mod.FREE_SMART_MODEL} через бесплатный ключ",
         },
         "free_key": ai_mod.free_status(),
+        # 29.09: через что идёт Gemini — его баланс AI Studio или кредит Google Cloud через Vertex AI ($300 на 90 дней)
+        "google_ai": {**gcloud.status(), "vertex_credit_used_usd": billing.vertex_spent()},
         "services": {
             "Google AI Studio (Gemini API)": "два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)",
             "сервер": "Hetzner, 167.235.249.200, Docker: бот JES (codex-self-bot) и бот Ishdasiz (codex-ishdasiz-bot)",

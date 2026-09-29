@@ -61,20 +61,28 @@ async def report_worker(bot: Bot) -> None:
                 if (local_now.hour, local_now.minute) < (settings.weekly_report_hour, settings.weekly_report_minute):
                     continue
                 prefs = await db.get_report_preferences(telegram_id)
-                if not prefs.get("enabled", True):
-                    continue
                 frequency = str(prefs.get("frequency") or "weekly")
                 due_key = _due_key(local_now, frequency)
-                if due_key is None or prefs.get("last_sent_key") == due_key:
-                    continue
-                try:
-                    await _send_report(bot, telegram_id, frequency, due_key)
-                except TelegramForbiddenError:
-                    logger.info("Report skipped: user %s blocked the bot", telegram_id)
-                except TelegramRetryAfter as exc:
-                    await asyncio.sleep(float(exc.retry_after) + 1)
-                except Exception:
-                    logger.exception("Report failed for %s", telegram_id)
+                if prefs.get("enabled", True) and due_key is not None and prefs.get("last_sent_key") != due_key:
+                    try:
+                        await _send_report(bot, telegram_id, frequency, due_key)
+                    except TelegramForbiddenError:
+                        logger.info("Report skipped: user %s blocked the bot", telegram_id)
+                    except TelegramRetryAfter as exc:
+                        await asyncio.sleep(float(exc.retry_after) + 1)
+                    except Exception:
+                        logger.exception("Report failed for %s", telegram_id)
+                # 29.09 его выбор: в воскресенье вечером — итоги недели голосом JES (деньги, задачи, уроки, подъёмы)
+                week_key = _due_key(local_now, "weekly")
+                if week_key is not None and access.is_owner(telegram_id):
+                    try:
+                        from . import weekly
+
+                        await weekly.maybe_send(bot, profile, week_key)
+                    except TelegramForbiddenError:
+                        pass
+                    except Exception:
+                        logger.exception("weekly voice failed for %s", telegram_id)
         except asyncio.CancelledError:
             raise
         except Exception:

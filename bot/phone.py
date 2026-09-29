@@ -940,17 +940,25 @@ def make_step(turn: PhoneTurn, lang: str, step_fn=None):
 
 def make_runner(turn: PhoneTurn):
     async def run(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+        from . import deeds
+
         t = PHONE_TOOLS.get(name)
-        if t is None:
-            if name in EXCLUDED_BOT_TOOLS:
-                return {"error": f"{name} недоступен в голосовом режиме"}
-            return await tools.run(name, args, ctx)
-        ctx.calls.append(name)
+        token = deeds.source.set("телефон")  # 29.09 память дел: откуда действие
         try:
-            return await t.handler(turn, ctx, args or {})
-        except Exception as exc:
-            logger.exception("phone tool %s failed", name)
-            return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            if t is None:
+                if name in EXCLUDED_BOT_TOOLS:
+                    return {"error": f"{name} недоступен в голосовом режиме"}
+                return await tools.run(name, args, ctx)
+            ctx.calls.append(name)
+            try:
+                result = await t.handler(turn, ctx, args or {})
+            except Exception as exc:
+                logger.exception("phone tool %s failed", name)
+                return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            deeds.note(ctx.uid, name, args, result)
+            return result
+        finally:
+            deeds.source.reset(token)
 
     return run
 

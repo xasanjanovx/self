@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from . import billing
+from . import gcloud
 from . import categories as cats
 from .config import Settings
 
@@ -405,6 +406,8 @@ class AIService:
             url = f"{self.base_url}/{model}:generateContent"
             _turn_model.set(model)
         payload = _adapt(model, payload)
+        if gcloud.use_vertex(model) and (data := await self._post_vertex(model, payload)) is not None:
+            return data
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 response = await self._client.post(url, json=payload)
@@ -435,6 +438,21 @@ class AIService:
                 logger.warning("Gemini transient error %d/%d (%s): %s — retry in %.1fs", attempt, _MAX_ATTEMPTS, model, exc, delay)
                 await asyncio.sleep(delay)
         raise RuntimeError("unreachable")
+
+    async def _post_vertex(self, model: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """29.09: сначала Vertex AI (кредит Google Cloud, bot/gcloud.py). Не вышло — None, и запрос идёт в AI Studio."""
+        try:
+            response = await self._client.post(gcloud.url(model, "generateContent"), json=payload, headers=gcloud.headers())
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            gcloud.failed(model, None, type(exc).__name__)
+            return None
+        if response.status_code != 200:
+            gcloud.failed(model, response.status_code, response.text)
+            return None
+        data = response.json()
+        gcloud.ok()
+        billing.record(model, data.get("usageMetadata"), kind=_usage_kind(model, payload), provider="vertex")
+        return data
 
     @staticmethod
     def _first_candidate(data: dict[str, Any]) -> dict[str, Any]:
@@ -589,18 +607,23 @@ class AIService:
         }
         # 28.09: бесплатный уровень — только по просьбе (free=True). 29.09: в голосе он давал 429 уже к утру (квота ~5 фраз
         # в день, экономия за месяц $0.005), а каждая неудачная попытка — лишний запрос перед платным
-        routes: list[tuple[str, dict[str, str]]] = []
+        routes: list[tuple[str, str, dict[str, str]]] = []
+        if gcloud.use_vertex(model):  # 29.09: кредит Google Cloud (Vertex AI) — первым
+            routes.append(("vertex", gcloud.url(model, "streamGenerateContent?alt=sse"), gcloud.headers()))
         key = free_key() if free else None
         if key and _time.monotonic() > _free_tts_paused_until:
-            routes.append(("free", {"x-goog-api-key": key}))
-        routes.append(("paid", {}))
-        for route, headers in routes:
+            routes.append(("free", url, {"x-goog-api-key": key}))
+        routes.append(("paid", url, {}))
+        for route, route_url, headers in routes:
             usage: dict[str, Any] | None = None
             whole = bytearray() if cached is not None else None
             complete = False
-            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
+            async with self._client.stream("POST", route_url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = (await response.aread()).decode("utf-8", "replace")
+                    if route == "vertex":
+                        gcloud.failed(model, response.status_code, body)
+                        continue
                     if route == "free":
                         logger.info("free key TTS: %s %s — озвучиваю платным", response.status_code, body[:120])
                         if response.status_code in {429, 400, 403, 404}:
@@ -630,7 +653,7 @@ class AIService:
                     if route == "free":
                         billing.record_free(model, usage)
                     else:
-                        billing.record(model, usage, kind="voice")
+                        billing.record(model, usage, kind="voice", provider="vertex" if route == "vertex" else "studio")
             if complete and whole:
                 _tts_cache_save(cached, bytes(whole))
             return

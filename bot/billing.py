@@ -311,8 +311,9 @@ def _today() -> str:
     return datetime.now(timezone(timedelta(hours=5))).date().isoformat()
 
 
-def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> float:
-    """Записать расход одного ответа Gemini. kind: text | live | tts | stt | vision."""
+def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text", provider: str = "studio") -> float:
+    """Записать расход одного ответа Gemini. kind: text | live | tts | stt | vision. provider: studio (его баланс в AI Studio)
+    | vertex (29.09: кредит Google Cloud — баланс AI Studio не уменьшает, считаем отдельно)."""
     if not usage:
         return 0.0
     parts, tokens = breakdown(model, usage)
@@ -323,14 +324,16 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
         meter.add(kind, usd)
     st = _load()
     day = st["days"].setdefault(_today(), {"usd": 0.0, "calls": 0, "kinds": {}})
-    provider = next((p for p in OTHER_PROVIDERS if str(model).startswith(p)), None)
-    if provider:
+    other_provider = next((p for p in OTHER_PROVIDERS if str(model).startswith(p)), None)
+    if other_provider:
         other = day.setdefault("other", {})
-        other[provider] = round(float(other.get(provider) or 0) + usd, 6)
+        other[other_provider] = round(float(other.get(other_provider) or 0) + usd, 6)
         _schedule_save()
         return usd
     day["usd"] = round(day["usd"] + usd, 6)
     day["calls"] = int(day.get("calls") or 0) + 1
+    if provider == "vertex":
+        day["vertex_usd"] = round(float(day.get("vertex_usd") or 0) + usd, 6)
     if (who := _user.get()) is not None:
         users = day.setdefault("users", {})
         users[str(who)] = round(float(users.get(str(who)) or 0) + usd, 6)
@@ -344,7 +347,7 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text") -> f
             detail[part] = round(float(detail.get(part) or 0) + parts[part], 6)
         if tokens[part] > 0:
             counts[part] = int(counts.get(part) or 0) + tokens[part]
-    if st.get("anchor"):
+    if st.get("anchor") and provider != "vertex":
         st["spent_since"] = round(float(st.get("spent_since") or 0) + usd, 6)
     st.pop("exhausted_at", None)  # ответ пришёл — значит, деньги есть
     _schedule_save()
@@ -457,10 +460,25 @@ def spent_today() -> float:
     return float(((_load().get("days") or {}).get(_today()) or {}).get("usd") or 0.0) * float(_load().get("factor") or 1.0)
 
 
+def limit_usd() -> float:
+    """Дневной лимит: $0.5 на балансе AI Studio; на кредите Vertex — выше (bot/gcloud.py, в настройках бота)."""
+    from . import gcloud
+
+    return gcloud.daily_limit() or DAILY_LIMIT_USD
+
+
+def vertex_spent() -> dict[str, float]:
+    """Сколько ушло с кредита Vertex: сегодня и всего (из $300)."""
+    days = _load().get("days") or {}
+    return {"today": round(float((days.get(_today()) or {}).get("vertex_usd") or 0), 3),
+            "total": round(sum(float(v.get("vertex_usd") or 0) for v in days.values()), 2)}
+
+
 def over_limit() -> bool:
     """Сегодняшний расход ВЛАДЕЛЬЦА дошёл до дневного лимита — экономный режим до полуночи. Клиенты сюда не входят
     (у них свой лимит, user_over_limit) — иначе их чаты съедали бы его живой голос."""
-    return DAILY_LIMIT_USD > 0 and spent_today() - clients_spent_today() >= DAILY_LIMIT_USD
+    limit = limit_usd()
+    return limit > 0 and spent_today() - clients_spent_today() >= limit
 
 
 def live_allowed(mode: str = "phone") -> bool:
@@ -483,11 +501,11 @@ def live_forced() -> bool:
 
 
 def _maybe_limit_alert(st: dict[str, Any], day: dict[str, Any]) -> None:
-    if DAILY_LIMIT_USD <= 0 or day.get("limit_alert") or spent_today() - clients_spent_today() < DAILY_LIMIT_USD:
+    if limit_usd() <= 0 or day.get("limit_alert") or spent_today() - clients_spent_today() < limit_usd():
         return
     day["limit_alert"] = True
     _schedule_save()
-    _notify(f"🟡 <b>Лимит Gemini на сегодня — ${DAILY_LIMIT_USD:g} — достигнут.</b>\nДо полуночи живой голос (Gemini Live) выключен: "
+    _notify(f"🟡 <b>Лимит Gemini на сегодня — ${limit_usd():g} — достигнут.</b>\nДо полуночи живой голос (Gemini Live) выключен: "
             "JES на телефоне выполняет команды и отвечает в экономном режиме, камера, экран и звонки «позвони мне» — завтра. "
             "Будильник на фаджр работает как обычно.")
 
@@ -556,7 +574,8 @@ def status() -> dict[str, Any]:
         "qwen_today_usd": round(float(((days.get(today) or {}).get("other") or {}).get("qwen") or 0), 4),
         "qwen_month_usd": round(sum(float((v.get("other") or {}).get("qwen") or 0) for k, v in days.items() if k.startswith(month)), 3),
         "calibration_factor": round(factor, 2),
-        "daily_limit_usd": DAILY_LIMIT_USD,
+        "daily_limit_usd": limit_usd(),
+        "vertex_credit_used_usd": vertex_spent(),
         "live_voice_today": "выключен до полуночи (дневной лимит)" if over_limit() else "включён",
     }
     # из чего сложился расход сегодня: вид (live/agent/stt/tts…) → тип токенов (звук, текст, кадры, кэш, размышления)

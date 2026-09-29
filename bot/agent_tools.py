@@ -17,6 +17,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from . import analysis
+from . import deeds
 from . import cache
 from . import categories as cats
 from . import finance as fin
@@ -91,10 +92,12 @@ async def run(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[str, An
         return {"error": f"unknown tool {name}"}
     ctx.calls.append(name)
     try:
-        return await t.handler(ctx, args or {})
+        result = await t.handler(ctx, args or {})
     except Exception as exc:
         logger.exception("tool %s failed", name)
         return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    deeds.note(ctx.uid, name, args, result)  # 29.09 память дел: «что я делал вчера?»
+    return result
 
 
 # ------------------------------------------------------------------ schema helpers
@@ -1127,5 +1130,6 @@ from . import agent_tools_extra  # noqa: E402,F401  — ask_user, память, 
 from . import agent_tools_bulk  # noqa: E402,F401  — найти любую запись, массовые правки
 from . import agent_tools_debts  # noqa: E402  — бухгалтер долгов: займы, погашения, сроки
 from . import agent_tools_daily  # noqa: E402,F401  — каждый день (дела с напоминанием и целью), «продолжи урок» YouTube
+from . import agent_tools_deeds  # noqa: E402,F401  — «что я делал вчера?», «когда звонил Алишеру?» (bot/deeds.py)
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

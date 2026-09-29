@@ -458,6 +458,10 @@ async def media_progress(request: web.Request) -> web.Response:
     if uid is None:
         return web.json_response({"error": "no owner"}, status=400)
     item = lessons.note(uid, await _json(request))
+    if item is not None:
+        from . import deeds
+
+        deeds.note(uid, "lesson", src="телефон", text=f"смотрели: {item['title'][:80]}", dedupe_s=6 * 3600)
     return web.json_response({"ok": item is not None})
 
 
@@ -569,7 +573,11 @@ async def announce(request: web.Request) -> web.Response:
     data = await _json(request)
     if uid is None:
         return web.json_response({"error": "owner is not configured"}, status=500)
-    return web.json_response(await phone_live.announce(uid, str(data.get("name") or ""), str(data.get("app") or "")))
+    name, app = str(data.get("name") or ""), str(data.get("app") or "")
+    from . import deeds
+
+    deeds.note(uid, "incoming_call", {"who": name, "app": app}, src="телефон", dedupe_s=180)
+    return web.json_response(await phone_live.announce(uid, name, app))
 
 
 async def greetings(request: web.Request) -> web.Response:

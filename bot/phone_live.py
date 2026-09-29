@@ -541,7 +541,7 @@ class PhoneLive(_Session):
                     return
                 continue
             if "usageMetadata" in data:
-                billing.record(self.result.model or live_call.MODELS[0], data["usageMetadata"], kind="live")
+                billing.record(self.result.model or live_call.MODELS[0], data["usageMetadata"], kind="live", provider=getattr(self, "provider", "studio"))
             sc = data.get("serverContent") or {}
             if sc.get("interrupted"):
                 await self.to_phone({"type": "interrupted"})

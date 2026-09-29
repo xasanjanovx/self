@@ -374,7 +374,8 @@ def place_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mode: str = "live", **_old: object) -> InlineKeyboardMarkup:
+def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mode: str = "live", gai: str | None = None,
+                             gai_limit: float | None = None, **_old: object) -> InlineKeyboardMarkup:
     """«Голос и характер» JES — коротко (28.09 его выбор): голос, язык, режим. Всегда на «вы», «сэр/шеф/босс», тон и длина —
     по умолчанию; модели Qwen больше нет в настройках."""
     from .persona import VOICES
@@ -399,6 +400,10 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mod
     rows.append([_btn("🔊 " + ("Ovozni eshitish" if uz else "Послушать голос"), "jarvis:sample")])
     rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru"),
                  pick("🇬🇧 English", "jarvis:lang:en", call_lang == "en")])
+    if gai is not None:  # 29.09, только владельцу: через что работает Gemini — его баланс AI Studio или кредит Vertex ($300 / 90 дней)
+        rows.append([pick("🟦 AI Studio", "jarvis:gai:studio", gai == "studio"), pick("☁️ Vertex · $300", "jarvis:gai:vertex", gai == "vertex")])
+        if gai == "vertex":
+            rows.append([pick(f"${v:g}/" + ("kun" if uz else "день"), f"jarvis:glimit:{v:g}", gai_limit == v) for v in (1.0, 2.0, 3.0, 5.0)])
     rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
