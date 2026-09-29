@@ -970,7 +970,8 @@ async def _get_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "update_settings",
-    "Изменить настройки: сводки (вкл/выкл, время), авто-отчёт (вкл/выкл, weekly|monthly), проактивные подсказки, голосовые ответы, язык (ru|uz).",
+    "Изменить настройки: сводки (вкл/выкл, время), авто-отчёт (вкл/выкл, weekly|monthly), проактивные подсказки, голосовые ответы, язык (ru|uz), "
+    "режим голоса JES («быстрый/живой режим» — jes_mode=live, «экономный» — economy).",
     {
         "brief_morning": P("BOOLEAN", "утренняя сводка"), "brief_morning_time": P("STRING", "HH:MM"),
         "brief_evening": P("BOOLEAN", "вечерняя сводка"), "brief_evening_time": P("STRING", "HH:MM"),
@@ -978,10 +979,16 @@ async def _get_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         "voice_reply": P("BOOLEAN", "отвечать голосом на голосовые сообщения"),
         "report_enabled": P("BOOLEAN", "авто-отчёт"), "report_frequency": P("STRING", "weekly | monthly", enum=["weekly", "monthly"]),
         "language": P("STRING", "ru | uz", enum=["ru", "uz"]),
+        "jes_mode": P("STRING", "режим голоса JES на телефоне и в звонках: live — быстрый (живой голос, ответ ~1 с), economy — "
+                                "экономный (2–3 с)", enum=["live", "economy"]),
     },
 )
 async def _update_settings(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     changed: dict[str, Any] = {}
+    mode = _str(a.get("jes_mode"))
+    if mode in {"live", "economy"}:  # 29.09: «включи быстрый режим» в звонке — настройка «Режим» в боте (телефон и звонки)
+        services.save_persona_extra(ctx.uid, {"voice_mode": mode, "call_mode": mode})
+        changed["jes_mode"] = mode
     us_fields: dict[str, Any] = {}
     for key in ("brief_morning", "brief_evening", "proactive", "voice_reply"):
         if (v := _bool(a.get(key))) is not None:

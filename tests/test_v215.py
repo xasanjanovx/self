@@ -130,3 +130,38 @@ def test_settings_show_who_answers_now(monkeypatch):
     assert "⚡ Gemini 3.8 Live" in text and "🌿" in text and "Sulafat" in text and "$0.33" in text
     monkeypatch.setattr(billing, "live_allowed", lambda mode="phone": False)   # лимит дня — телефон тоже экономно
     assert "включи лайв режим" in "\n".join(engine_lines(_profile(), p))
+
+
+def test_repeat_while_thinking_is_not_answered_twice(monkeypatch):
+    assert cheap_voice.is_repeat("сколько сегодня потрачено на ИИ", "Сколько потрачено на ИИ сегодня?")
+    assert not cheap_voice.is_repeat("а какая погода завтра", "Сколько потрачено на ИИ сегодня?")
+    steps = [AgentStep(parts=[{"text": "Сегодня $0.33, сэр."}], text="Сегодня $0.33, сэр.", calls=[], finish="STOP")]
+    sess, models = _session(monkeypatch, steps=steps, heard="-")
+    sess.last_heard = "Сколько потрачено на ИИ сегодня?"
+
+    async def transcribe(data, mime, prompt=None):  # noqa: ANN001
+        return "сколько сегодня потрачено на ИИ"
+
+    from bot.context import ai
+
+    monkeypatch.setattr(ai, "transcribe_audio", transcribe)
+    asyncio.run(sess.on_phrase(b"\x00\x10" * 60000, overlapped=True))   # начал, пока JES думала
+    assert models == [] and not sess.out and "он (повтор)" in sess.result.transcript[-1]
+
+
+def test_phone_and_call_repeat_guard():
+    g = live_call.RepeatGuard()
+    assert not g.repeat("сколько денег потрачено на ИИ сегодня")
+    assert g.repeat("сколько потрачено на ИИ сегодня и сколько из этого потратила Джес")   # 29.09 из лога
+    assert not g.repeat("поставь будильник на шесть")
+
+
+def test_fast_mode_by_voice_really_switches(monkeypatch, tmp_path):
+    from bot import agent_tools, services
+    from bot.agent_tools import ToolContext
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    saved: list = []
+    monkeypatch.setattr(services, "save_persona_extra", lambda uid, fields: saved.append(fields))
+    res = asyncio.run(agent_tools.run("update_settings", {"jes_mode": "live"}, ToolContext(profile=_profile(), text="")))
+    assert saved == [{"voice_mode": "live", "call_mode": "live"}] and res.get("changed", res).get("jes_mode", "live") == "live"

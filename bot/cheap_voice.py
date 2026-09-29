@@ -103,6 +103,12 @@ def _words(text: str) -> set[str]:
     return set(re.sub(r"[^\w]+", " ", str(text or "").lower().replace("ё", "е")).split())
 
 
+def is_repeat(heard: str, before: str) -> bool:
+    """Тот же вопрос ещё раз («сколько потрачено сегодня?» → «сколько сегодня потрачено?»): большинство слов совпадает."""
+    h, b = {w for w in _words(heard) if len(w) >= 3}, {w for w in _words(before) if len(w) >= 3}
+    return bool(h) and bool(b) and len(h & b) / min(len(h), len(b)) >= 0.6
+
+
 def is_echo(heard: str, said: str) -> bool:
     """Расшифровка — это его ответ JES, вернувшийся эхом из трубки (почти те же слова), а не новая реплика."""
     h, s = _words(heard), _words(said)
@@ -119,6 +125,8 @@ class CheapSession(_Session):
         self.queue: asyncio.Queue[tuple[bytes, bool]] = asyncio.Queue()   # (фраза, началась поверх ответа JES)
         self._voice_at = -1e9          # когда JES последний раз звучал (для проверки эха)
         self.last_said = ""
+        self.last_heard = ""           # его последний вопрос (для «повторил, пока я думала»)
+        self.thinking = False          # идёт ход: модель думает или работает инструмент
         self.speaking = False
         # end_call/snooze: положить трубку, когда договорит прощание. Не hangup_after_speech: playout Live кладёт трубку через
         # 0.6 с тишины, а здесь прощание ещё только пишется и озвучивается
@@ -146,7 +154,9 @@ class CheapSession(_Session):
                 self._voice_at = loop.time()
             started, phrase, _noise = seg.feed(chunk)
             if started:
-                overlapped = loop.time() - self._voice_at < ECHO_WINDOW_S
+                # 29.09: начал говорить, пока JES думает, — может быть повтор того же вопроса («она не слышала»): сначала
+                # расшифровка, и повтор второй раз не отвечаем
+                overlapped = loop.time() - self._voice_at < ECHO_WINDOW_S or self.thinking
             if seg.active and self.out:
                 overlap_s += len(chunk) / 2 / RATE
                 if overlap_s >= BARGE_IN_S:
@@ -252,7 +262,12 @@ class CheapSession(_Session):
             if not heard or is_echo(heard, self.last_said):
                 logger.info("cheap voice: эхо/шум поверх ответа — пропускаю «%s»", heard[:60])
                 return
+            if is_repeat(heard, self.last_heard):
+                logger.info("cheap voice: повторил тот же вопрос, пока я думала, — второй раз не отвечаю «%s»", heard[:60])
+                self.result.transcript.append("он (повтор): " + heard)
+                return
             self.result.transcript.append("он: " + heard)
+            self.last_heard = heard
             await self.turn([{"text": f"{_stamp(self.profile)} {heard}"}], stt=None)
             return
         if self.mode != "wake" and len(pcm) / 2 / RATE <= QUICK_MAX_S and await self._quick(wav):
@@ -315,11 +330,18 @@ class CheapSession(_Session):
             return ""
 
     async def turn(self, parts: list[dict[str, Any]], *, stt: asyncio.Task | None) -> None:
-        from .handlers.agent import trim_history
-
         started = time.monotonic()
         idx = len(self.contents)
         self.contents.append({"role": "user", "parts": parts})
+        self.thinking = True
+        try:
+            await self._turn(parts, stt=stt, started=started, idx=idx)
+        finally:
+            self.thinking = False
+
+    async def _turn(self, parts: list[dict[str, Any]], *, stt: asyncio.Task | None, started: float, idx: int) -> None:
+        from .handlers.agent import trim_history
+
         text, calls = "", []
         # 29.09 его выбор «быстро»: платным ключом сразу (Flash-Lite, доли цента) — бесплатный уровень утром был перегружен
         # (503), и ответ на «Алло» шёл 7.6 с
@@ -352,6 +374,7 @@ class CheapSession(_Session):
             self.contents[idx] = {"role": "user", "parts": [{"text": f"{parts[0]['text']} {heard or '(неразборчиво)'}"}]}
             if heard:
                 self.result.transcript.append("он: " + heard)
+                self.last_heard = heard
         self.contents = trim_history(self.contents, max_messages=HISTORY_MESSAGES, max_chars=HISTORY_CHARS)
         say = "" if re.fullmatch(r"[\W_]*", text or "") else text
         if stt is not None and not calls and (not heard or is_echo(heard, self.last_said)):

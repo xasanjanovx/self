@@ -21,6 +21,8 @@ import asyncio
 import base64
 import json
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -245,6 +247,8 @@ PHONE_RULES = (
     "ВИДЕТЬ: камера — look, экран — screen_look; кадр придёт с результатом — сразу ответь по нему. Нажимать в других "
     "приложениях не умеешь. need_unlock — одной фразой попроси разблокировать.\n"
     "Разговор НЕ закрывается сам: после ответа молча жди. Речь, обращённую не к тебе (кто-то рядом, телевизор), — не отвечай. "
+    "Нужен bot_task, phone_task или поиск — СНАЧАЛА два слова («Секунду, сэр»), потом вызов: он должен слышать, что ты поняла. "
+    "Повторил вопрос, пока ты искала ответ, — это тот же вопрос: ответь ОДИН раз. "
     "Он часто говорит с людьми рядом (и по-узбекски): фраза без просьбы к тебе — МОЛЧИ, никаких «не поняла», «переспросите»; "
     "если с самого начала он говорит не с тобой — молча end_call. "
     "Прощается («всё», «пока», «bo'ldi») — end_call молча. «Скинь в чат» — send_to_chat.\n"
@@ -383,7 +387,7 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
     # 29.09: голосом — сразу платным ключом (Flash-Lite, доли цента). Бесплатный уровень отвечал 429/503, и каждая просьба
     # ждала лишние 1–4 с («то быстро, то медленно»); экономил он ~$0.2 в месяц
-    res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
+    res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls, free=False)
     return {"ok": True, "reply": res.text, "done": res.ctx.calls}
 
 
@@ -441,6 +445,7 @@ class _Session:
         self.profile = profile
         self.persona = persona
         self.provider = "studio"               # 29.09: через что идёт живой голос (studio | vertex) — для учёта кредита
+        self.repeat_guard = RepeatGuard()      # 29.09: повторил вопрос, пока JES искала ответ, — второй раз не отвечаем
         self.mode = mode
         self.system = system
         self.uid = profile.telegram_id
@@ -761,6 +766,9 @@ class _Session:
                 self.result.snooze_minutes = max(1, min(10, int(args.get("minutes") or 5)))
                 self.hangup_after_speech = True
                 result = {"ok": True, "minutes": self.result.snooze_minutes}
+            elif name == "bot_task" and self.repeat_guard.repeat(str(args.get("request") or "")):
+                logger.info("live: повтор той же просьбы — второй раз не выполняю")
+                result = {"ok": True, "duplicate": True, "note": REPEAT_NOTE}
             elif name == "bot_task":
                 result = await delegate(self.profile, str(args.get("request") or ""))
                 self.result.actions.extend(result.get("done") or [])
@@ -817,6 +825,31 @@ def _decode(msg) -> dict[str, Any] | None:  # noqa: ANN001
     except Exception:
         logger.debug("live: не разобрал сообщение", exc_info=True)
     return None
+
+
+REPEAT_WINDOW_S = 25.0
+REPEAT_NOTE = ("Он повторил тот же вопрос, пока ты искала ответ (думал, что ты не услышала): ответ уже прозвучал или сейчас "
+               "прозвучит. НЕ отвечай второй раз и ничего не говори; только если он прямо просит «повтори» — одной фразой.")
+
+
+def _request_words(text: str) -> set[str]:
+    return set(re.findall(r"\w{3,}", str(text or "").lower().replace("ё", "е")))
+
+
+class RepeatGuard:
+    """29.09 «если повторять, думая, что она не слышала, она 2 раза отвечает на один и тот же вопрос»: та же просьба к
+    помощнику (bot_task / phone_task) в течение 25 с после начала первой — повтор: второй раз не выполняем и не озвучиваем."""
+
+    def __init__(self) -> None:
+        self.last: tuple[set[str], float] | None = None
+
+    def repeat(self, request: str) -> bool:
+        words, now = _request_words(request), time.monotonic()
+        prev = self.last
+        self.last = (words, now)
+        if prev is None or not words or not prev[0] or now - prev[1] > REPEAT_WINDOW_S:
+            return False
+        return len(words & prev[0]) / min(len(words), len(prev[0])) >= 0.6
 
 
 def _jsonable(value: Any) -> dict[str, Any]:

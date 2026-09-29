@@ -648,6 +648,10 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
         result = {"ok": True}
     elif name == "send_to_chat":
         result = await _send_to_chat(sess.uid, str(args.get("text") or ""))
+    elif name in {"bot_task", "phone_task"} and sess.repeat_guard.repeat(str(args.get("request") or "")):
+        # 29.09: он повторил вопрос, пока JES искала ответ, — второй раз не делаем и не отвечаем
+        logger.info("phone live: повтор той же просьбы «%s» — второй раз не выполняю", str(args.get("request") or "")[:80])
+        result = {"ok": True, "duplicate": True, "note": live_call.REPEAT_NOTE}
     elif name == "bot_task":
         await sess.to_phone({"type": "status", "text": "Делаю…"})
         result = await live_call.delegate(sess.profile, str(args.get("request") or ""))
