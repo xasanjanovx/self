@@ -571,8 +571,10 @@ class PhoneLive(_Session):
         if self._in_text:
             said = "".join(self._in_text).strip()
             self.user_lines.append(said)
-            if self.morning_proof and len(re.findall(r"\w{2,}", said)) >= 2:
-                # ответил связно после «Доброе утро» и вопроса дня — проснулся: будильник в телефоне выключаем, звонки — отбой
+            if self.morning_proof and len(re.findall(r"\w{2,}", said)) >= 1:
+                # ответил после «Доброе утро» и вопроса дня — проснулся: будильник в телефоне выключаем, звонки — отбой.
+                # 29.09: было «хотя бы 2 слова» — он ответил на вопрос одним словом («Усман»), и будильник зазвонил снова
+                # с тем же вопросом. Кнопку «Проснулся» он уже нажал — любой его ответ голосом и есть проверка
                 self.morning_proof = False
                 self.track(self._morning_awake(said))
         if self._out_text:

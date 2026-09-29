@@ -60,7 +60,7 @@ def test_turn_speaks_runs_tools_and_hangs_up_after_goodbye(monkeypatch):
     assert sess.hang_after_turn and not sess.hangup_after_speech  # трубку — когда договорит прощание, а не сразу
     assert len(sess.out) == 4800                                 # прощание озвучено
     assert "он: да встал уже" in sess.result.transcript and "я: Отлично, шеф! Хорошего дня." in sess.result.transcript
-    assert seen_free and all(m == "" for m in seen_free)         # ходы — через бесплатный ключ
+    assert seen_free and all(m is None for m in seen_free)       # 29.09 «быстро»: ходы — сразу платным ключом
     # в историю — расшифровка, а не звук
     assert all("inline_data" not in p for m in sess.contents for p in m["parts"])
 
@@ -96,31 +96,33 @@ def test_light_live_call_prompt_is_small():
     assert len(tools) < 3500
 
 
-def test_voice_falls_back_to_free_microsoft_when_google_quota_is_out(monkeypatch):
-    from bot import ai as ai_mod
+def test_voice_is_always_jes_google_microsoft_only_if_google_fails(monkeypatch):
+    """29.09: квота бесплатной озвучки кончилась — ответил голос Microsoft («мужик какой-то»). Теперь всегда голос JES."""
     from bot import free_voice
     from bot.context import ai
 
     used = []
+    google_ok = {"on": True}
 
     async def speak(text, voice="Kore"):  # noqa: ANN001
-        used.append("google")
-        yield b"\x01\x00" * 10
+        used.append(("google", voice))
+        if google_ok["on"]:
+            yield bytes(20)
 
     async def ms(text, lang=None):  # noqa: ANN001
-        used.append("microsoft")
-        return b"\x02\x00" * 10
+        used.append(("microsoft", None))
+        return bytes(20)
 
     monkeypatch.setattr(ai, "speak_stream", speak)
     monkeypatch.setattr(free_voice, "synthesize", ms)
     monkeypatch.setattr(free_voice, "available", lambda: True)
-    monkeypatch.setattr(ai_mod, "free_tts_ready", lambda: False)
-    sess = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="assistant", system="x", decls=[])
-    asyncio.run(sess._speak("Готово, шеф."))
-    assert used == ["microsoft"]
+    sess = cheap_voice.CheapSession(_profile(), persona.Persona(voice="Sulafat"), mode="assistant", system="x", decls=[])
+    asyncio.run(sess._speak("Готово, сэр."))
+    assert used == [("google", "Sulafat")]
     used.clear()
-    asyncio.run(sess._speak("Дуа: اللهم"))  # арабский — только Google
-    assert used == ["google"]
+    google_ok["on"] = False                     # Google не ответил вовсе — тогда Microsoft, чтобы не молчать
+    asyncio.run(sess._speak("Готово, сэр."))
+    assert used == [("google", "Sulafat"), ("microsoft", None)]
 
 
 def test_echo_over_own_answer_never_reaches_the_model(monkeypatch):

@@ -142,14 +142,13 @@ class CheapSession(_Session):
             self._say_task = None
 
     async def _speak(self, text: str) -> None:
-        """Голос JES через бесплатный ключ Google; его дневная квота кончилась (28.09 — к вечеру) — бесплатный голос
-        Microsoft; и он не смог — Google платно. Арабские дуа будильника — только Google (Microsoft их не прочтёт)."""
-        from . import ai as ai_mod
+        """Всегда голос JES (Google: бесплатным ключом, пока есть квота, дальше платно — ~$0.001 за ответ). 29.09 его выбор:
+        утром квота кончилась, ответил голос Microsoft — «другой голос, какого-то мужика». Microsoft — только если Google
+        не ответил вовсе."""
         from . import free_voice, phone
 
         spoken = phone.speakable(text)
-        arabic = bool(re.search(r"[؀-ۿ]", spoken))
-        order = ["google", "microsoft"] if (ai_mod.free_tts_ready() or arabic or not free_voice.available()) else ["microsoft", "google"]
+        order = ["google", "microsoft"] if free_voice.available() else ["google"]
         self.speaking = True
         try:
             for how in order:
@@ -200,29 +199,20 @@ class CheapSession(_Session):
                 self.stop.set()
 
     async def on_phrase(self, pcm: bytes, *, overlapped: bool = False) -> None:
-        from . import ai as ai_mod
         from .phone_live import pcm_to_wav
 
         wav = pcm_to_wav(pcm, RATE)
         if overlapped:
             # началась поверх ответа JES (или сразу после): может быть эхо из трубки — сначала расшифровка, и эхо до модели
             # не доходит (иначе «Записала сорок тысяч» эхом записалось бы второй раз)
-            free = ai_mod.use_free("")
-            try:
-                heard = await self._transcribe(wav)
-            finally:
-                ai_mod.reset_free(free)
+            heard = await self._transcribe(wav)
             if not heard or is_echo(heard, self.last_said):
                 logger.info("cheap voice: эхо/шум поверх ответа — пропускаю «%s»", heard[:60])
                 return
             self.result.transcript.append("он: " + heard)
             await self.turn([{"text": f"{_stamp(self.profile)} {heard}"}], stt=None)
             return
-        free = ai_mod.use_free("")  # расшифровка — тоже через бесплатный ключ (задача берёт это с собой)
-        try:
-            stt = asyncio.create_task(self._transcribe(wav), name="cheap-stt")
-        finally:
-            ai_mod.reset_free(free)
+        stt = asyncio.create_task(self._transcribe(wav), name="cheap-stt")
         audio = {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode()}}
         await self.turn([{"text": _stamp(self.profile)}, audio], stt=stt)
 
@@ -240,31 +230,28 @@ class CheapSession(_Session):
             return ""
 
     async def turn(self, parts: list[dict[str, Any]], *, stt: asyncio.Task | None) -> None:
-        from . import ai as ai_mod
         from .handlers.agent import trim_history
 
         started = time.monotonic()
         idx = len(self.contents)
         self.contents.append({"role": "user", "parts": parts})
         text, calls = "", []
-        free = ai_mod.use_free("")  # той же моделью (Flash-Lite), но через бесплатный ключ Google
-        try:
-            for _ in range(MAX_STEPS):
-                step = await ai.agent_step(self.contents, system=self.system, tools=self.decls, thinking_budget=0, max_tokens=400)
-                self.contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "-"}]})
-                if not step.calls:
-                    text = step.text
-                    break
-                responses = []
-                for name, args in step.calls:
-                    calls.append(name)
-                    res = await self._run_one({"name": name, "args": args, "id": None})
-                    if self.hangup_after_speech:
-                        self.hangup_after_speech, self.hang_after_turn = False, True
-                    responses.append({"functionResponse": {"name": name, "response": _jsonable(res.get("response") or {})}})
-                self.contents.append({"role": "user", "parts": responses})
-        finally:
-            ai_mod.reset_free(free)
+        # 29.09 его выбор «быстро»: платным ключом сразу (Flash-Lite, доли цента) — бесплатный уровень утром был перегружен
+        # (503), и ответ на «Алло» шёл 7.6 с
+        for _ in range(MAX_STEPS):
+            step = await ai.agent_step(self.contents, system=self.system, tools=self.decls, thinking_budget=0, max_tokens=400)
+            self.contents.append({"role": "model", "parts": step.parts or [{"text": step.text or "-"}]})
+            if not step.calls:
+                text = step.text
+                break
+            responses = []
+            for name, args in step.calls:
+                calls.append(name)
+                res = await self._run_one({"name": name, "args": args, "id": None})
+                if self.hangup_after_speech:
+                    self.hangup_after_speech, self.hang_after_turn = False, True
+                responses.append({"functionResponse": {"name": name, "response": _jsonable(res.get("response") or {})}})
+            self.contents.append({"role": "user", "parts": responses})
         heard = ""
         if stt is not None:
             try:
