@@ -312,6 +312,10 @@ def _action(turn: PhoneTurn, kind: str, /, **fields: Any) -> dict[str, Any]:
 @ptool("phone_call", "Обычный звонок с телефона человеку из контактов или на номер («позвони маме», «набери Алишера», «qo'ng'iroq qil dadamga»).",
        {"who": WHO, "variants": VARIANTS}, ("who",))
 async def _phone_call(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    # 29.09 журнал: «позвони мне через телеграм» — модель звала контакт «Telegram» / «через телеграм» («В контактах нет»).
+    # «Через Telegram» — способ звонка, а не человек: без имени это «позвони мне»
+    who = re.sub(r"\b(через|по|в|orqali)?\s*(телеграм\w*|telegram\w*|tg)\b", " ", str(a.get("who") or ""), flags=re.IGNORECASE)
+    a = {**a, "who": " ".join(who.split()) or "мне"}
     if names.is_self(a.get("who")):
         # «позвони мне (через Telegram)» — звонит помощник JES в Telegram (как «позвони мне» в боте); 27.09 он просил,
         # а JES переспрашивал «Кому позвонить?»

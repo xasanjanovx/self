@@ -165,3 +165,18 @@ def test_fast_mode_by_voice_really_switches(monkeypatch, tmp_path):
     monkeypatch.setattr(services, "save_persona_extra", lambda uid, fields: saved.append(fields))
     res = asyncio.run(agent_tools.run("update_settings", {"jes_mode": "live"}, ToolContext(profile=_profile(), text="")))
     assert saved == [{"voice_mode": "live", "call_mode": "live"}] and res.get("changed", res).get("jes_mode", "live") == "live"
+
+
+def test_call_via_telegram_is_not_a_contact_name(monkeypatch):
+    from bot import call_assistant, caller, phone
+    from bot.agent_tools import ToolContext
+
+    calls: list = []
+    monkeypatch.setattr(caller, "available", lambda: True)
+    monkeypatch.setattr(call_assistant, "call_in_background", lambda profile, topic="": calls.append(topic))
+    turn = phone.PhoneTurn(uid=1, device={})
+    ctx = ToolContext(profile=_profile(), text="")
+    for who in ("Telegram", "через телеграм", "телеграм"):
+        res = asyncio.run(phone.PHONE_TOOLS["phone_call"].handler(turn, ctx, {"who": who}))
+        assert res.get("calling_via_telegram"), who
+    assert len(calls) == 3
