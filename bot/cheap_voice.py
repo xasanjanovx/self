@@ -295,7 +295,7 @@ class CheapSession(_Session):
         from . import ai as ai_mod
         from . import phone
 
-        path = ai_mod._tts_cache_path(ai_mod.FAST_TTS_MODEL, self.persona.voice, phone.speakable(self.phrase(kind)))
+        path = ai_mod._tts_cache_path(ai_mod.tts_model_now(), self.persona.voice, phone.speakable(self.phrase(kind)))
         try:
             return path.read_bytes() if path is not None and path.exists() else None
         except OSError:
@@ -390,7 +390,7 @@ async def prewarm(persona: Persona) -> int:
     made = 0
     for text in phrase_texts(persona):
         spoken = phone.speakable(text)
-        path = ai_mod._tts_cache_path(ai_mod.FAST_TTS_MODEL, persona.voice, spoken)
+        path = ai_mod._tts_cache_path(ai_mod.tts_model_now(), persona.voice, spoken)
         if path is None or path.exists():
             continue
         try:

@@ -31,11 +31,10 @@ TRIAL_DAYS = 90
 TRIAL_USD = 300.0
 VERTEX_DAILY_LIMIT_USD = 3.0      # на кредитах можно больше: живой голос весь день (на балансе AI Studio — $0.5)
 KEY_PAUSE_S = 600
-# имена моделей в Vertex, если отличаются от AI Studio (заполняется после проверки его ключа)
-VERTEX_MODELS: dict[str, str] = {}
-# 29.09: озвучки 3.8 Flash-Lite TTS (его голос Sulafat, он выбрал её на слух) в Vertex нет ни в одном регионе — только через
-# AI Studio (~$0.02 в день); в Vertex не пробуем, чтобы не тратить лишний круг
-STUDIO_ONLY = {"gemini-3.8-flash-lite-tts"}
+# имена моделей в Vertex, если отличаются от AI Studio. 29.09: озвучки 3.8 Flash-Lite TTS в Vertex нет ни в одном регионе —
+# он послушал пять образцов и выбрал 3.1 Flash TTS (первый звук 0.57 с)
+VERTEX_MODELS: dict[str, str] = {"gemini-3.8-flash-lite-tts": "gemini-3.1-flash-tts-preview"}
+STUDIO_ONLY: set[str] = set()
 
 _state: dict[str, Any] | None = None
 _paused_until = 0.0
@@ -134,7 +133,10 @@ def vertex_model(model: str) -> str:
 
 
 def url(model: str, method: str) -> str:
-    """generateContent | streamGenerateContent?alt=sse — в Vertex."""
+    """generateContent | streamGenerateContent?alt=sse — в Vertex. Знаем проект — путь проекта в global: короткий путь
+    уходит в europe-west1, где озвучки нет (29.09 проверено)."""
+    if project():
+        return f"https://aiplatform.googleapis.com/v1/projects/{project()}/locations/global/publishers/google/models/{vertex_model(model)}:{method}"
     return f"{VERTEX_BASE}/{vertex_model(model)}:{method}"
 
 

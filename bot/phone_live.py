@@ -33,6 +33,7 @@ import time
 import wave
 from typing import Any
 
+from . import ai as ai_mod
 from . import billing
 from . import journal
 from . import live_call
@@ -1088,7 +1089,7 @@ async def greetings(uid: int) -> dict[str, Any]:
     langs = dict(items)
     # разговор идёт голосом Qwen — и «Да, сэр» его голосом, чтобы голос не менялся посреди разговора
     use_qwen = persona.voice_model == "qwen" and qwen_live.available()
-    voice_key = f"qwen-{persona.qwen_voice}" if use_qwen else persona.voice
+    voice_key = f"qwen-{persona.qwen_voice}" if use_qwen else ai_mod.voice_tag(persona.voice)
     key = f"v{GREETINGS_VERSION}_{voice_key}_{persona.lang}_{persona.honorific}"
     cache_file = data_dir() / f"greetings_{key}.json"
     try:
@@ -1225,7 +1226,7 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     # v4 (28.09): кэш по готовой фразе, а не по имени — фраза без модели и считается мгновенно. Номер из книги звучит
     # именем, а все незнакомые номера — одной записью
     text = announcement_text(uid, name, app, persona.lang)
-    key = hashlib.sha1(f"v4|{persona.voice}|{persona.lang}|{text}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"v4|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"

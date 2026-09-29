@@ -879,7 +879,9 @@ async def voice_clip(persona: Persona, text: str) -> tuple[str, bytes] | None:
     from .tg_user import data_dir
 
     folder = data_dir() / "wake_clips"
-    path = folder / (hashlib.sha1(f"{persona.voice}|{text}".encode()).hexdigest()[:16] + ".pcm")
+    from . import ai as ai_mod
+
+    path = folder / (hashlib.sha1(f"{ai_mod.voice_tag(persona.voice)}|{text}".encode()).hexdigest()[:16] + ".pcm")
     try:
         if path.exists():
             return text, path.read_bytes()

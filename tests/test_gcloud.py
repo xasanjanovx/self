@@ -1,5 +1,6 @@
 """29.09: Gemini через Vertex AI (кредит $300 Google Cloud) — с переключателем и откатом на AI Studio."""
 import asyncio
+import json
 from datetime import date
 
 import httpx
@@ -121,3 +122,32 @@ def test_probe_explains_missing_iam_role_and_clears_on_success(monkeypatch, tmp_
     state["ok"] = True
     good, why = asyncio.run(gcloud.probe(ai._client))
     assert good and gcloud.status()["error"] is None
+
+
+def test_voice_goes_to_vertex_31_tts_and_is_cached_separately(monkeypatch, tmp_path):
+    import base64
+
+    from bot import ai as ai_mod
+
+    urls: list = []
+    pcm = b"\x02\x00" * 4800
+    body = "data: " + json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"data": base64.b64encode(pcm).decode()}}]}}]}) + "\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    ai, recorded = _setup(monkeypatch, tmp_path, handler)
+    monkeypatch.setenv("VERTEX_PROJECT", "123")
+    gcloud.set_provider("vertex")
+
+    async def say():  # noqa: ANN202
+        return b"".join([c async for c in ai.speak_stream("Да, сэр.", voice="Sulafat")])
+
+    assert asyncio.run(say()) == pcm and recorded == ["vertex"]
+    assert "projects/123/locations/global/publishers/google/models/gemini-3.1-flash-tts-preview:streamGenerateContent" in urls[0]
+    assert ai_mod.tts_model_now() == "gemini-3.1-flash-tts-preview" and ai_mod.voice_tag("Sulafat") == "Sulafat@gemini-3.1-flash-tts-preview"
+    asyncio.run(say())
+    assert len(urls) == 1                                       # второй раз — записанная фраза с диска
+    gcloud.set_provider("studio")                               # обратно на AI Studio — старые записи прежнего голоса
+    assert ai_mod.voice_tag("Sulafat") == "Sulafat" and ai_mod.tts_model_now() == "gemini-3.8-flash-lite-tts"

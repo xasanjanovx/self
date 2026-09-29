@@ -136,6 +136,18 @@ TTS_CACHE_FILES = 3000
 _TTS_CACHE_CHUNK = 9600       # из кэша — кусками по 0.2 с, как из потока
 
 
+def tts_model_now(model: str = FAST_TTS_MODEL) -> str:
+    """Какая модель озвучки звучит сейчас: в Vertex — своя (gcloud.VERTEX_MODELS). Записанные фразы хранятся по ней —
+    голоса разных моделей не смешиваются."""
+    return gcloud.vertex_model(model) if gcloud.use_vertex(model) else model
+
+
+def voice_tag(voice: str) -> str:
+    """Ключ записей голоса: как раньше для 3.8 Flash-Lite TTS (старые записи остаются), с моделью — для другой."""
+    now = tts_model_now()
+    return voice if now == FAST_TTS_MODEL else f"{voice}@{now}"
+
+
 def _tts_cache_path(model: str, voice: str, text: str) -> Path | None:
     """Файл озвучки короткой фразы (29.09 его просьба «записать голоса, чтобы не тратить каждый раз токены»).
     Только на сервере (DATA_DIR задан) — тесты и локальный запуск диск не трогают."""
@@ -590,7 +602,7 @@ class AIService:
         gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз.
         29.09: короткая фраза, которую уже озвучивали («Да, сэр, слышу вас», «Секунду»), — с диска: мгновенно и $0."""
         global _free_tts_paused_until
-        cached = _tts_cache_path(model, voice, text)
+        cached = _tts_cache_path(tts_model_now(model), voice, text)
         if cached is not None and cached.exists():
             pcm = cached.read_bytes()
             try:
@@ -653,7 +665,8 @@ class AIService:
                     if route == "free":
                         billing.record_free(model, usage)
                     else:
-                        billing.record(model, usage, kind="voice", provider="vertex" if route == "vertex" else "studio")
+                        billing.record(gcloud.vertex_model(model) if route == "vertex" else model, usage, kind="voice",
+                                       provider="vertex" if route == "vertex" else "studio")
             if complete and whole:
                 _tts_cache_save(cached, bytes(whole))
             return
