@@ -28,7 +28,11 @@ def test_lenient_name_when_voice_is_his(tmp_path, monkeypatch):
     assert not ok("позвони маме")[0]
     assert not ok("с")[0] and not ok("эс")[0]                          # 28.09: одиночное «с» — звуки из видео, не имя
     assert not ok("прогноз")[0] and not ok("вот так")[0]
-    assert not ok("какая погода")[0] and ok("какая погода", confident=True)[0]
+    # 29.09: вопросы без имени больше не будят — он говорил с людьми по-узбекски, и «что…» его голосом открывало JES
+    assert not ok("какая погода")[0] and not ok("какая погода", confident=True)[0]
+    assert not ok("что пен малида", confident=True)[0] and not ok("а что гандиотлерда бурат татуром", confident=True)[0]
+    assert not ok("джахонжонга бердим", confident=True)[0] and not ok("джасур келди")[0]   # узбекские имена — не «Джес»
+    assert not ok("позвони", confident=True)[0]                                              # глагол без команды
     # голос не «точно его» — ничего мягкого (28.09: иначе будили звуки из видео)
     assert not wakeword.lenient("дж позвони мам", strong=False, confident=True, uid=5)[0]
     assert not wakeword.lenient("с", strong=False, confident=True, uid=5)[0]

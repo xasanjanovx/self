@@ -215,13 +215,20 @@ def lenient(text: str, *, strong: bool, confident: bool, uid: int | None = None,
         return False, "", ""
     learned = variants(uid)
     for i, w in enumerate(words[: NAME_MAX_POS + 1]):
-        if w.startswith("дж") and len(w) <= 8:
+        # «джес», «джэс», «джейс», «джесси» — да; узбекские имена «Джахонгир», «Джасур», «Джонибек» — нет (29.09 он говорил
+        # с людьми по-узбекски, и имена в разговоре могли разбудить JES)
+        if (w == "дж" or re.match(r"дж(е|э|ей|ой)", w)) and len(w) <= 7:
             return True, " ".join(words[i + 1:]), f"имя как «{w}»"
     if words[0] in learned:
         return True, " ".join(words[1:]), f"имя как «{words[0]}»"
+    # 29.09 «ИИ сам по себе работает, когда я говорю с другими людьми»: его голос + «что…» («а что гандиотлерда…», «что пен
+    # малида» — это он по-узбекски с людьми) принимались как «имя обрезано». Теперь без имени — только настоящая команда,
+    # которую бот сам понимает («позвони маме», «открой ютуб»); вопросы («что…», «какая погода») — только с именем
     if confident:
+        from . import instant
+
         for i, w in enumerate(words[:2]):
-            if w in _VERBS or w in _QUESTIONS:
+            if w in _VERBS and instant.parse(" ".join(words[i:])) is not None:
                 return True, " ".join(words[i:]), "имя обрезано — сразу команда"
     return False, "", ""
 
