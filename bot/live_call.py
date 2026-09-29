@@ -99,10 +99,31 @@ def facts_only(memory: str) -> str:
     return str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
 
 
+def engine_line(engine: str) -> str:
+    """29.09 «не понимаю, какая модель отвечает, бесплатно или нет, почему то быстро, то медленно»: JES знает, на чём работает
+    прямо сейчас, и отвечает сама (утром на этот вопрос она искала в интернете «Gemini model version» и сказала общими словами)."""
+    from . import ai as ai_mod
+    from . import billing
+    from .context import ai
+
+    if engine == "live":
+        live = MODELS[0].replace("gemini-", "Gemini ").replace("-live", " Live")
+        how = (f"живой голос {live} (Google): слышит и отвечает сама, за ~1 с; платно — около $0.01–0.02 за минуту. "
+               f"После дневного лимита (${billing.DAILY_LIMIT_USD:g}) — экономный режим до полуночи, если он не скажет «включи лайв режим»")
+    else:
+        how = (f"экономный режим: его речь понимает и отвечает {ai.agent_model}, говорит голос {ai_mod.FAST_TTS_MODEL} (Google); "
+               "платно, но в 5–10 раз дешевле живого голоса. Ответ — через 2–3 с после его фразы, с поиском или делами — 3–5 с. "
+               "Частые фразы («алло», «спасибо», «секунду») звучат записанными — мгновенно и бесплатно")
+    return (f"\nТВОЙ РЕЖИМ СЕЙЧАС: {how}. Сегодня на ИИ потрачено ${billing.spent_today():.2f}. Бесплатный уровень Gemini в голосе не "
+            "используется — он перегружен и тормозил. Спросит, на какой ты модели, платно ли, почему то быстро, то медленно — "
+            "отвечай этим, БЕЗ поиска; подробный расход по дням и сервисам — bot_task.\n")
+
+
 def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str = "", memory: str = "",
-                       wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True, people: str = "") -> str:
+                       wake: dict[str, Any] | None = None, topic: str = "", with_time: bool = True, people: str = "",
+                       engine: str = "live") -> str:
     """with_time=False — без текущего времени: экономный режим телефона кладёт его в реплику, чтобы инструкция
-    не менялась каждую минуту и Gemini брал её из кэша (10% цены)."""
+    не менялась каждую минуту и Gemini брал её из кэша (10% цены). engine — на чём он сейчас говорит: live | cheap."""
     now = profile.now
     name = p.name_for(profile.first_name) or "пользователь"
     channel = ("Он позвал тебя голосом («JES») на своём Android-телефоне: ты его голосовой ассистент, как Siri, только умнее — "
@@ -116,9 +137,10 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
 
         lang = PHONE_LANG_MIRROR if p.mirror else lang_rule(p) + "\n"
         recent = recent_lines(memory, n=3, width=120)
-        return (f"Ты — JES (читается «Джес»), голосовой помощник {name} на его Android-телефоне; работаешь на Gemini 3.8 Live (Google). "
+        return (f"Ты — JES (читается «Джес»), голосовой помощник {name} на его Android-телефоне. "
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang}{style_rules(p, spoken=True)}\n"
                 + PHONE_VOICE + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
+                + engine_line(engine)
                 + (f"\n{people}\n" if people else "")
                 + (f"\n{recent}\n" if recent else "")
                 + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
@@ -184,7 +206,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     if mode == "assistant":
         # облегчённый звонок (28.09): короткие правила вместо ~4 тыс. знаков, память — только факты (без прошлых реплик)
         facts = facts_only(memory)
-        return (base + CALL_RULES.replace("{year}", str(now.year)) + opening
+        return (base + CALL_RULES.replace("{year}", str(now.year)) + opening + engine_line(engine)
                 + (f"\n{facts}\n" if facts else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
     return (base + rules + opening + "\n" + ABOUT_SELF
             + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
@@ -195,8 +217,8 @@ CALL_RULES = (
     "\nТы полноценный помощник: отвечай на любые вопросы коротко и по-человечески (1–2 фразы), без «не могу». Свежие факты "
     "(новости, цены, спорт, версии, «последний/новый») — web_search, сейчас {year} год; погода — weather; курс — currency_rates.\n"
     "ЕГО ДАННЫЕ И ДЕЙСТВИЯ — bot_task, просьбой целиком с числами и датами: трата, еда, задача, напоминание, «сколько потратил», "
-    "исправить/удалить, цели, долги, отчёты, будильник, запомнить о нём; про тебя саму (расходы на ИИ, модели, версии, сервисы) — тоже "
-    "bot_task. Выполняй сразу, без «точно?»; после — одной фразой, что сделано. Не обещай того, чего не сделаешь.\n"
+    "исправить/удалить, цели, долги, отчёты, будильник, запомнить о нём; про тебя саму — на какой модели сейчас: из «ТВОЙ "
+    "РЕЖИМ СЕЙЧАС», расходы подробно, версии, сервисы — тоже bot_task. Выполняй сразу, без «точно?»; после — одной фразой, что сделано. Не обещай того, чего не сделаешь.\n"
     "Длинное (список, рецепт, план) — send_to_chat и скажи, что отправила. Прощается («всё», «пока», «rahmat», «xayr», "
     "«bo'ldi») — коротко попрощайся и end_call.\n"
 )
@@ -329,7 +351,7 @@ _DELEGATE = {"name": "bot_task",
 _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_me", "test_wake_call"}
 # 28.09 он выбрал «облегчённый Live» для звонков Telegram: 20 инструментов (8 тыс. знаков) и инструкция (8 тыс.) оплачивались
 # в КАЖДОМ ответе — звонок 2 мин 42 с стоил $0.087. В звонке — только частое, всё с его данными — через bot_task
-# (умная модель через бесплатный ключ), как на телефоне с 27.09
+# (Flash-Lite платным ключом; 29.09 — без бесплатного, он тормозил), как на телефоне
 CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat"}
 _CALL_DELEGATE_DESC = ("Помощник из чата со ВСЕМИ инструментами бота: трата, еда, задача, напоминание, «сколько потратил», исправить/удалить, "
                        "цели, долги, отчёты, будильник, запомнить о нём; и про тебя саму — расходы на ИИ, модели, версии, сервисы. "
@@ -351,13 +373,9 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
         snapshot, memory = "", ""
     hint = "[голосовая просьба через JES: выполни инструментами и ответь одной-двумя короткими фразами, без списков, эмодзи и id]\n"
     decls = [d for d in agent_tools.declarations() if d["name"] not in _DELEGATE_SKIP]
-    from . import ai as ai_mod
-
-    free = ai_mod.use_free(ai_mod.FREE_SMART_MODEL)  # простые просьбы голосом — умной моделью через бесплатный ключ (если задан)
-    try:
-        res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
-    finally:
-        ai_mod.reset_free(free)
+    # 29.09: голосом — сразу платным ключом (Flash-Lite, доли цента). Бесплатный уровень отвечал 429/503, и каждая просьба
+    # ждала лишние 1–4 с («то быстро, то медленно»); экономил он ~$0.2 в месяц
+    res = await run_agent(profile, hint + request, [], snapshot=snapshot, memory=memory, decls=decls)
     return {"ok": True, "reply": res.text, "done": res.ctx.calls}
 
 

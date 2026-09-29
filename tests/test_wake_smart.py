@@ -1,6 +1,7 @@
 """27.09: будильник (звонок не обрывается, пока звук соединяется; «проснулся» — только ответом голосом), «Джес» умнее
 (его голос + кривое прочтение имени, обучение), команды сразу из проверки имени (без Live), бесплатный ключ Gemini."""
 import asyncio
+import base64
 import json
 
 import httpx
@@ -316,11 +317,42 @@ def test_tts_goes_free_first_then_paid(monkeypatch):
     monkeypatch.setattr(billing, "record_free", lambda *a, **k: None)
     monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "PAID"}))
 
-    async def run():  # noqa: ANN202
-        return [chunk async for chunk in ai.speak_stream("Готово")]
+    async def run(free: bool):  # noqa: ANN202
+        return [chunk async for chunk in ai.speak_stream("Готово", free=free)]
 
-    chunks = asyncio.run(run())
+    chunks = asyncio.run(run(True))
     assert seen == ["FREE", "PAID"] and chunks == [b"\x00\x00\x00"]
+    # 29.09: по умолчанию (голос в разговоре) — сразу платным, без лишней попытки бесплатным
+    seen.clear()
+    monkeypatch.setattr(ai_mod, "_free_tts_paused_until", 0.0)
+    assert asyncio.run(run(False)) == [b"\x00\x00\x00"] and seen == ["PAID"]
+
+
+def test_short_phrase_voice_is_cached_on_disk(monkeypatch, tmp_path):
+    from bot import billing
+    from bot.context import ai
+
+    calls: list[int] = []
+    pcm = b"\x01\x00" * 4800
+    body = "data: " + '{"candidates":[{"content":{"parts":[{"inlineData":{"data":"' + base64.b64encode(pcm).decode() + '"}}]}}]}' + "\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(billing, "record", lambda *a, **k: 0.0)
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    async def run(text: str):  # noqa: ANN202
+        return b"".join([chunk async for chunk in ai.speak_stream(text, voice="Sulafat")])
+
+    assert asyncio.run(run("Да, сэр, слышу вас.")) == pcm and len(calls) == 1
+    assert asyncio.run(run("Да, сэр, слышу вас.")) == pcm and len(calls) == 1  # второй раз — с диска, без запроса
+    long = "Завтра в Андижане будет тепло, до тридцати пяти градусов, но вечером станет прохладнее, возьмите кофту."
+    asyncio.run(run(long))
+    asyncio.run(run(long))
+    assert len(calls) == 3  # длинные ответы не храним
 
 
 def test_free_pause_follows_google_retry_delay():

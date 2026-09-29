@@ -130,6 +130,35 @@ def _backoff(attempt: int) -> float:
 
 
 FAST_TTS_MODEL = "gemini-3.8-flash-lite-tts"   # ответы Джарвиса на телефоне (экономный режим), потоком
+TTS_CACHE_MAX_CHARS = 90      # короткие фразы повторяются («Да, сэр, слышу вас», «Секунду») — их храним на диске
+TTS_CACHE_FILES = 3000
+_TTS_CACHE_CHUNK = 9600       # из кэша — кусками по 0.2 с, как из потока
+
+
+def _tts_cache_path(model: str, voice: str, text: str) -> Path | None:
+    """Файл озвучки короткой фразы (29.09 его просьба «записать голоса, чтобы не тратить каждый раз токены»).
+    Только на сервере (DATA_DIR задан) — тесты и локальный запуск диск не трогают."""
+    folder = _os.getenv("DATA_DIR")
+    text = " ".join(str(text or "").split())
+    if not folder or not text or len(text) > TTS_CACHE_MAX_CHARS:
+        return None
+    import hashlib
+
+    return Path(folder) / "tts_cache" / (hashlib.sha1(f"{model}|{voice}|{text}".encode()).hexdigest()[:20] + ".pcm")
+
+
+def _tts_cache_save(path: Path | None, pcm: bytes) -> None:
+    if path is None or len(pcm) < 4800:  # меньше 0.1 с — обрывок, не храним
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(pcm)
+        files = list(path.parent.glob("*.pcm"))
+        if len(files) > TTS_CACHE_FILES:  # старые (давно не звучавшие) — удаляем
+            for old in sorted(files, key=lambda f: f.stat().st_mtime)[: len(files) - TTS_CACHE_FILES + 300]:
+                old.unlink(missing_ok=True)
+    except Exception:
+        logger.warning("TTS cache: не сохранил", exc_info=True)
 
 
 def _usage_kind(model: str, payload: dict[str, Any]) -> str:
@@ -538,23 +567,37 @@ class AIService:
         logger.error("TTS gave up after 3 attempts (finish=%s)", last.get("finishReason"))
         return None
 
-    async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL):
+    async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL, free: bool = False):
         """Текст → речь потоком (PCM s16le, 24 kHz, mono): первые куски звука — через ~0.6 с, пока модель договаривает.
-        gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз."""
+        gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз.
+        29.09: короткая фраза, которую уже озвучивали («Да, сэр, слышу вас», «Секунду»), — с диска: мгновенно и $0."""
         global _free_tts_paused_until
+        cached = _tts_cache_path(model, voice, text)
+        if cached is not None and cached.exists():
+            pcm = cached.read_bytes()
+            try:
+                cached.touch()
+            except OSError:
+                pass
+            for i in range(0, len(pcm), _TTS_CACHE_CHUNK):
+                yield pcm[i: i + _TTS_CACHE_CHUNK]
+            return
         url = f"{self.base_url}/{model}:streamGenerateContent?alt=sse"
         payload = {
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
         }
-        # 28.09: 3.8 Flash-Lite TTS есть и на бесплатном уровне — сначала его бесплатным ключом, не вышло — платным
+        # 28.09: бесплатный уровень — только по просьбе (free=True). 29.09: в голосе он давал 429 уже к утру (квота ~5 фраз
+        # в день, экономия за месяц $0.005), а каждая неудачная попытка — лишний запрос перед платным
         routes: list[tuple[str, dict[str, str]]] = []
-        key = free_key()
+        key = free_key() if free else None
         if key and _time.monotonic() > _free_tts_paused_until:
             routes.append(("free", {"x-goog-api-key": key}))
         routes.append(("paid", {}))
         for route, headers in routes:
             usage: dict[str, Any] | None = None
+            whole = bytearray() if cached is not None else None
+            complete = False
             async with self._client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = (await response.aread()).decode("utf-8", "replace")
@@ -578,12 +621,18 @@ class AIService:
                             for part in (cand.get("content") or {}).get("parts") or []:
                                 blob = part.get("inlineData") if isinstance(part, dict) else None
                                 if blob and blob.get("data"):
-                                    yield base64.b64decode(blob["data"])
+                                    pcm = base64.b64decode(blob["data"])
+                                    if whole is not None:
+                                        whole.extend(pcm)
+                                    yield pcm
+                    complete = True
                 finally:
                     if route == "free":
                         billing.record_free(model, usage)
                     else:
                         billing.record(model, usage, kind="voice")
+            if complete and whole:
+                _tts_cache_save(cached, bytes(whole))
             return
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:

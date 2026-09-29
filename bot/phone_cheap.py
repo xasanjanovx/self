@@ -101,7 +101,7 @@ def system_prompt(profile, persona, memory: str) -> str:  # noqa: ANN001
     from . import phone
 
     return live_call.system_instruction(profile, persona, mode="phone", memory=memory, with_time=False,
-                                        people=phone.people_line(profile.telegram_id)) + CHEAP_RULES
+                                        people=phone.people_line(profile.telegram_id), engine="cheap") + CHEAP_RULES
 
 
 def clean_reply(text: str) -> str:
@@ -115,8 +115,9 @@ class Segmenter:
     """Звук с телефона → фразы: от ~0.3 с до начала речи до паузы VAD_SILENCE_MS. Порог — как у SpeechGate
     (шум подстраивается сам). Тишина, щелчки и кашель никуда не уходят — за них не платим."""
 
-    def __init__(self, rate: int = INPUT_RATE) -> None:
+    def __init__(self, rate: int = INPUT_RATE, silence_ms: int = VAD_SILENCE_MS) -> None:
         self.rate = rate  # телефон — 16 кГц; звонок Telegram (bot/cheap_voice.py) — 24 кГц
+        self.silence_s = silence_ms / 1000  # пауза, после которой фраза кончилась (звонок — короче: ответ быстрее)
         self.floor = 300.0
         self.active = False
         self._pre: deque[bytes] = deque()
@@ -156,7 +157,7 @@ class Segmenter:
             self._quiet_s = 0.0
         else:
             self._quiet_s += dur
-        if self._quiet_s < VAD_SILENCE_MS / 1000 and self._len_s < MAX_UTTERANCE_S:
+        if self._quiet_s < self.silence_s and self._len_s < MAX_UTTERANCE_S:
             return False, None, False
         self.active = False
         cut = int(max(0.0, self._quiet_s - TAIL_S) * self.rate) * 2
@@ -241,11 +242,13 @@ class Speaker:
             self.cancelled = False
             self.speaking = True
             try:
-                if await self._say_free(text) or self.cancelled:
-                    return not self.cancelled
+                # 29.09 его выбор «всегда голос JES»: сначала голос Google (тот же Sulafat, фразы — из кэша), бесплатный
+                # голос Microsoft звучал как «другой, мужской» — только если Google не ответил
                 got = await self._say_tts(text)
                 if got or self.cancelled:
                     return got
+                if await self._say_free(text) or self.cancelled:
+                    return not self.cancelled
                 return await self._ready() and await self._say_live(text)
             finally:
                 self.speaking = False

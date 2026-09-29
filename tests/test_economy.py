@@ -391,7 +391,8 @@ async def _no_free(text, lang=None):
     return None
 
 
-def test_speaker_uses_free_voice_first(monkeypatch):
+def test_speaker_uses_jes_voice_first_microsoft_only_if_google_fails(monkeypatch):
+    # 29.09 «всегда голос JES»: голос Microsoft звучал как мужской — только когда Google не ответил
     sent: list[bytes] = []
 
     async def send(b: bytes) -> None:
@@ -400,13 +401,19 @@ def test_speaker_uses_free_voice_first(monkeypatch):
     async def free(text, lang=None):
         return bytes([1, 0]) * 24000  # 1 с звука
 
-    async def paid(text, *, voice="Kore", model=""):
-        raise AssertionError("платный TTS не нужен")
+    async def google(text, *, voice="Kore", model=""):
+        yield b"\x02\x00" * 10
+
+    async def broken(text, *, voice="Kore", model=""):
+        raise RuntimeError("TTS 500")
         yield b""  # noqa
 
     monkeypatch.setattr("bot.free_voice.synthesize", free)
-    monkeypatch.setattr(phone_cheap.ai, "speak_stream", paid)
+    monkeypatch.setattr(phone_cheap.ai, "speak_stream", google)
     speaker = phone_cheap.Speaker(_profile(), Persona(lang="ru"), send)
+    assert asyncio.run(speaker.say("Готово.")) is True and sent == [b"\x02\x00" * 10]
+    sent.clear()
+    monkeypatch.setattr(phone_cheap.ai, "speak_stream", broken)
     assert asyncio.run(speaker.say("Готово.")) is True
     assert sum(len(b) for b in sent) == 48000 and len(sent) == 5
 

@@ -507,6 +507,29 @@ async def msg_alarm_time(message: Message, state: FSMContext) -> None:
 
 
 # ------------------------------------------------------------------ джарвис: голос, язык, характер
+def engine_lines(profile: Profile, p) -> list[str]:  # noqa: ANN001
+    """29.09 «не понимаю, какая модель отвечает, бесплатно или нет, почему то быстро, то медленно» — прямо в настройках."""
+    from .. import billing, live_call
+    from ..context import ai
+
+    live = live_call.MODELS[0].replace("gemini-", "Gemini ").replace("-live", " Live")
+    cheap = f"{ai.agent_model.replace('gemini-', 'Gemini ')} + {profile.tr('голос', 'ovoz')} {p.voice}"
+    phone_live = p.voice_mode == "live" and billing.live_allowed("phone")
+    call_live = getattr(p, "call_mode", "live") != "economy" and billing.live_allowed("assistant")
+    fast, slow = profile.tr("~1 с", "~1 s"), profile.tr("2–3 с", "2–3 s")
+    spent, limit = billing.spent_today(), billing.DAILY_LIMIT_USD
+    lines = [
+        f"📱 {profile.tr('Телефон', 'Telefon')}: <b>" + (f"⚡ {live}</b> · {fast}" if phone_live else f"🌿 {cheap}</b> · {slow}")
+        + ("" if phone_live or p.voice_mode != "live" else profile.tr(" (лимит дня — «включи лайв режим»)", " (kunlik limit)")),
+        f"📞 {profile.tr('Звонки', 'Qo`ng`iroqlar')}: <b>" + (f"⚡ {live}</b> · {fast}" if call_live else f"🌿 {cheap}</b> · {slow}"),
+        f"💵 {profile.tr('Сегодня', 'Bugun')}: <b>${spent:.2f}</b> {profile.tr('из', '/')} ${limit:g} · "
+        + profile.tr("всё платно, бесплатный Gemini в голосе не используется (тормозил)", "hammasi pullik, tekin Gemini ovozda ishlatilmaydi"),
+        "⏱ " + profile.tr("Медленнее бывает: экономный режим, поиск/погода (+1–2 с), слабая сеть",
+                          "Sekinroq: tejamkor rejim, qidiruv/ob-havo (+1–2 s), zaif internet"),
+    ]
+    return lines
+
+
 async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, notice: str | None = None) -> None:
     from .. import caller
     from .. import persona as persona_mod
@@ -526,7 +549,8 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
         f"📞 {'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}"
         + profile.tr(" · будильник — бесплатным голосом", " · budilnik — tekin ovoz"),
     ]
-    text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines))
+    text = ui.join(ui.title("🎭", "Ovoz va xarakter" if uz else "Голос и характер"), ui.card(f"<b>{'Hozir' if uz else 'Сейчас'}</b>", lines),
+                   ui.card(f"<b>{profile.tr('Кто отвечает прямо сейчас', 'Hozir kim javob beradi')}</b>", engine_lines(profile, p)))
     if notice:
         text += f"\n\n{notice}"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, voice_mode=p.voice_mode)

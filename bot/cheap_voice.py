@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import random
 import re
 import time
 from typing import Any
@@ -38,6 +39,46 @@ STT_WAIT_S = 2.5            # расшифровка обычно готова �
 HISTORY_MESSAGES = 16
 HISTORY_CHARS = 10000
 SAY_CHUNK = 9600               # голос Microsoft — кусками по 0.2 с
+CALL_SILENCE_MS = 700          # 29.09: фраза кончилась — 0.7 с тишины (было 1 с, как на телефоне): каждый ответ на 0.3 с раньше
+QUICK_MAX_S = 2.2              # короткая фраза («алло», «спасибо») — сначала свой распознаватель (~0.1 с) и записанный ответ
+SLOW_TOOLS = {"web_search", "bot_task", "weather", "currency_rates", "send_to_chat"}  # пока ищет — «Секунду, сэр» записанным голосом
+
+# 29.09 его просьба «записать несколько голосов, чтобы не тратить каждый раз токены»: частые реплики — фразами, озвученными
+# один раз (лежат на диске, ai.speak_stream), без модели и за ~0.2 с. {t} — «сэр» (чаще) или «шеф», как он просил
+_QUICK = (
+    ("hear", re.compile(r"(алло|ало|алё|але|алле|allo|alo)( (алло|ало|алё|allo|alo))*|((ты|вы) )?(меня )?слыш(ишь|ите)( меня)?|"
+                        r"(ты|вы) (тут|здесь|где)|эй|ау")),
+    ("thanks", re.compile(r"(большое )?спасибо( большое)?|благодарю|(katta )?rahmat|(катта )?рахмат|раҳмат")),
+    ("bye", re.compile(r"(ну |ладно |давай |всё |все )?пока|до свидания|отбой|xayr|хайр")),
+)
+PHRASES = {
+    "ru": {"hear": ("Да, {t}, слышу вас хорошо.", "Я здесь, {t}. Слушаю."),
+           "thanks": ("Всегда рада помочь, {t}!", "Пожалуйста, {t}!"),
+           "bye": ("До связи, {t}!", "Всего доброго, {t}!"),
+           "wait": ("Секунду, {t}.", "Сейчас посмотрю, {t}.", "Минутку, {t}.")},
+    "uz": {"hear": ("Ha, {t}, eshitaman.", "Shu yerdaman, {t}. Eshitaman."),
+           "thanks": ("Arzimaydi, {t}!", "Doim xizmatingizda, {t}!"),
+           "bye": ("Xayr, {t}!", "Salomat bo'ling, {t}!"),
+           "wait": ("Bir soniya, {t}.", "Hozir qarayman, {t}.")},
+}
+_TITLES = {"ru": ("сэр", "сэр", "шеф"), "uz": ("ser", "ser", "shef")}
+
+
+def quick_kind(text: str) -> str | None:
+    """«алло», «ты меня слышишь», «спасибо», «пока» — целиком, без продолжения («пока не надо» — не прощание)."""
+    t = re.sub(r"[^\w' ]+", " ", str(text or "").lower().replace("ё", "е")).strip()
+    t = " ".join(t.split())
+    for kind, pattern in _QUICK:
+        if t and pattern.fullmatch(t):
+            return kind
+    return None
+
+
+def phrase_texts(persona: Persona) -> list[str]:
+    """Все записанные фразы этого голоса — озвучить заранее (prewarm)."""
+    lang = persona.lang if persona.lang in PHRASES else "ru"
+    langs = [lang] + (["uz"] if persona.mirror and lang != "uz" else [])
+    return [p.format(t=t) for lg in langs for group in PHRASES[lg].values() for p in group for t in dict.fromkeys(_TITLES[lg])]
 
 CHEAP_RULES = (
     "\nЭКОНОМНЫЙ ГОЛОС. Его реплика приходит записью голоса с пометкой времени в квадратных скобках; твой текст телефон "
@@ -90,7 +131,7 @@ class CheapSession(_Session):
         """Звук из трубки → фразы. Говорит поверх ответа JES — перебил: замолкаем."""
         from .phone_cheap import Segmenter
 
-        seg = Segmenter(RATE)
+        seg = Segmenter(RATE, silence_ms=CALL_SILENCE_MS)
         loop = asyncio.get_running_loop()
         overlap_s = 0.0
         overlapped = False
@@ -99,12 +140,14 @@ class CheapSession(_Session):
                 chunk = await asyncio.wait_for(incoming.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
-            if self.out or self.speaking:
+            # 29.09 «он вообще не отвечает мне»: «перебил» считался и пока ответ ещё озвучивался (звука в трубке нет) — он
+            # говорил «алло?» в тишину, и ответ отменялся, не прозвучав. Теперь — только пока голос JES правда звучит
+            if self.out:
                 self._voice_at = loop.time()
             started, phrase, _noise = seg.feed(chunk)
             if started:
                 overlapped = loop.time() - self._voice_at < ECHO_WINDOW_S
-            if seg.active and (self.out or self.speaking):
+            if seg.active and self.out:
                 overlap_s += len(chunk) / 2 / RATE
                 if overlap_s >= BARGE_IN_S:
                     self.interrupt()
@@ -212,9 +255,51 @@ class CheapSession(_Session):
             self.result.transcript.append("он: " + heard)
             await self.turn([{"text": f"{_stamp(self.profile)} {heard}"}], stt=None)
             return
+        if self.mode != "wake" and len(pcm) / 2 / RATE <= QUICK_MAX_S and await self._quick(wav):
+            return
         stt = asyncio.create_task(self._transcribe(wav), name="cheap-stt")
         audio = {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode()}}
         await self.turn([{"text": _stamp(self.profile)}, audio], stt=stt)
+
+    async def _quick(self, wav: bytes) -> bool:
+        """«Алло», «ты меня слышишь», «спасибо», «пока» — свой распознаватель (~0.1 с) и записанная фраза: без модели и токенов."""
+        from . import wakeword
+
+        started = time.monotonic()
+        try:
+            heard = await wakeword.check(wav)
+        except Exception:
+            logger.warning("cheap voice: распознаватель", exc_info=True)
+            return False
+        said = (heard or {}).get("text") or ""
+        kind = quick_kind(said)
+        if kind is None:
+            return False
+        answer = self.phrase(kind, uz=bool(re.search(r"рахмат|раҳмат|rahmat|хайр|xayr", said.lower())))
+        self.result.transcript.append("он: " + said)
+        # модель знает, что уже ответили, — если разговор продолжится
+        self.contents += [{"role": "user", "parts": [{"text": f"{_stamp(self.profile)} {said}"}]},
+                          {"role": "model", "parts": [{"text": answer}]}]
+        logger.info("cheap voice: мгновенно «%s» → «%s» за %.2f с (записанная фраза, без модели)", said, answer, time.monotonic() - started)
+        if kind == "bye":
+            self.hang_after_turn = True
+        await self.say(answer)
+        return True
+
+    def phrase(self, kind: str, *, uz: bool = False) -> str:
+        lang = "uz" if uz and self.persona.mirror else (self.persona.lang if self.persona.lang in PHRASES else "ru")
+        return random.choice(PHRASES[lang][kind]).format(t=random.choice(_TITLES[lang]))
+
+    def recorded(self, kind: str) -> bytes | None:
+        """Записанная фраза с диска — сразу, без сети (ещё не записана — None, её озвучит prewarm)."""
+        from . import ai as ai_mod
+        from . import phone
+
+        path = ai_mod._tts_cache_path(ai_mod.FAST_TTS_MODEL, self.persona.voice, phone.speakable(self.phrase(kind)))
+        try:
+            return path.read_bytes() if path is not None and path.exists() else None
+        except OSError:
+            return None
 
     async def on_text(self, text: str) -> None:
         """Реплика «от системы» (тишина — позвать его снова): без звука, текстом."""
@@ -244,6 +329,12 @@ class CheapSession(_Session):
             if not step.calls:
                 text = step.text
                 break
+            if not calls and self.mode != "wake" and not self.out and any(n in SLOW_TOOLS for n, _ in step.calls):
+                # поиск, погода, дела из чата — это 1–3 с: сразу «Секунду, сэр» записанным голосом, чтобы не было тишины
+                # (в тишину он говорил «алло?» и перебивал ответ)
+                wait = self.recorded("wait")
+                if wait:
+                    self.out.extend(wait)
             responses = []
             for name, args in step.calls:
                 calls.append(name)
@@ -287,6 +378,41 @@ class CheapSession(_Session):
                                if not self.heard_user else "[Он давно молчит. Коротко спроси, всё ли в порядке и слышит ли он тебя.]")
 
 
+_prewarming: set[asyncio.Task] = set()
+
+
+async def prewarm(persona: Persona) -> int:
+    """Озвучить заранее записанные фразы этого голоса, которых ещё нет на диске (один раз навсегда, ~$0.0003 за фразу).
+    По одной с паузой — у озвучки лимит запросов в минуту. Возвращает, сколько записала."""
+    from . import ai as ai_mod
+    from . import phone
+
+    made = 0
+    for text in phrase_texts(persona):
+        spoken = phone.speakable(text)
+        path = ai_mod._tts_cache_path(ai_mod.FAST_TTS_MODEL, persona.voice, spoken)
+        if path is None or path.exists():
+            continue
+        try:
+            async for _ in ai.speak_stream(spoken, voice=persona.voice):
+                pass
+            made += 1
+        except Exception as exc:
+            logger.info("cheap voice: фразу «%s» не записала: %s", text, str(exc)[:120])
+        await asyncio.sleep(1.5)
+    if made:
+        logger.info("cheap voice: записала %s фраз голосом %s", made, persona.voice)
+    return made
+
+
+def _prewarm_soon(persona: Persona) -> None:
+    if _prewarming:
+        return
+    task = asyncio.create_task(prewarm(persona), name="cheap-prewarm")
+    _prewarming.add(task)
+    task.add_done_callback(_prewarming.discard)
+
+
 async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mode: str, topic: str = "",
                    wake: dict[str, Any] | None = None) -> LiveResult:
     """Звонок уже набирается (dial): готовим приветствие (запись с диска), взяли трубку — разговор экономным голосом."""
@@ -294,11 +420,13 @@ async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mo
     from . import billing
 
     memory = await extra.memory_prompt(profile.telegram_id) if mode == "assistant" else ""
-    system = live_call.system_instruction(profile, persona, mode=mode, memory=memory, wake=wake, topic=topic) + CHEAP_RULES
+    system = live_call.system_instruction(profile, persona, mode=mode, memory=memory, wake=wake, topic=topic, engine="cheap") + CHEAP_RULES
     if mode == "assistant":
         system += billing.voice_note()
     decls = live_call.tool_declarations(mode, full=True)
     sess = CheapSession(profile, persona, mode=mode, system=system, decls=decls)
+    if mode != "wake":
+        _prewarm_soon(persona)
     if mode == "wake":
         clip = asyncio.create_task(live_call.wake_clip(profile, persona), name="cheap-clip")
     elif not topic:
@@ -334,8 +462,9 @@ async def answer_call(profile: Profile, persona: Persona) -> LiveResult:
     from . import agent_tools_extra as extra
 
     memory = await extra.memory_prompt(profile.telegram_id)
-    system = live_call.system_instruction(profile, persona, mode="assistant", memory=memory) + CHEAP_RULES
+    system = live_call.system_instruction(profile, persona, mode="assistant", memory=memory, engine="cheap") + CHEAP_RULES
     sess = CheapSession(profile, persona, mode="assistant", system=system, decls=live_call.tool_declarations("assistant", full=True))
+    _prewarm_soon(persona)
     clip = asyncio.create_task(live_call.hello_clip(profile, persona), name="cheap-clip")
     call = await caller.accept_stream_call(profile.telegram_id)
     if not call.get("answered"):
