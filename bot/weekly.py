@@ -26,6 +26,8 @@ from .profile import Profile
 logger = logging.getLogger(__name__)
 
 CAPTION_MAX = 1000
+_MUSIC = re.compile(r"\b(audio|klip\w*|clip\w*|popuri|taronalar\w*|music|song\w*|mp3|official video|песн\w*|музык\w*|клип\w*)\b",
+                    re.IGNORECASE)
 
 
 async def facts(profile: Profile) -> dict[str, Any]:
@@ -55,7 +57,9 @@ async def facts(profile: Profile) -> dict[str, Any]:
     if habits:
         out["daily"] = [daily_tasks.describe(h, today) for h in habits[:6]]
     since = time.time() - 7 * 86400
-    watched = [r for r in lessons.items(uid) if float(r.get("at") or 0) >= since]
+    # уроки — не музыка и не ролики, открытые на секунду (MediaWatcher видит весь YouTube)
+    watched = [r for r in lessons.items(uid) if float(r.get("at") or 0) >= since and int(r.get("position") or 0) >= 60
+               and int(r.get("duration") or 0) >= 8 * 60 and not _MUSIC.search(str(r.get("title") or ""))]
     if watched:
         out["lessons"] = [{"title": r["title"][:70], "at": lessons.fmt(int(r.get("position") or 0)),
                            "of": lessons.fmt(int(r.get("duration") or 0)), "finished": lessons.finished(r)} for r in watched[:5]]
@@ -85,7 +89,7 @@ def text(profile: Profile, f: dict[str, Any]) -> str:
         if m.get("income"):
             lines.append(f"💰 {tr('Доход', 'Daromad')}: {fin.fmt_money(m['income'])} {profile.currency}")
     t = f.get("tasks")
-    if t:
+    if t and (t["done"] or t["open"]):
         lines.append(f"✅ {tr('Задачи', 'Vazifalar')}: {tr('сделано', 'bajarildi')} {t['done']}, {tr('открыто', 'ochiq')} {t['open']}"
                      + (f", {tr('просрочено', 'muddati o`tgan')} {t['overdue']}" if t["overdue"] else ""))
     for d in f.get("daily") or []:

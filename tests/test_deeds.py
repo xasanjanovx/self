@@ -101,3 +101,26 @@ def test_weekly_text_and_voice(monkeypatch):
     kind, caption = sent[0]
     assert kind == "voice" and "Итоги недели" in caption and "+25%" in caption and "сделано 5" in caption
     assert "English lesson 12" in caption and "до такбира" in caption and "JES: дел 31" in caption
+
+
+def test_weekly_lessons_skip_music_and_barely_opened(monkeypatch, tmp_path):
+    import time as _t
+
+    from bot import lessons
+
+    now = _t.time()
+    rows = [{"title": "UZmir - Ummon Popuri (Audio) | barcha XIT taronalari", "position": 136, "duration": 414, "at": now},
+            {"title": "Chunki Bu Biz Kliplar to'plami", "position": 104, "duration": 1717, "at": now},
+            {"title": "I Tested Sonnet 5.5 vs Opus 5.5", "position": 5, "duration": 1548, "at": now},
+            {"title": "How to Build $10K Websites in Minutes (Claude AI)", "position": 992, "duration": 1509, "at": now}]
+    monkeypatch.setattr(lessons, "items", lambda uid: rows)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    async def empty(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        return []
+
+    monkeypatch.setattr(weekly.services, "finance_entries", empty)
+    monkeypatch.setattr(weekly.services, "wake_history", empty)
+    monkeypatch.setattr(weekly.db, "available", lambda name: False)
+    f = asyncio.run(weekly.facts(_profile()))
+    assert [x["title"] for x in f["lessons"]] == ["How to Build $10K Websites in Minutes (Claude AI)"]
