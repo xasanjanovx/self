@@ -202,6 +202,34 @@ _WAKE_PROMPT = (
 
 
 MEDIA_MIN_VOICE = 0.5  # пока играет видео (без эхоподавления) — сходство с его голосом не ниже этого
+# 2.16 (29.09): за сутки телефон присылал 3331 ложную проверку «Джес» (шум «с», его разговор, чужие голоса) — ~330 МБ интернета
+# и батарея. Серия отказов — телефон 20 с шлёт только уверенное «Джес»
+COOLDOWN_AFTER = 3
+COOLDOWN_WINDOW_S = 60.0
+COOLDOWN_S = 20
+_rejects: dict[int, list[float]] = {}
+
+
+def _cooldown(uid: int | None, confident: bool) -> int:
+    """Ещё один отказ: сколько секунд телефону не присылать неуверенные срабатывания (0 — можно)."""
+    if uid is None or confident:
+        return 0
+    now = time.monotonic()
+    recent = [t for t in _rejects.get(uid, []) if now - t <= COOLDOWN_WINDOW_S] + [now]
+    _rejects[uid] = recent[-10:]
+    return COOLDOWN_S if len(recent) >= COOLDOWN_AFTER else 0
+
+
+def ulaw_to_pcm16(data: bytes) -> bytes:
+    """G.711 μ-law → PCM 16 бит (2.16: телефон шлёт запись «Джес» вдвое меньше)."""
+    import numpy as np
+
+    u = ~np.frombuffer(data, dtype=np.uint8)
+    sign = u & 0x80
+    exponent = ((u >> 4) & 0x07).astype(np.int32)
+    mantissa = (u & 0x0F).astype(np.int32)
+    sample = (((mantissa << 3) + 0x84) << exponent) - 0x84
+    return np.where(sign != 0, -sample, sample).astype(np.int16).tobytes()
 
 
 async def wake_check(request: web.Request) -> web.Response:
@@ -212,13 +240,18 @@ async def wake_check(request: web.Request) -> web.Response:
     (phone_live.prewarm): подтвердили — телефон подключается к готовой сессии.
     """
     data = await _json(request)
+    from . import phone_live, voiceprint, wakeword
+
     try:
-        audio = base64.b64decode(str(data.get("audio") or ""), validate=False)
+        if data.get("audio_ulaw"):  # 2.16: μ-law 8 бит, 16 кГц, без тишины перед словом
+            pcm = ulaw_to_pcm16(base64.b64decode(str(data["audio_ulaw"]), validate=False))
+            audio = phone_live.pcm_to_wav(pcm, int(data.get("rate") or 16000)) if pcm else b""
+        else:
+            audio = base64.b64decode(str(data.get("audio") or ""), validate=False)
     except (binascii.Error, ValueError):
         return web.json_response({"error": "bad audio"}, status=400)
     if not audio:
         return web.json_response({"error": "audio required"}, status=400)
-    from . import phone_live, voiceprint, wakeword
 
     started = time.monotonic()
     uid = owner_id()
@@ -231,7 +264,8 @@ async def wake_check(request: web.Request) -> web.Response:
         logger.info("wake check: чужой голос (сходство %s, z %s, порог %s, банк %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
                     voice.get("threshold"), voice.get("bank"), took, (heard or {}).get("text", ""))
         _reject(uid, f"чужой голос: «{(heard or {}).get('text', '')[:60]}»")
-        return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score")})
+        return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score"),
+                                  "cooldown": _cooldown(uid, bool(data.get("confident")))})
     if heard is not None:
         # 26.09: пустая запись (кашель, стук) при «уверенном» телефоне тоже пропускалась — JES открывался сам по себе.
         # Теперь — только если распознаватель услышал имя
@@ -266,7 +300,8 @@ async def wake_check(request: web.Request) -> web.Response:
                     (" [видео" + (", эхоподавление]" if aec else "]")) if media else "", f" — {why}" if why else "")
         if not ok:
             _reject(uid, f"не «Джес»: «{heard['text'][:60]}»")
-            return web.json_response({"ok": False, "text": heard["text"], "fast": True})
+            return web.json_response({"ok": False, "text": heard["text"], "fast": True,
+                                      "cooldown": _cooldown(uid, bool(data.get("confident")))})
         if data.get("act") and after and uid is not None:
             # 27.09 «моментально и бесплатно»: телефон дождался конца фразы — команду делаем сразу, без разговора с Gemini
             done = await _instant_command(uid, heard["text"], after, data.get("device") if isinstance(data.get("device"), dict) else {})

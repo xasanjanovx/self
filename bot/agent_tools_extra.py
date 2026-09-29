@@ -361,7 +361,10 @@ async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         },
         "free_key": ai_mod.free_status(),
         # 29.09: через что идёт Gemini — его баланс AI Studio или кредит Google Cloud через Vertex AI ($300 на 90 дней)
-        "google_ai": {**gcloud.status(), "vertex_credit_used_usd": billing.vertex_spent()},
+        # 29.09 он трижды спросил «сколько осталось» — JES не могла ответить: остаток кредита теперь считаем явно
+        "google_ai": {**gcloud.status(), "vertex_credit_used_usd": billing.vertex_spent(),
+                      "vertex_credit_left_usd": round(gcloud.TRIAL_USD - billing.vertex_spent()["total"], 2),
+                      "ai_studio_balance": "см. balance_usd; None — он ещё не называл остаток в AI Studio: попроси назвать и вызови set_ai_balance"},
         "services": {
             "Google AI Studio (Gemini API)": "два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)",
             "сервер": "Hetzner, 167.235.249.200, Docker: бот JES (codex-self-bot) и бот Ishdasiz (codex-ishdasiz-bot)",
