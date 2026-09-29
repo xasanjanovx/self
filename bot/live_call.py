@@ -101,6 +101,17 @@ def facts_only(memory: str) -> str:
     return str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
 
 
+def where_line(profile: Profile) -> str:
+    """29.09: «чтобы JES знал, где я нахожусь именно в этот момент» — последнее место с телефона (bot/where.py)."""
+    from . import where
+
+    try:
+        return where.now_line(profile.telegram_id)
+    except Exception:
+        logger.warning("where line failed", exc_info=True)
+        return ""
+
+
 def engine_line(engine: str) -> str:
     """29.09 «не понимаю, какая модель отвечает, бесплатно или нет, почему то быстро, то медленно»: JES знает, на чём работает
     прямо сейчас, и отвечает сама (утром на этот вопрос она искала в интернете «Gemini model version» и сказала общими словами)."""
@@ -146,7 +157,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         return (f"Ты — JES (читается «Джес»), голосовой помощник {name} на его Android-телефоне. "
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang}{style_rules(p, spoken=True)}\n"
                 + PHONE_VOICE + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
-                + engine_line(engine)
+                + engine_line(engine) + where_line(profile)
                 + (f"\n{people}\n" if people else "")
                 + (f"\n{recent}\n" if recent else "")
                 + (f"\n{facts_only(memory)}\n" if facts_only(memory) else ""))
@@ -212,7 +223,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     if mode == "assistant":
         # облегчённый звонок (28.09): короткие правила вместо ~4 тыс. знаков, память — только факты (без прошлых реплик)
         facts = facts_only(memory)
-        return (base + CALL_RULES.replace("{year}", str(now.year)) + opening + engine_line(engine)
+        return (base + CALL_RULES.replace("{year}", str(now.year)) + opening + engine_line(engine) + where_line(profile)
                 + (f"\n{facts}\n" if facts else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
     return (base + rules + opening + "\n" + ABOUT_SELF
             + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
@@ -267,14 +278,14 @@ PHONE_ECONOMY = (
     "камеру и экран не включай без прямой просьбы.\n"
 )
 # инструменты, которые в голосе нужны редко — через bot_task (каждое описание оплачивается в каждом ответе)
-PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "set_ai_balance", "calculate", "add_note"}
+PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "ai_tokens", "set_ai_balance", "calculate", "add_note"}
 # облегчённый живой голос (он выбрал 25.09): в Live — только частое (~9 тыс. знаков вместо 18), остальное телефонное — phone_task
 # (Flash-Lite выполняет его сам, bot/phone_live.py:phone_task), данные — bot_task
 # 27.09: записи (трата, еда, задача, напоминание), «сколько потратил» и погода — через bot_task (Flash-Lite со всеми
 # инструментами): эти 6 описаний были 40% текста, который Live оплачивает в каждой реплике. Команды, которые должны
 # сработать мгновенно (звонок, будильник, приложение, камера), остаются в Live.
 PHONE_LIVE_CORE = {"end_call", "phone_call", "telegram_send", "confirm_send", "cancel_send", "set_alarm", "set_timer", "open_app",
-                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat"}
+                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat", "where_am_i"}
 PHONE_DESC_LIMIT = 120   # описание инструмента в голосе телефона (знаков)
 PHONE_PARAM_LIMIT = 50
 _PHONE_TASK = {"name": "phone_task",
@@ -351,7 +362,7 @@ def _control_tools(mode: str) -> list[dict[str, Any]]:
 # (было ~13 тыс. токенов на реплику). Остальное делает «помощник из чата» — дешёвая текстовая модель со всеми инструментами.
 VOICE_CORE = {"add_finance_entries", "get_finance_stats", "add_reminder", "add_task", "complete_tasks", "add_calorie_logs", "add_note",
               "weather", "web_search", "currency_rates", "calculate", "prayer_times", "get_wake", "remember_about_me",
-              "ai_status", "set_ai_balance", "expect_photo"}
+              "ai_status", "set_ai_balance", "expect_photo", "where_am_i"}
 _DELEGATE = {"name": "bot_task",
              "description": "Помощник из чата со ВСЕМИ инструментами бота: любая работа с его данными, для которой у тебя нет своего инструмента — "
                             "исправить, удалить, найти, перенести записи (операции, задачи, заметки, еда, вес), массовые правки, цели, долги, бюджеты, "
@@ -363,7 +374,7 @@ _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_m
 # 28.09 он выбрал «облегчённый Live» для звонков Telegram: 20 инструментов (8 тыс. знаков) и инструкция (8 тыс.) оплачивались
 # в КАЖДОМ ответе — звонок 2 мин 42 с стоил $0.087. В звонке — только частое, всё с его данными — через bot_task
 # (Flash-Lite платным ключом; 29.09 — без бесплатного, он тормозил), как на телефоне
-CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat"}
+CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat", "where_am_i"}
 _CALL_DELEGATE_DESC = ("Помощник из чата со ВСЕМИ инструментами бота: трата, еда, задача, напоминание, «сколько потратил», исправить/удалить, "
                        "цели, долги, отчёты, будильник, запомнить о нём, его история («что я делал вчера», «когда звонил Алишеру»); "
                        "и про тебя саму — расходы на ИИ, модели, версии, сервисы. "

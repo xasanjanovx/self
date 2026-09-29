@@ -375,7 +375,7 @@ def place_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 
 def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mode: str = "live", gai: str | None = None,
-                             gai_limit: float | None = None, **_old: object) -> InlineKeyboardMarkup:
+                             gai_limit: float | None = None, owner: bool = False, **_old: object) -> InlineKeyboardMarkup:
     """«Голос и характер» JES — коротко (28.09 его выбор): голос, язык, режим. Всегда на «вы», «сэр/шеф/босс», тон и длина —
     по умолчанию; модели Qwen больше нет в настройках."""
     from .persona import VOICES
@@ -400,6 +400,8 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mod
     rows.append([_btn("🔊 " + ("Ovozni eshitish" if uz else "Послушать голос"), "jarvis:sample")])
     rows.append([pick("🇺🇿 O'zbekcha", "jarvis:lang:uz", call_lang == "uz"), pick("🇷🇺 Русский", "jarvis:lang:ru", call_lang == "ru"),
                  pick("🇬🇧 English", "jarvis:lang:en", call_lang == "en")])
+    if owner:  # 29.09: токены по моделям — только владельцу
+        rows.append([_btn("📊 " + ("Tokenlar" if uz else "Токены по моделям"), "jarvis:tokens:today")])
     if gai is not None:  # 29.09, только владельцу: через что работает Gemini — его баланс AI Studio или кредит Vertex ($300 / 90 дней)
         rows.append([pick("🟦 AI Studio", "jarvis:gai:studio", gai == "studio"), pick("☁️ Vertex · $300", "jarvis:gai:vertex", gai == "vertex")])
         rows.append([_btn("🩺 " + ("Vertexni tekshirish" if uz else "Проверить Vertex"), "jarvis:gtest")])
@@ -407,6 +409,14 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mod
             rows.append([pick(f"${v:g}/" + ("kun" if uz else "день"), f"jarvis:glimit:{v:g}", gai_limit == v) for v in (1.0, 2.0, 3.0, 5.0)])
     rows.append([_back(lang, "menu:jarvis")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tokens_keyboard(lang: str, period: str) -> InlineKeyboardMarkup:
+    uz = lang == "uz"
+    names = [("today", "Bugun" if uz else "Сегодня"), ("week", "7 kun" if uz else "7 дней"), ("month", "Oy" if uz else "Месяц")]
+    row = [_btn(label + (" ✓" if key == period else ""), f"jarvis:tokens:{key}", style="primary" if key == period else None)
+           for key, label in names]
+    return InlineKeyboardMarkup(inline_keyboard=[row, [_back(lang, "settings:jarvis")]])
 
 
 def back_to_menu_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:

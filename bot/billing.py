@@ -341,6 +341,17 @@ def record(model: str, usage: dict[str, Any] | None, *, kind: str = "text", prov
     day["kinds"][kind] = round(float(day["kinds"].get(kind) or 0) + usd, 6)
     models = day.setdefault("models", {})  # 28.09: «на что потрачено» — и по моделям (какая версия сколько стоила)
     models[model] = round(float(models.get(model) or 0) + usd, 6)
+    # 29.09 его просьба «знать полностью о токенах: какая модель сколько тратила»: по каждой модели — запросы, токены по
+    # видам (текст/звук/кадры на вход, кэш, текст/звук на выход, размышления) и через что шла (Vertex или AI Studio)
+    bm = day.setdefault("by_model", {}).setdefault(model, {"calls": 0, "usd": 0.0, "vertex_usd": 0.0, "tokens": {}})
+    bm["calls"] = int(bm.get("calls") or 0) + 1
+    bm["usd"] = round(float(bm.get("usd") or 0) + usd, 6)
+    if provider == "vertex":
+        bm["vertex_usd"] = round(float(bm.get("vertex_usd") or 0) + usd, 6)
+    bm_tokens = bm.setdefault("tokens", {})
+    for part in PARTS:
+        if tokens[part] > 0:
+            bm_tokens[part] = int(bm_tokens.get(part) or 0) + tokens[part]
     detail = day.setdefault("detail", {}).setdefault(kind, {})
     counts = day.setdefault("tokens", {}).setdefault(kind, {})
     for part in PARTS:
@@ -396,13 +407,7 @@ def period_report(period: str = "today") -> dict[str, Any]:
     """Расход за период: today | yesterday | week (7 дней) | month (с 1-го числа) | 30d. Всё уже в долларах с поправкой."""
     st = _load()
     factor = float(st.get("factor") or 1.0)
-    today = datetime.now(timezone(timedelta(hours=5))).date()
-    start, end = {
-        "yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
-        "week": (today - timedelta(days=6), today),
-        "month": (today.replace(day=1), today),
-        "30d": (today - timedelta(days=29), today),
-    }.get(period, (today, today))
+    start, end = _period_days(period)
     keys = [k for k in (st.get("days") or {}) if start.isoformat() <= k <= end.isoformat()]
     total = calls = searches = free_calls = 0.0
     saved = clients = 0.0
@@ -454,6 +459,72 @@ def period_report(period: str = "today") -> dict[str, Any]:
         top = sorted(sess, key=lambda s: -float(s.get("usd") or 0))[:3]
         out["costliest"] = [{"at": str(s.get("at"))[5:16].replace("T", " "), "what": SESSION_NAMES.get(str(s.get("kind")), s.get("kind")),
                              "sec": s.get("sec"), "usd": s.get("usd"), "said": (s.get("said") or "")[:80]} for s in top if s.get("usd")]
+    return out
+
+
+PART_NAMES = {"text_in": "текст на вход", "audio_in": "звук на вход", "image_in": "кадры на вход", "cached": "вход из кэша (10% цены)",
+              "text_out": "текст на выход", "thoughts": "размышления", "audio_out": "звук на выход"}
+
+
+def _period_days(period: str) -> tuple[Any, Any]:
+    today = datetime.now(timezone(timedelta(hours=5))).date()
+    return {
+        "yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
+        "week": (today - timedelta(days=6), today),
+        "month": (today.replace(day=1), today),
+        "30d": (today - timedelta(days=29), today),
+    }.get(period, (today, today))
+
+
+def tokens_report(period: str = "today") -> dict[str, Any]:
+    """Токены по моделям за период (29.09): сколько запросов, токенов каждого вида и денег; сколько через Vertex (кредит)
+    и сколько через AI Studio; цены за 1M. По виду работы (живой голос, чат, озвучка…) — токены и деньги."""
+    st = _load()
+    factor = float(st.get("factor") or 1.0)
+    start, end = _period_days(period)
+    models: dict[str, dict[str, Any]] = {}
+    kinds: dict[str, dict[str, Any]] = {}
+    old_usd: dict[str, float] = {}
+    for key in sorted(k for k in (st.get("days") or {}) if start.isoformat() <= k <= end.isoformat()):
+        day = st["days"][key]
+        by_model = day.get("by_model") or {}
+        for name, row in by_model.items():
+            m = models.setdefault(name, {"calls": 0, "usd": 0.0, "vertex_usd": 0.0, "tokens": dict.fromkeys(PARTS, 0)})
+            m["calls"] += int(row.get("calls") or 0)
+            m["usd"] += float(row.get("usd") or 0) * factor
+            m["vertex_usd"] += float(row.get("vertex_usd") or 0) * factor
+            for part, n in (row.get("tokens") or {}).items():
+                m["tokens"][part] = m["tokens"].get(part, 0) + int(n)
+        for name, usd in (day.get("models") or {}).items():  # дни до 29.09: по моделям — только деньги
+            if name not in by_model:
+                old_usd[name] = old_usd.get(name, 0.0) + float(usd) * factor
+        for kind, parts in (day.get("tokens") or {}).items():
+            k = kinds.setdefault(kind, {"usd": 0.0, "tokens": dict.fromkeys(PARTS, 0)})
+            for part, n in parts.items():
+                k["tokens"][part] = k["tokens"].get(part, 0) + int(n)
+        for kind, usd in (day.get("kinds") or {}).items():
+            kinds.setdefault(kind, {"usd": 0.0, "tokens": dict.fromkeys(PARTS, 0)})["usd"] += float(usd) * factor
+
+    def tok(t: dict[str, int]) -> dict[str, int]:
+        t = {p: int(v) for p, v in t.items() if v}
+        t["всего_на_вход"] = sum(t.get(p, 0) for p in ("text_in", "audio_in", "image_in", "cached"))
+        t["всего_на_выход"] = sum(t.get(p, 0) for p in ("text_out", "thoughts", "audio_out"))
+        return t
+
+    out_models = []
+    for name, m in sorted(models.items(), key=lambda kv: -kv[1]["usd"]):
+        out_models.append({"model": name, "requests": m["calls"], "usd": round(m["usd"], 4),
+                           "via_vertex_usd": round(m["vertex_usd"], 4), "via_ai_studio_usd": round(m["usd"] - m["vertex_usd"], 4),
+                           "tokens": tok(m["tokens"]), "price_per_1m_usd": prices_for(name)})
+    out = {"period": f"{start:%d.%m}–{end:%d.%m}" if start != end else f"{start:%d.%m.%Y}",
+           "models": out_models,
+           "by_purpose": {KIND_NAMES.get(k, k): {"usd": round(v["usd"], 4), "tokens": tok(v["tokens"])}
+                          for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]["usd"]) if v["usd"] >= 0.00005},
+           "total_usd": round(sum(m["usd"] for m in models.values()) + sum(old_usd.values()), 4),
+           "token_kinds": PART_NAMES}
+    if old_usd:
+        out["before_29_09_usd_only"] = {k: round(v, 3) for k, v in sorted(old_usd.items(), key=lambda kv: -kv[1]) if v >= 0.0005}
+        out["note"] = "токены по каждой модели считаются с 29.09; раньше — только деньги по моделям и токены по видам работы"
     return out
 
 

@@ -448,6 +448,9 @@ class PhoneLive(_Session):
                     await self.say_text(gem, str(data["text"]))
                 elif kind == "device" and isinstance(data.get("device"), dict):
                     self.turn.device.update(data["device"])
+                    from . import where
+
+                    where.from_device(self.uid, data["device"])
                 elif kind == "unlocked":
                     self.turn.device["locked"] = False
                     await self.say_text(gem, "[Телефон разблокирован — сразу сделай то, что он просил.]")
@@ -826,6 +829,9 @@ async def run(uid: int, phone_ws, hello: dict[str, Any]) -> None:  # noqa: ANN00
 
     device = hello.get("device") if isinstance(hello.get("device"), dict) else {}
     _last_device[uid] = dict(device)
+    from . import where
+
+    where.from_device(uid, device)  # 29.09: где он в начале разговора
     persona = await services.persona(uid)
     _modes[uid] = persona.voice_mode
     economy = persona.voice_mode != "live" or not billing.live_allowed("phone")

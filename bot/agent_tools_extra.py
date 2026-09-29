@@ -325,6 +325,21 @@ async def _weather(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------ токены по моделям (29.09)
+@tool(
+    "ai_tokens",
+    "ТОКЕНЫ по каждой модели Gemini: сколько запросов, сколько токенов каждого вида (текст/звук/кадры на вход, кэш, текст/звук "
+    "на выход, размышления), сколько денег, сколько ушло через Vertex (кредит Google Cloud) и через AI Studio, цены за 1M; и по "
+    "виду работы (живой голос, чат, озвучка, распознавание). «Сколько токенов потратила Live?», «какая модель больше всех ест?», "
+    "«сколько звука на выход за неделю?».",
+    {"period": P("STRING", "today | yesterday | week | month | 30d (по умолчанию today)", enum=["today", "yesterday", "week", "month", "30d"])},
+)
+async def _ai_tokens(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import billing
+
+    return billing.tokens_report(str(a.get("period") or "today"))
+
+
 # ------------------------------------------------------------------ баланс Gemini и версия
 @tool(
     "ai_status",

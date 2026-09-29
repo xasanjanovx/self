@@ -61,7 +61,9 @@ def test_geo_places_and_reminders(tmp_path, monkeypatch):
     assert geo.add_reminder(1, "дом", "купить хлеб")["need_place"] == "дом"
     geo.save_place(1, "мой дом", 40.78, 72.34)
     r = geo.add_reminder(1, "домой", "купить хлеб")
-    zones = geo.for_phone(1)["zones"]
+    all_zones = geo.for_phone(1)["zones"]
+    assert [z["id"] for z in all_zones if z["when"] == "track"] == ["place:дом"]   # 29.09: приходы/уходы в память дел
+    zones = [z for z in all_zones if z["when"] != "track"]
     assert zones[0]["id"] == r["id"] and zones[0]["lat"] == 40.78 and zones[0]["when"] == "arrive"
     assert geo.fired(1, r["id"], entering=False) is None                    # ушёл — а просили «когда приду»
     assert geo.fired(1, r["id"], entering=True)["text"] == "купить хлеб"

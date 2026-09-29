@@ -467,7 +467,14 @@ async def geo_fired(request: web.Request) -> web.Response:
 
     uid = owner_id()
     data = await _json(request)
-    hit = geo.fired(uid, str(data.get("id") or ""), bool(data.get("entering"))) if uid is not None else None
+    zone = str(data.get("id") or "")
+    if uid is not None and zone.startswith(geo.TRACK_PREFIX):
+        # 29.09: зона сохранённого места — пришёл/ушёл: в память дел и «где он», без уведомления
+        from . import where
+
+        where.arrived(uid, zone[len(geo.TRACK_PREFIX):], bool(data.get("entering")))
+        return web.json_response({"ok": False, "tracked": True})
+    hit = geo.fired(uid, zone, bool(data.get("entering"))) if uid is not None else None
     if hit is None:
         return web.json_response({"ok": False})
 
@@ -483,6 +490,16 @@ async def geo_fired(request: web.Request) -> web.Response:
 
     phone._later(tell())
     return web.json_response({"ok": True, "text": hit["text"], "place": hit["place"]})
+
+
+async def where_update(request: web.Request) -> web.Response:
+    """29.09: где он — телефон присылает, когда он зовёт JES: {"lat", "lon", "acc", "age_s"} (приложение 2.17)."""
+    from . import where
+
+    uid = owner_id()
+    data = await _json(request)
+    row = where.update(uid, data.get("lat"), data.get("lon"), accuracy=data.get("acc"), age_s=data.get("age_s"))
+    return web.json_response({"ok": row is not None, "place": (row or {}).get("place")})
 
 
 async def media_progress(request: web.Request) -> web.Response:
@@ -731,6 +748,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
     app.router.add_post("/jarvis/v1/media", media_progress)
+    app.router.add_post("/jarvis/v1/where", where_update)
     app.router.add_get("/jarvis/v1/geo", geo_zones)
     app.router.add_post("/jarvis/v1/geo/place", geo_place)
     app.router.add_post("/jarvis/v1/geo/fired", geo_fired)

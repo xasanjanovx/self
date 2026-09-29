@@ -90,11 +90,16 @@ def remove_reminder(uid: int, rid: str) -> dict[str, Any] | None:
     return hit
 
 
+TRACK_PREFIX = "place:"
+
+
 def for_phone(uid: int) -> dict[str, Any]:
-    """Что поставить на телефоне: зоны с координатами (только места, по которым есть напоминания)."""
+    """Что поставить на телефоне: зоны с координатами — напоминания и (29.09) каждое сохранённое место: «пришёл домой 18:40»,
+    «ушёл с работы» — в память дел и «где он сейчас» (bot/where.py). Зону ставит Android — батарея почти не тратится."""
     data = _load(uid)
     pl = data.get("places") or {}
-    zones = []
+    zones = [{"id": TRACK_PREFIX + key, "lat": p["lat"], "lon": p["lon"], "radius": RADIUS_M, "when": "track", "text": "", "place": key}
+             for key, p in pl.items()]
     for r in data.get("reminders") or []:
         p = pl.get(r.get("place"))
         if p:
@@ -113,4 +118,5 @@ def fired(uid: int, rid: str, entering: bool) -> dict[str, Any] | None:
     return hit
 
 
-__all__ = ["save_place", "places", "add_reminder", "reminders", "remove_reminder", "for_phone", "fired", "place_key", "RADIUS_M"]
+__all__ = ["save_place", "places", "add_reminder", "reminders", "remove_reminder", "for_phone", "fired", "place_key", "RADIUS_M",
+           "TRACK_PREFIX"]

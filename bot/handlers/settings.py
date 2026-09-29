@@ -530,6 +530,40 @@ def engine_lines(profile: Profile, p) -> list[str]:  # noqa: ANN001
     return lines
 
 
+def _k(n: int) -> str:
+    return f"{n / 1_000_000:.2f}M" if n >= 1_000_000 else f"{n / 1000:.1f}K" if n >= 1000 else str(n)
+
+
+_PART_SHORT = {"audio_in": "звук", "text_in": "текст", "image_in": "кадры", "cached": "кэш", "audio_out": "звук", "text_out": "текст",
+               "thoughts": "размышления"}
+
+
+def tokens_text(profile: Profile, period: str) -> str:
+    """29.09 «знать полностью о токенах»: по каждой модели — запросы, токены по видам, деньги, Vertex/AI Studio."""
+    r = billing.tokens_report(period)
+    lines = [f"📊 <b>{profile.tr('Токены по моделям', 'Modellar bo`yicha tokenlar')}</b> · {r['period']}",
+             f"💵 {profile.tr('Всего', 'Jami')}: <b>${r['total_usd']:.3f}</b>", ""]
+    for m in r["models"]:
+        t = m["tokens"]
+        ins = " · ".join(f"{_PART_SHORT[p]} {_k(t[p])}" for p in ("audio_in", "text_in", "image_in", "cached") if t.get(p))
+        outs = " · ".join(f"{_PART_SHORT[p]} {_k(t[p])}" for p in ("audio_out", "text_out", "thoughts") if t.get(p))
+        via = f" (☁️ Vertex ${m['via_vertex_usd']:.3f})" if m["via_vertex_usd"] >= 0.0005 else ""
+        lines.append(f"<b>{h(m['model'])}</b> — {m['requests']} {profile.tr('запр.', 'so`rov')} · ${m['usd']:.3f}{via}")
+        if ins:
+            lines.append(f"   ⬇️ {profile.tr('вход', 'kirish')} {_k(t['всего_на_вход'])}: {ins}")
+        if outs:
+            lines.append(f"   ⬆️ {profile.tr('выход', 'chiqish')} {_k(t['всего_на_выход'])}: {outs}")
+    if not r["models"]:
+        lines.append(profile.tr("За этот период по моделям токенов ещё нет (считаются с 29.09).", "Bu davr uchun ma'lumot yo'q."))
+    purposes = [f"{h(k)} ${v['usd']:.3f}" for k, v in r["by_purpose"].items()]
+    if purposes:
+        lines += ["", "🧩 " + profile.tr("По работе", "Ish bo`yicha") + ": " + " · ".join(purposes)]
+    if r.get("before_29_09_usd_only"):
+        old = " · ".join(f"{h(k)} ${v:.3f}" for k, v in r["before_29_09_usd_only"].items())
+        lines += ["", "🕰 " + profile.tr("До 29.09 (только деньги)", "29.09 gacha") + f": {old}"]
+    return "\n".join(lines)[:3900]
+
+
 def gcloud_lines(profile: Profile) -> list[str]:
     """29.09: его $300 Google Cloud работают только через Vertex AI — что выбрано, сколько осталось, что не так."""
     s = gcloud.status()
@@ -575,7 +609,7 @@ async def render_jarvis(target: Message | CallbackQuery, profile: Profile, *, no
     if notice:
         text += f"\n\n{notice}"
     kb = jarvis_settings_keyboard(profile.lang, voice=p.voice, call_lang=p.lang, voice_mode=p.voice_mode, gai=gai,
-                                  gai_limit=gcloud.daily_limit())
+                                  gai_limit=gcloud.daily_limit(), owner=access.is_owner(profile.telegram_id))
     await _show(target, text, kb)
 
 
@@ -605,6 +639,13 @@ async def cb_jarvis_change(callback: CallbackQuery, state: FSMContext) -> None:
         services.save_persona_extra(profile.telegram_id, fields)
         await answer_now(callback, "✅")
         await render_jarvis(callback, profile)
+        return
+    if action == "tokens" and access.is_owner(profile.telegram_id):  # 29.09: токены по моделям
+        from ..keyboards import tokens_keyboard
+
+        period = value if value in {"today", "week", "month"} else "today"
+        await answer_now(callback)
+        await safe_edit(callback, tokens_text(profile, period), tokens_keyboard(profile.lang, period))
         return
     if action == "gtest" and access.is_owner(profile.telegram_id):  # 29.09: пускают ли ключ в Vertex — одним запросом
         from ..context import ai
