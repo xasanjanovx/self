@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -22,13 +23,19 @@ logger = logging.getLogger(__name__)
 
 STUDIO_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 VERTEX_BASE = "https://aiplatform.googleapis.com/v1/publishers/google/models"
-VERTEX_LIVE_URL = "wss://aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent"
+# живой голос в Vertex — только региональный адрес и полный путь проекта (29.09 проверено: global и europe-west1 — «not found»,
+# us-central1 — готов за 0.36 с, первый звук через 0.83 с)
+LIVE_LOCATION = os.getenv("VERTEX_LIVE_LOCATION") or "us-central1"
+LIVE_URL = "wss://{loc}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent"
 TRIAL_DAYS = 90
 TRIAL_USD = 300.0
 VERTEX_DAILY_LIMIT_USD = 3.0      # на кредитах можно больше: живой голос весь день (на балансе AI Studio — $0.5)
 KEY_PAUSE_S = 600
 # имена моделей в Vertex, если отличаются от AI Studio (заполняется после проверки его ключа)
 VERTEX_MODELS: dict[str, str] = {}
+# 29.09: озвучки 3.8 Flash-Lite TTS (его голос Sulafat, он выбрал её на слух) в Vertex нет ни в одном регионе — только через
+# AI Studio (~$0.02 в день); в Vertex не пробуем, чтобы не тратить лишний круг
+STUDIO_ONLY = {"gemini-3.8-flash-lite-tts"}
 
 _state: dict[str, Any] | None = None
 _paused_until = 0.0
@@ -98,7 +105,28 @@ def active() -> bool:
 
 
 def use_vertex(model: str) -> bool:
-    return active() and model not in _bad_models
+    return active() and model not in _bad_models and model not in STUDIO_ONLY
+
+
+def project() -> str:
+    """Номер проекта Google Cloud: из VERTEX_PROJECT или узнан по ответу Vertex (кнопка «Проверить Vertex»)."""
+    return (os.getenv("VERTEX_PROJECT") or str(_load().get("project") or "")).strip()
+
+
+def live_ready() -> bool:
+    return bool(project()) and use_vertex_live()
+
+
+def use_vertex_live() -> bool:
+    return active() and "live" not in _bad_models
+
+
+def live_url() -> str:
+    return LIVE_URL.format(loc=LIVE_LOCATION)
+
+
+def live_model(model: str) -> str:
+    return f"projects/{project()}/locations/{LIVE_LOCATION}/publishers/google/models/{vertex_model(model)}"
 
 
 def vertex_model(model: str) -> str:
@@ -150,7 +178,10 @@ def failed(model: str, status: int | None, text: str) -> None:
     """Vertex отказал — запомнить почему (видно в настройках) и решить, надолго ли в обход."""
     global _paused_until
     low = str(text or "").lower()
-    if status == 404 or "not found" in low or "is not supported" in low:
+    if model == "live":
+        _bad_models.add("live")
+        why = f"живой голос через Vertex не подключился ({low[:120]}) — он идёт через AI Studio"
+    elif status == 404 or "not found" in low or "is not supported" in low:
         _bad_models.add(model)
         why = f"модели {model} нет в Vertex — она идёт через AI Studio"
     elif status in {400, 401, 403} and ("api_key" in low or "permission" in low or "blocked" in low or "disabled" in low
@@ -184,7 +215,16 @@ async def probe(client, model: str = "gemini-3.5-flash-lite") -> tuple[bool, str
         _paused_until = 0.0
         _bad_models.discard(model)
         ok()
-        return True, f"Vertex работает ({model})"
+        if not project():  # номер проекта нужен живому голосу — Vertex сам называет его в ответе «модели нет»
+            try:
+                miss = await client.post(url("jes-no-such-model", "generateContent"), json=body, headers=headers())
+                found = re.search(r"projects/(\d+)/", miss.text)
+                if found:
+                    _load()["project"] = found.group(1)
+                    _save()
+            except Exception:
+                logger.debug("gcloud: номер проекта не узнал", exc_info=True)
+        return True, "Vertex работает: ответы, расшифровка" + (", живой голос" if project() else "") + " · озвучка — через AI Studio"
     failed(model, response.status_code, response.text)
     return False, str(_load().get("error") or response.status_code)
 

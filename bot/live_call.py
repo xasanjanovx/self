@@ -493,7 +493,7 @@ class _Session:
         # 29.09: выбран Vertex AI (кредит Google Cloud) — сначала он; не вышло — как обычно, AI Studio
         from . import gcloud
 
-        if gcloud.use_vertex(MODELS[0]) and (ws := await self._connect_vertex(session, MODELS[0])) is not None:
+        if gcloud.live_ready() and (ws := await self._connect_vertex(session, MODELS[0])) is not None:
             return ws
         # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него.
         # Не приняла экономные настройки (_extras_level) — та же попытка проще (запоминаем до перезапуска).
@@ -545,18 +545,18 @@ class _Session:
 
         for rich in (True, False):
             try:
-                ws = await session.ws_connect(gcloud.VERTEX_LIVE_URL, headers=gcloud.headers(), heartbeat=20, max_msg_size=0)
+                ws = await session.ws_connect(gcloud.live_url(), headers=gcloud.headers(), heartbeat=20, max_msg_size=0)
             except Exception as exc:
-                gcloud.failed(model, getattr(exc, "status", None), f"live connect: {exc}")
+                gcloud.failed("live", getattr(exc, "status", None), f"connect: {exc}")
                 return None
             setup = self.setup_payload(model, rich=rich)
-            setup["setup"]["model"] = f"publishers/google/models/{gcloud.vertex_model(model)}"
+            setup["setup"]["model"] = gcloud.live_model(model)
             await ws.send_str(json.dumps(setup))
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=15)
             except asyncio.TimeoutError:
                 await ws.close()
-                gcloud.failed(model, None, "live setup timeout")
+                gcloud.failed("live", None, "setup timeout")
                 return None
             data = _decode(msg)
             if data is not None and "setupComplete" in data:
@@ -570,7 +570,7 @@ class _Session:
             await ws.close()
             if rich:
                 continue  # без жёсткого языка — вдруг Vertex не принял его
-            gcloud.failed(model, None, f"live setup: {error}")
+            gcloud.failed("live", None, f"setup: {error}")
         return None
 
     def setup_payload(self, model: str, *, rich: bool) -> dict[str, Any]:
