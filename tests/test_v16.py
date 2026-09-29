@@ -99,6 +99,7 @@ def test_wake_check_foreign_voice_is_rejected_first(wake):
     calls, setup = wake
     setup(voice_ok=False, heard={"text": "джарвис", "name": True, "after": "", "ms": 30})
     out = _check()
+    assert out.pop("cooldown") in (0, 20)  # 2.16: серия отказов — пауза телефону
     assert out == {"ok": False, "reason": "voice", "score": 0.1}
     assert calls["discard"] == 1
 
