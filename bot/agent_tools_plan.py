@@ -115,7 +115,7 @@ async def _brainstorm(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         f"ЕГО ДАННЫЕ:\n{snap}\n{memory}")
     try:
         text = await ai.generate([{"text": prompt}], model=ai_mod.smart_model(), temperature=0.9, json_mode=False,
-                                 thinking_budget=2048, max_tokens=2200)
+                                 thinking_budget=1024, max_tokens=6000)
     except Exception as exc:
         logger.warning("brainstorm failed", exc_info=True)
         return {"error": f"умная модель не ответила: {type(exc).__name__}"}

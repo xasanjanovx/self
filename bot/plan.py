@@ -173,10 +173,12 @@ REVIEW_PROMPT = (
 )
 
 
-async def _ask_model(prompt: str, *, max_tokens: int = 1600) -> str | None:
+async def _ask_model(prompt: str, *, max_tokens: int = 4500) -> str | None:
+    # размышления модели входят в лимит ответа: на пробе 30.09 при лимите 1600 план обрезался на 222 знаках — лимит с запасом,
+    # размышления «low» (быстрее: план за ~5 с, а не 13)
     try:
         return (await ai.generate([{"text": prompt}], model=ai_mod.smart_model(), temperature=0.6, json_mode=False,
-                                  thinking_budget=1024, max_tokens=max_tokens)).strip() or None
+                                  thinking_budget=512, max_tokens=max_tokens)).strip() or None
     except Exception:
         logger.warning("plan: умная модель не ответила", exc_info=True)
         return None
@@ -259,7 +261,7 @@ async def build_review(profile: Profile, persona) -> str:  # noqa: ANN001
         lines.append("Что делала JES сегодня: " + "; ".join(str(r.get("text"))[:50] for r in todays[-8:]))
     data = "\n".join(lines)
     body = await _ask_model(REVIEW_PROMPT.format(name=profile.first_name or "пользователя", rules=_persona_rules(profile, persona), data=data),
-                            max_tokens=1000)
+                            max_tokens=3000)
     return f"🌙 <b>{profile.tr('Разбор дня', 'Kun tahlili')}</b>\n\n" + render_reply(body or data)
 
 
