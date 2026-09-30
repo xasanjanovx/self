@@ -120,6 +120,15 @@ async def send_morning(bot: Bot, profile, us: dict | None = None, *, late_ok: bo
             logger.info("morning brief skipped: user %s blocked the bot", telegram_id)  # не ошибка — он заблокировал бота
         except Exception:
             logger.exception("morning brief failed for %s", telegram_id)
+    if late_ok and access.is_owner(telegram_id) and us.get("day_plan", True):
+        try:
+            from . import plan
+
+            await plan.send(bot, profile, "morning")  # 30.09 его выбор: утром готовый мягкий план дня
+        except TelegramForbiddenError:
+            pass
+        except Exception:
+            logger.exception("day plan failed for %s", telegram_id)
     if db.available("recurring_payments"):
         try:
             items = await services.recurring(telegram_id)
@@ -184,6 +193,15 @@ async def _brief_tick(bot: Bot) -> None:
                     logger.info("evening brief skipped: user %s blocked the bot", telegram_id)
                 except Exception:
                     logger.exception("evening brief failed for %s", telegram_id)
+                if access.is_owner(telegram_id) and us.get("day_plan", True):
+                    try:
+                        from . import plan
+
+                        await plan.send(bot, profile, "review")  # 30.09: разбор дня — что сделано, что перенести, идея на завтра
+                    except TelegramForbiddenError:
+                        pass
+                    except Exception:
+                        logger.exception("evening review failed for %s", telegram_id)
 
 
 async def brief_worker(bot: Bot) -> None:
@@ -342,6 +360,15 @@ async def _proactive_tick(bot: Bot) -> None:
             await _maybe_alert_call(profile, fresh)
         except Exception:
             logger.exception("alert call failed for %s", telegram_id)
+        if hints_on and access.is_owner(telegram_id):
+            try:
+                from . import advice
+
+                await advice.maybe_send(bot, profile)  # 30.09 его выбор: советы днём, не чаще 3 раз
+            except TelegramForbiddenError:
+                pass
+            except Exception:
+                logger.exception("advice failed for %s", telegram_id)
 
 
 # что достойно звонка: срок долга сегодня/просрочен, лимит под угрозой или превышен, цель отстаёт

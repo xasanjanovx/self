@@ -109,6 +109,23 @@ def _adapt(model: str, payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def smart_model() -> str:
+    """Модель «умных» задач (планы, советы, идеи, разбор дня, чат владельца) — bot/plan.py, agent_tools_plan.py."""
+    return FREE_SMART_MODEL
+
+
+def use_smart() -> _cv.Token:
+    """Дальше в этой задаче ходы агента — умной моделью (набор инструментов и промпт те же)."""
+    return _smart_turn.set(FREE_SMART_MODEL)
+
+
+def reset_smart(token: _cv.Token) -> None:
+    try:
+        _smart_turn.reset(token)
+    except ValueError:
+        pass
+
+
 def use_free(model: str | None = None) -> _cv.Token:
     """Дальше в этой задаче запросы Gemini — сначала бесплатным ключом (если он задан); model — какой моделью отвечать
     через него (умнее), иначе той же. Новый ход — модель хода ещё не выбрана."""
@@ -131,6 +148,10 @@ def _backoff(attempt: int) -> float:
 
 
 FAST_TTS_MODEL = "gemini-3.8-flash-lite-tts"   # ответы Джарвиса на телефоне (экономный режим), потоком
+
+# 30.09 его выбор: планы, советы, идеи, разбор дня — «умной» моделью (Gemini 3.8 Flash, есть и на Vertex, и в AI Studio);
+# быстрые дела и голос остаются на быстрой. Чат владельца тоже: когда бесплатный ключ не используется, ход идёт этой моделью.
+_smart_turn: _cv.ContextVar[str | None] = _cv.ContextVar("smart_turn", default=None)
 TTS_CACHE_MAX_CHARS = 90      # короткие фразы повторяются («Да, сэр, слышу вас», «Секунду») — их храним на диске
 TTS_CACHE_FILES = 3000
 _TTS_CACHE_CHUNK = 9600       # из кэша — кусками по 0.2 с, как из потока
@@ -515,7 +536,7 @@ class AIService:
 
         `contents` — полная история (user/model/functionResponse) в формате Gemini; части ответа
         модели возвращаются как есть (включая thoughtSignature), чтобы их можно было положить в историю."""
-        model = model or self.agent_model
+        model = model or _smart_turn.get() or self.agent_model
         gen_config: dict[str, Any] = {"temperature": temperature, "maxOutputTokens": max_tokens}
         if (tc := thinking_config(model, thinking_budget)) is not None:
             gen_config["thinkingConfig"] = tc

@@ -943,9 +943,9 @@ _GREETINGS_MANY = {
     "uz": ["Labbay, {hon}.", "Eshitaman, {hon}.", "Ha, {hon}.", "Labbay.", "Eshitaman.", "Xizmatingizdaman, {hon}.",
            "Gapiring, {hon}.", "Shu yerdaman, {hon}."],
 }
-GREETINGS_VERSION = 5
+GREETINGS_VERSION = 6   # 30.09: без «босса» — записи откликов обновятся
 _HON = {"shef": [("шеф", "shef", "boss")], "ser": [("сэр", "ser", "sir")], "boss": [("босс", "boss", "boss")],
-        "mix": [("сэр", "ser", "sir"), ("шеф", "shef", "boss"), ("босс", "boss", "boss")]}
+        "mix": [("сэр", "ser", "sir"), ("шеф", "shef", "chief")]}  # 30.09: без «босса» — чаще «сэр», иногда «шеф»
 
 
 def greeting_texts(lang: str, honorific: str) -> list[str]:

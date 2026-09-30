@@ -12,7 +12,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from .. import cache
+from .. import access, cache, capture
 from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
@@ -160,6 +160,10 @@ async def fallback(message: Message, state: FSMContext) -> None:
         except Exception:
             logger.exception("transcribe failed")
             transcript = ""
+        if transcript and access.is_owner(profile.telegram_id) and (capture.open_for(profile.telegram_id) or capture.eligible(transcript)):
+            # 30.09: несколько дел голосом — собираем пачку, добавляем сразу и составляем план дня (bot/capture.py)
+            await capture.push(message, state, profile, transcript)
+            return
         if transcript and await route_text(message, state, profile, transcript, transcript=transcript):
             return
         await safe_delete(message)

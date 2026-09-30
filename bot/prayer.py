@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
+from typing import Any
 
 import httpx
 
@@ -70,6 +71,69 @@ async def timezone_at(latitude: float, longitude: float) -> str | None:
     except Exception:
         logger.warning("prayer: часовой пояс не получил", exc_info=True)
         return None
+
+
+OVERPASS = ("https://overpass.kumi.systems/api/interpreter", "https://overpass-api.de/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter")
+_mosque_cache: dict[tuple[float, float, int], tuple[float, list[dict[str, Any]]]] = {}
+MOSQUE_TTL_S = 7 * 86400
+
+
+async def mosques_near(latitude: float, longitude: float, *, radius: int = 3000, limit: int = 5) -> list[dict[str, Any]]:
+    """Мечети рядом (30.09, «мечети рядом со мной»): [{"name", "distance_m", "lat", "lon", "map"}] от ближней. Карта
+    OpenStreetMap: безымянные — «Мечеть». Нашли мало — расширяем до 3× радиуса (не больше 10 км). Кэш на неделю."""
+    import math
+    import time as _t
+
+    key = (round(latitude, 3), round(longitude, 3), int(radius))
+    hit = _mosque_cache.get(key)
+    if hit and _t.time() - hit[0] < MOSQUE_TTL_S:
+        return hit[1][:limit]
+
+    def dist(la: float, lo: float) -> float:
+        p1, p2 = math.radians(latitude), math.radians(la)
+        a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lo - longitude) / 2) ** 2
+        return 2 * 6371000.0 * math.asin(math.sqrt(a))
+
+    out: list[dict[str, Any]] = []
+    for r in (radius, min(radius * 3, 10000)):
+        query = (f'[out:json][timeout:20];(nwr["amenity"="place_of_worship"]["religion"="muslim"](around:{r},{latitude},{longitude}););'
+                 "out center 60;")
+        elements: list[dict[str, Any]] | None = None
+        for url in OVERPASS:
+            try:
+                async with httpx.AsyncClient(timeout=25, headers={"User-Agent": "JarvisSelfBot/1.5 (personal assistant)", "Accept": "*/*"}) as client:
+                    res = await client.post(url, data={"data": query})
+                if res.status_code == 200:
+                    elements = res.json().get("elements") or []
+                    break
+            except Exception:
+                logger.warning("mosques: %s не ответил", url[8:32], exc_info=True)
+        if elements is None:
+            return []
+        seen: set[tuple[str, int, int]] = set()
+        out = []
+        for e in elements:
+            la = e.get("lat") if e.get("lat") is not None else (e.get("center") or {}).get("lat")
+            lo = e.get("lon") if e.get("lon") is not None else (e.get("center") or {}).get("lon")
+            if la is None or lo is None:
+                continue
+            tags = e.get("tags") or {}
+            name = str(tags.get("name:ru") or tags.get("name") or tags.get("name:uz") or tags.get("name:en") or "Мечеть").strip()
+            cell = (name.lower(), round(la * 500), round(lo * 500))  # одна мечеть могла попасть и точкой, и контуром
+            if cell in seen:
+                continue
+            seen.add(cell)
+            out.append({"name": name[:70], "distance_m": int(dist(la, lo)), "lat": round(la, 6), "lon": round(lo, 6),
+                        "map": f"https://maps.google.com/?q={la},{lo}"})
+        out.sort(key=lambda m: m["distance_m"])
+        if len(out) >= 3 or r >= 10000:
+            break
+    if out:
+        _mosque_cache[key] = (_t.time(), out)
+        if len(_mosque_cache) > 60:
+            _mosque_cache.pop(next(iter(_mosque_cache)))
+    return out[:limit]
 
 
 def takbir_time(fajr: str | None, takbir_offset_min: int) -> time | None:

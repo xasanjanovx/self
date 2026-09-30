@@ -187,7 +187,7 @@ from bot import persona as persona_mod  # noqa: E402
 
 def test_greetings_are_short_on_wake():
     # он просил: на вызов — только коротко, без «Да, слышу вас, …»
-    assert phone_live.greeting_texts("ru", "mix") == ["Да, сэр.", "Да, шеф.", "Да, босс."]
+    assert phone_live.greeting_texts("ru", "mix") == ["Да, сэр.", "Да, шеф."]  # 30.09: без «босса»
     assert phone_live.greeting_texts("ru", "ser") == ["Да, сэр."]
     assert all(len(t.split()) <= 2 for t in phone_live.greeting_texts("ru", "none"))
     assert phone_live._same_words("Да, сэр.", "да сэр")
@@ -212,8 +212,8 @@ def test_short_greetings_reuse_already_recorded_clips(tmp_path, monkeypatch):
     monkeypatch.setattr(services, "persona", persona)
     monkeypatch.setattr(phone_live, "_live_say", no_live)
     out = asyncio.run(phone_live.greetings(1))
-    assert [c["text"] for c in out["clips"]] == ["Да, сэр.", "Да, шеф.", "Да, босс."]
-    assert out["key"].startswith("v5_")
+    assert [c["text"] for c in out["clips"]] == ["Да, сэр.", "Да, шеф."]
+    assert out["key"].startswith(f"v{phone_live.GREETINGS_VERSION}_")
 
 
 def test_depleted_prepay_is_a_billing_error():

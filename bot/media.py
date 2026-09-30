@@ -73,16 +73,19 @@ async def youtube_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
 DEFAULT_NEAR = (40.7821, 72.3442)
 
 
-async def geocode(query: str, near: tuple[float, float] | None = None) -> dict[str, Any] | None:
-    """Адрес/место → {"lat", "lon", "name"} поблизости (≈60 км вокруг него)."""
+async def geocode(query: str, near: tuple[float, float] | None = None, *, world: bool = False) -> dict[str, Any] | None:
+    """Адрес/место → {"lat", "lon", "name"} поблизости (≈60 км вокруг него). world=True — город/место где угодно
+    (30.09: «еду в Самарканд / Москву / Стамбул» — намаз и мечети там)."""
     lat, lon = near or DEFAULT_NEAR
     box = f"{lon - 0.6},{lat + 0.45},{lon + 0.6},{lat - 0.45}"
-    params = {"q": query, "format": "jsonv2", "limit": 1, "accept-language": "ru,uz", "viewbox": box, "bounded": 1}
+    params = {"q": query, "format": "jsonv2", "limit": 1, "accept-language": "ru,uz"}
+    if not world:
+        params.update({"viewbox": box, "bounded": 1})
     try:
         async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "JarvisSelfBot/1.5 (personal assistant)"}) as http:
             res = await http.get("https://nominatim.openstreetmap.org/search", params=params)
             rows = res.json() if res.status_code == 200 else []
-            if not rows:  # не нашли рядом — по всей стране
+            if not rows and not world:  # не нашли рядом — по всей стране
                 params.pop("bounded")
                 params["countrycodes"] = "uz"
                 res = await http.get("https://nominatim.openstreetmap.org/search", params=params)

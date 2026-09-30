@@ -171,7 +171,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     )
     if mode == "wake":
         w = wake or {}
-        title = {"shef": "Шеф", "ser": "Сэр", "boss": "Босс", "mix": "Шеф"}.get(p.honorific, name)
+        title = {"shef": "Шеф", "ser": "Сэр", "boss": "Босс", "mix": "Сэр"}.get(p.honorific, name)
         quiz = w.get("quiz") or ""
         today = w.get("today") or ""
         return base + (
