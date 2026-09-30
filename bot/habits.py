@@ -178,23 +178,4 @@ def prompt_lines(meals: dict[str, Any], spending: dict[str, Any], lang: str = "r
     return out
 
 
-def habits_card(meals: dict[str, Any], spending: dict[str, Any], lang: str = "ru") -> list[str]:
-    """Короткая карточка «Что я о тебе знаю» для экрана/сводки."""
-    uz = lang == "uz"
-    out: list[str] = []
-    if meals.get("days_logged"):
-        out.append(f"🍽 {'O`rtacha' if uz else 'В среднем'} <b>{meals.get('avg_kcal')}</b> {'kkal/kun' if uz else 'ккал/день'} · {meals.get('days_logged')} {'kun' if uz else 'дн.'}")
-        for s in MEAL_ORDER:
-            info = meals["slots"].get(s)
-            if info and info.get("typical"):
-                out.append(f"   • {_slot_line(s, info, lang)}")
-    if spending.get("days"):
-        out.append(f"💸 {'O`rtacha' if uz else 'В среднем'} <b>{fin.fmt_money(spending['avg_per_day'])}</b>/{'kun' if uz else 'день'}"
-                   + (f" · {'ish kunlari' if uz else 'будни'} {fin.fmt_money(spending['avg_weekday'])} · {'dam olish' if uz else 'выходные'} {fin.fmt_money(spending['avg_weekend'])}"
-                      if spending.get("avg_weekday") and spending.get("avg_weekend") else ""))
-        for c in spending["top_categories"][:3]:
-            out.append(f"   • {cats.label(c['category'], lang)} ~{fin.fmt_money(c['per_day'])}/{'kun' if uz else 'день'}")
-    return out
-
-
-__all__ = ["meal_patterns", "spending_patterns", "expected_by_now", "prompt_lines", "habits_card", "meal_slot", "MEAL_ORDER"]
+__all__ = ["meal_patterns", "spending_patterns", "expected_by_now", "prompt_lines", "meal_slot", "MEAL_ORDER"]

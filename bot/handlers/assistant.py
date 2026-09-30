@@ -18,7 +18,6 @@ from .. import analysis
 from .. import cache
 from .. import finance as fin
 from .. import goals as goals_mod
-from .. import habits
 from .. import services
 from .. import tasks as tasks_mod
 from .. import ui
@@ -262,19 +261,6 @@ async def _goal_statuses(profile: Profile, goals: list[dict[str, Any]] | None = 
         return [analysis.goal_status(g, profile.today) | {"kind": "save", "flags": []} for g in rows], {}
 
 
-async def _habits_block(profile: Profile) -> str | None:
-    """Карточка «Что я о тебе знаю» — привычки из данных (еда по слотам, средние траты)."""
-    try:
-        logs, entries = await services.calorie_logs(profile, 30), await services.finance_entries(profile.telegram_id)
-        lines = habits.habits_card(habits.meal_patterns(logs, tz=profile.tz, today=profile.today), habits.spending_patterns(entries, today=profile.today), profile.lang)
-    except Exception:
-        logger.debug("habits card failed", exc_info=True)
-        return None
-    if not lines:
-        return None
-    return ui.card(f"🧠 <b>{'Odatlaringiz' if profile.lang == 'uz' else 'Что я о тебе знаю'}</b>", lines)
-
-
 async def render_goals(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
     uz = profile.lang == "uz"
     if not await db.ensure_available("savings_goals"):
@@ -289,7 +275,6 @@ async def render_goals(target: Message | CallbackQuery, state: FSMContext, profi
             blocks.append(ui.card(f"{icon} <b>{h(st.get('title'))}</b>", _goal_lines(st, profile, meals=meals)))
         if not goals:
             blocks.append(ui.muted("Maqsadlar yo'q." if uz else "Целей пока нет."))
-        blocks.append(await _habits_block(profile))
         text = ui.join(*blocks)
     if notice:
         text += f"\n\n{notice}"
