@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import analysis
 from .. import cache
 from .. import finance as fin
+from .. import goal_ideas, goal_steps
 from .. import goals as goals_mod
 from .. import services
 from .. import tasks as tasks_mod
@@ -261,30 +262,76 @@ async def _goal_statuses(profile: Profile, goals: list[dict[str, Any]] | None = 
         return [analysis.goal_status(g, profile.today) | {"kind": "save", "flags": []} for g in rows], {}
 
 
-async def render_goals(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None) -> None:
+async def render_goals(target: Message | CallbackQuery, state: FSMContext, profile: Profile, *, notice: str | None = None,
+                       show_ideas: bool = False) -> None:
     uz = profile.lang == "uz"
+    ideas: list[dict[str, Any]] = []
     if not await db.ensure_available("savings_goals"):
         text, goals = "⚠️ " + profile.tr(*MIGRATION_HINT), []
     else:
         goals = await services.goals(profile.telegram_id)
+        if goals:
+            try:
+                if await goal_steps.ensure_steps(profile, goals):   # 30.09: свободным целям — этапы (прогресс считается по ним)
+                    goals = await services.goals(profile.telegram_id)
+            except Exception:
+                logger.debug("goal steps failed", exc_info=True)
         statuses, meals = await _goal_statuses(profile, goals) if goals else ([], {})
         header = ui.title("🎯", "Maqsadlar" if uz else "Цели")
         blocks: list[str | None] = [header]
         for st in statuses:
             icon = _GOAL_ICON.get(str(st.get("kind") or "save"), "🎯")
             blocks.append(ui.card(f"{icon} <b>{h(st.get('title'))}</b>", _goal_lines(st, profile, meals=meals)))
+        if not goals or show_ideas:
+            # 30.09: пустой экран (или «💡 Идеи целей») — предложения по его же данным, добавляются одной кнопкой
+            try:
+                ideas = await goal_ideas.ideas(profile, goals)
+            except Exception:
+                logger.debug("goal ideas failed", exc_info=True)
+            cache.put(profile.telegram_id, ("goal_ideas",), {i["key"]: i for i in ideas}, 1800)
         if not goals:
             blocks.append(ui.muted("Maqsadlar yo'q." if uz else "Целей пока нет."))
+        if ideas:
+            blocks.append(ui.card("💡 <b>" + ("Sizning ma'lumotlaringiz bo'yicha g'oyalar" if uz else "Идеи по вашим данным") + "</b>",
+                                  [f"{i['icon']} <b>{h(i['title'])}</b>\n   <i>{h(i['why'])}</i>" for i in ideas]))
+        elif show_ideas:
+            blocks.append(ui.muted("Hozircha yangi g'oyalar yo'q." if uz else "Новых идей пока нет — ваши цели уже покрывают данные."))
         text = ui.join(*blocks)
     if notice:
         text += f"\n\n{notice}"
     await state.set_state(BotStates.waiting_goal_input)
-    kb = goals_keyboard(goals, profile.lang)
+    kb = goals_keyboard(goals, profile.lang, ideas=ideas)
     if isinstance(target, CallbackQuery):
         await remember_panel(target, state)
         await safe_edit(target, text, kb)
     else:
         await show_panel(target, state, text, kb)
+
+
+@router.callback_query(F.data == "goal:ideas")
+async def cb_goal_ideas(callback: CallbackQuery, state: FSMContext) -> None:
+    await answer_now(callback)
+    await render_goals(callback, state, await get_profile(callback.from_user), show_ideas=True)
+
+
+@router.callback_query(F.data.startswith("goal:idea:"))
+async def cb_goal_idea(callback: CallbackQuery, state: FSMContext) -> None:
+    """«➕ …» под идеей: создаёт цель со всеми параметрами из идеи (тот же add_goal, что у JES)."""
+    from .. import agent_tools
+
+    profile = await get_profile(callback.from_user)
+    key = str(callback.data)[len("goal:idea:"):]
+    cached = cache.get(profile.telegram_id, ("goal_ideas",)) or {}
+    idea = cached.get(key)
+    if idea is None:
+        idea = next((i for i in await goal_ideas.ideas(profile) if i["key"] == key), None)
+    if idea is None:
+        await answer_now(callback, profile.tr("Идея устарела — откройте «Цели» заново", "G'oya eskirdi — «Maqsadlar»ni qayta oching"), alert=True)
+        return
+    res = await agent_tools.run("add_goal", dict(idea["args"]), agent_tools.ToolContext(profile=profile, text=""))
+    await answer_now(callback, "✅" if not res.get("error") else str(res["error"])[:150], alert=bool(res.get("error")))
+    cache.invalidate(profile.telegram_id, "goals")
+    await render_goals(callback, state, profile, notice=("✅ " + profile.tr("Цель добавлена: ", "Maqsad qo'shildi: ") + h(idea["title"])) if not res.get("error") else None)
 
 
 @router.callback_query(F.data == "menu:goals")

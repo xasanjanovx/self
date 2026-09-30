@@ -254,6 +254,8 @@ PLAN_PROMPT = (
     "any — если дело не привязано к окну.\n"
     "• kind: main — не больше 3 главных дел (срочные и просроченные задачи, шаг к цели, ежедневные дела); task — обычные дела дня; "
     "opt — «если успеете», 2–3 необязательных. Всего не больше {max_items} пунктов, день не должен быть забит; между делами — воздух.\n"
+    "• Цели: «ШАГ СЕГОДНЯ» у цели в данных — возьми как пункт (главный, если срочно) с ref type=goal и id цели; формулировку сократи. "
+    "Отметка такого пункта сама двигает цель.\n"
     "• ref: если пункт — это его существующая задача (в данных «[id] текст»), цель или ежедневное дело — укажи её id ИЗ ДАННЫХ (type "
     "task|goal|daily). Нет такой записи — ref null (главные такие пункты станут задачами сами). Не выдумывай id.\n"
     "• Пункты — только ДЕЛА: задачи, шаги к целям, ежедневные дела, уроки. Еда (для неё поле food), отдых, сон, прогулка, намаз (его уже "
@@ -326,7 +328,8 @@ def clean_items(raw: Any, data: dict[str, Any], *, previous: list[dict[str, Any]
             next((p for p in old if _similar(p.get("text", ""), text) >= 0.8), None)
         items.append({"id": (prev or {}).get("id") or f"i{int(time.time() * 1000) % 10**8}{n}", "text": text, "kind": kind, "window": window,
                       "ref": _clean_ref(it.get("ref"), open_ids, daily_ids, goal_ids) or (prev or {}).get("ref"),
-                      "done": bool((prev or {}).get("done")) or bool(it.get("done") and prev), "auto": bool((prev or {}).get("auto"))})
+                      "done": bool((prev or {}).get("done")) or bool(it.get("done") and prev), "auto": bool((prev or {}).get("auto")),
+                      "effect": (prev or {}).get("effect")})
         if len(items) >= MAX_ITEMS:
             break
     return items
@@ -657,6 +660,11 @@ async def _apply_done(profile: Profile, it: dict[str, Any]) -> None:
             habit = daily_tasks.find(uid, ref["id"])
             if habit is not None:
                 daily_tasks.done(uid, habit, profile.today)
+        elif ref.get("type") == "goal":
+            # 30.09 «прогресс без ручного ввода»: ✅ у шага цели двигает саму цель (отметка привычки, сумма в накопления, этап)
+            from . import goal_steps
+
+            it["effect"] = await goal_steps.apply(profile, ref["id"], bool(it["done"]), it.get("effect"))
     except Exception:
         logger.warning("plan: отметка не дошла до записи", exc_info=True)
 

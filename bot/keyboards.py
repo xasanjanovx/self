@@ -833,8 +833,13 @@ def notes_keyboard(notes: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
 _GOAL_ICON = {"save": "🎯", "spend_cap": "💸", "weight": "⚖️", "habit": "🔁", "custom": "🏁"}
 
 
-def goals_keyboard(goals: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+def goals_keyboard(goals: list[dict], lang: str = "ru", *, ideas: list[dict] | None = None) -> InlineKeyboardMarkup:
     rows = [[_btn(f"{_GOAL_ICON.get(str(g.get('kind') or 'save'), '🎯')} {_short(g.get('title'))}", f"goal:view:{g.get('id')}", icon=_pe.ID_GOAL)] for g in goals[:10]]
+    # 30.09: идеи целей по его данным — «➕ …» создаёт цель одной кнопкой; есть цели, а идей не показано — «💡 Идеи целей»
+    for idea in (ideas or [])[:4]:
+        rows.append([_btn(f"➕ {idea['icon']} {_short(idea['title'], 34)}", f"goal:idea:{idea['key']}"[:64])])
+    if not ideas and goals:
+        rows.append([_btn("💡 " + ("Maqsad g'oyalari" if lang == "uz" else "Идеи целей"), "goal:ideas")])
     rows.append([_btn(t(lang, "goal_add"), "goal:add", style="primary", icon=_pe.ID_ADD), _back(lang)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -276,6 +276,13 @@ def _status_habit(goal: dict[str, Any], d: GoalData) -> dict[str, Any]:
 def _status_custom(goal: dict[str, Any], d: GoalData) -> dict[str, Any]:
     st = _base(goal, d.today)
     progress = max(0.0, min(100.0, float(goal.get("saved_amount") or 0)))
+    steps = params_of(goal).get("steps")
+    steps = [s for s in steps if isinstance(s, dict) and s.get("text")] if isinstance(steps, list) else []
+    if steps:  # 30.09: у цели есть этапы — прогресс считается по ним сам (✅ в плане отмечает очередной этап)
+        done_n = sum(1 for s in steps if s.get("done"))
+        progress = done_n * 100.0 / len(steps)
+        st_next = next((s for s in steps if not s.get("done")), None)
+        st.update({"steps_total": len(steps), "steps_done": done_n, "next_step_text": st_next["text"] if st_next else None})
     created = _day(goal.get("created_at")) or d.today
     updated = _day(goal.get("updated_at")) or created
     deadline = _day(goal.get("deadline"))
@@ -323,7 +330,20 @@ def _dish_suggestions(meals: dict[str, Any], slot: str, budget: float, lang: str
 
 
 def lines(st: dict[str, Any], lang: str = "ru", *, meals: dict[str, Any] | None = None) -> list[str]:
-    """Строки карточки цели на экране «Цели»."""
+    """Строки карточки цели на экране «Цели»: цифры + (30.09) этапы и «следующий шаг» — что сделать сегодня."""
+    from . import goal_steps
+
+    out = _lines_core(st, lang, meals=meals)
+    uz = lang == "uz"
+    if st.get("steps_total"):
+        out.append(f"🪜 {'Bosqichlar' if uz else 'Этапы'}: {st.get('steps_done', 0)}/{st['steps_total']}")
+    nxt = goal_steps.step(st, lang)
+    if nxt:
+        out.append(f"➡️ <b>{'Qadam' if uz else 'Шаг сегодня'}:</b> {h(nxt['text'])}")
+    return out
+
+
+def _lines_core(st: dict[str, Any], lang: str = "ru", *, meals: dict[str, Any] | None = None) -> list[str]:
     uz = lang == "uz"
     kind = st.get("kind")
     out: list[str] = []
@@ -525,6 +545,11 @@ def prompt_summary(statuses: list[dict[str, Any]]) -> str:
             parts.append(f"{head}: {int(st.get('progress_pct') or 0)}%" + (f" (план {int(st['expected_pct'])}%)" if st.get("expected_pct") is not None else "") + (f" до {st['deadline']}" if st.get("deadline") else ""))
         else:
             parts.append(head)
+        from . import goal_steps
+
+        nxt = goal_steps.step(st, "ru")  # 30.09: следующий шаг — модель берёт его в план дня и знает id цели
+        if nxt and parts:
+            parts[-1] += f" → ШАГ СЕГОДНЯ: {nxt['text']}"
     return "; ".join(parts)
 
 
