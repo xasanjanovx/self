@@ -509,7 +509,9 @@ async def media_progress(request: web.Request) -> web.Response:
     uid = owner_id()
     if uid is None:
         return web.json_response({"error": "no owner"}, status=400)
-    item = lessons.note(uid, await _json(request))
+    data = await _json(request)
+    await lessons.adopt_daily_links(uid)  # плейлисты его ежедневных дел — тоже «присланные им»
+    item = lessons.note(uid, data)  # 30.09: чужие ролики (не присланные ссылкой) не запоминаются
     if item is not None:
         from . import deeds
 

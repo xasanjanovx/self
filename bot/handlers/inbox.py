@@ -12,7 +12,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from .. import access, cache, capture
+from .. import access, cache, capture, lessons
 from .. import plan as plan_mod
 from .. import emoji as pe
 from .. import finance as fin
@@ -84,6 +84,11 @@ async def route_text(
         return True
     if cache.get(profile.telegram_id, ("agent_ask",)):
         # Джарвис ждёт ответ на свой вопрос — любой текст («вторую», «25000», «да, долг») идёт ему
+        if await agent.handle_command(message, state, profile, text, voice=voice):
+            return True
+    if lessons.find_links(text):
+        # 30.09: ссылка на видео/плейлист YouTube — только агент (save_video: запомнит и спросит «цель или задача?»);
+        # цифры из ссылки не должны уходить в разбор трат/еды
         if await agent.handle_command(message, state, profile, text, voice=voice):
             return True
     if agent.looks_like_command(text) and not vac.looks_like_vacancy(text):

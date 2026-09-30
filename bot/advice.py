@@ -1,7 +1,7 @@
 """Советы в течение дня (30.09, его выбор): коротко, по ситуации и не чаще 3 раз в день.
 
 «До асра 25 минут — успеете позвонить Алишеру», «съедено мало, а уже 15:00 — пора пообедать», «вы остановились на уроке на 12:30 —
-продолжить?». Правила простые и точные (данные его, ничего не выдумывается); фразу пишет умная модель (не ответила — шаблон).
+продолжить?» (только про видео, которые он сам прислал и поставил целью/задачей). Правила простые и точные (данные его, ничего не выдумывается); фразу пишет умная модель (не ответила — шаблон).
 Подсказки бота по деньгам, долгам и питанию — отдельная система (bot/proactive.py); здесь — про сам день.
 """
 from __future__ import annotations
@@ -116,8 +116,9 @@ async def candidates(profile: Profile) -> list[Tip]:
     # --- урок в процессе
     try:
         if now.hour >= LESSON_AFTER_HOUR:
+            # 30.09: только видео, которые он сам прислал и поставил целью/задачей (не «всё, что смотрел»)
             watching = [r for r in lessons.items(uid) if int(r.get("position") or 0) >= 60 and int(r.get("duration") or 0) >= 8 * 60
-                        and not lessons.finished(r) and time.time() - float(r.get("at") or 0) < 10 * 86400
+                        and lessons.tracked(uid, r) and not lessons.finished(r) and time.time() - float(r.get("at") or 0) < 10 * 86400
                         and time.strftime("%Y-%m-%d", time.localtime(float(r.get("at") or 0))) != today.isoformat()]
             if watching:
                 r = watching[0]

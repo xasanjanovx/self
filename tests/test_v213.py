@@ -24,19 +24,21 @@ def test_daily_task_goal_streak_and_due(tmp_path, monkeypatch):
     assert daily_tasks.today_lines(1, day + timedelta(days=1))[0].startswith("✅ 20:00 Урок английского")
 
 
+def _saved_video(uid: int = 1, title: str = "English Lesson 5 — Past Simple", vid: str = "abcdefghijk", why: str | None = "goal") -> dict:
+    return lessons.register(uid, key=f"v:{vid}", kind="video", video_id=vid, title=title, channel="EngTeacher", why=why)
+
+
 def test_lessons_note_find_and_resume(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    lessons.note(1, {"title": "English Lesson 5 — Past Simple", "channel": "EngTeacher", "position_s": 754, "duration_s": 1500, "state": "paused"})
-    lessons.note(1, {"title": "Какой-то клип", "channel": "Music", "position_s": 30, "duration_s": 200, "state": "closed"})
+    _saved_video()
+    assert lessons.note(1, {"title": "English Lesson 5 — Past Simple", "channel": "EngTeacher", "position_s": 754, "duration_s": 1500, "state": "paused"})
+    # 30.09: всё, что он смотрит сам (не присланное ссылкой), не запоминается
+    assert lessons.note(1, {"title": "Какой-то клип", "channel": "Music", "position_s": 30, "duration_s": 200, "state": "closed"}) is None
+    assert [r["title"] for r in lessons.items(1)] == ["English Lesson 5 — Past Simple"]
     assert lessons.find(1, "english")["title"].startswith("English Lesson 5")
-    assert lessons.find(1)["title"] == "Какой-то клип"                        # без слов — последний
+    assert lessons.find(1)["title"].startswith("English Lesson 5")            # без слов — последний
+    assert lessons.find(1, "клип") is None
 
-    async def search(q, limit=5):  # noqa: ANN001
-        return [{"id": "abcdefghijk", "title": "English Lesson 5 — Past Simple", "channel": "EngTeacher"}]
-
-    from bot import media
-
-    monkeypatch.setattr(media, "youtube_search", search)
     res = asyncio.run(lessons.resume(1, "english"))
     assert res["video_id"] == "abcdefghijk" and res["start"] == 751 and res["position"] == "12:34"
     assert lessons.url(res) == "https://www.youtube.com/watch?v=abcdefghijk&t=751s"
@@ -44,9 +46,85 @@ def test_lessons_note_find_and_resume(tmp_path, monkeypatch):
     assert lessons.video_id_of("https://youtu.be/abcdefghijk?t=5") == "abcdefghijk"
 
 
+def test_lessons_old_auto_collected_rows_are_ignored(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "media").mkdir()
+    (tmp_path / "media" / "1.json").write_text('[{"title": "Старый клип", "position": 300, "duration": 900, "at": 1}]', encoding="utf-8")
+    assert lessons.items(1) == [] and lessons.find(1) is None
+    assert asyncio.run(lessons.resume(1))["error"] == lessons.NOTHING_SAVED
+
+
+def test_saved_but_not_started_video_opens_from_the_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    _saved_video(title="Плейлист про Python", vid="pythonvid01", why=None)
+    res = asyncio.run(lessons.resume(1, "python"))
+    assert res["video_id"] == "pythonvid01" and res["start"] == 0
+
+
+def test_parse_link_and_find_links():
+    assert lessons.parse_link("https://youtu.be/abcdefghijk?t=5") == {"key": "v:abcdefghijk", "kind": "video", "id": "abcdefghijk", "list_id": None}
+    assert lessons.parse_link("https://www.youtube.com/playlist?list=PLabcdefghij")["key"] == "p:PLabcdefghij"
+    assert lessons.parse_link("https://www.youtube.com/watch?v=abcdefghijk&list=PLabcdefghij")["kind"] == "playlist"   # ролик из плейлиста
+    assert lessons.parse_link("https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk")["kind"] == "video"    # «микс» — не плейлист
+    assert lessons.parse_link("https://example.com/watch?v=abcdefghijk") is None
+    assert lessons.find_links("смотри https://youtu.be/abcdefghijk, круто") == ["https://youtu.be/abcdefghijk"]
+    assert lessons.find_links("обычный текст 12345") == []
+
+
+def test_save_registers_video_and_playlist_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    calls = []
+
+    async def oembed(video_id):  # noqa: ANN001
+        calls.append(video_id)
+        return {"title": "Урок 1", "channel": "Канал"}
+
+    async def info(list_id):  # noqa: ANN001
+        calls.append(list_id)
+        return {"title": "Курс английского", "videos": [{"id": "aaaaaaaaaaa", "title": "Урок 1"}, {"id": "bbbbbbbbbbb", "title": "Урок 2"}]}
+
+    monkeypatch.setattr(lessons, "_oembed", oembed)
+    monkeypatch.setattr(lessons, "playlist_info", info)
+    v = asyncio.run(lessons.save(1, "https://youtu.be/ccccccccccc"))
+    p = asyncio.run(lessons.save(1, "https://www.youtube.com/playlist?list=PLabcdefghij", why="goal"))
+    asyncio.run(lessons.save(1, "https://youtu.be/ccccccccccc"))       # повторно — страницу заново не открываем
+    assert calls == ["ccccccccccc", "PLabcdefghij"]
+    assert v["title"] == "Урок 1" and p["title"] == "Курс английского" and len(p["videos"]) == 2 and p["why"] == "goal"
+    assert len(lessons.saved(1)) == 2
+    # телефон прислал урок из плейлиста — запоминаем, id берём из плейлиста
+    item = lessons.note(1, {"title": "Урок 2", "position_s": 100, "duration_s": 900})
+    assert item["src"] == "p:PLabcdefghij" and item["id"] == "bbbbbbbbbbb"
+    assert lessons.tracked(1, item) is True
+    assert lessons.forget(1, "курс")["title"] == "Курс английского" and lessons.items(1) == []
+
+
+def test_tracked_only_for_goal_or_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    _saved_video(vid="keepvideo01", title="Просто ролик про что-то интересное", why=None)
+    item = lessons.note(1, {"title": "Просто ролик про что-то интересное", "position_s": 200, "duration_s": 900})
+    assert item is not None and lessons.tracked(1, item) is False       # советов «продолжим?» про него не будет
+    lessons.set_why(1, "v:keepvideo01", "task")
+    assert lessons.tracked(1, item) is True
+
+
+def test_adopt_daily_links_registers_playlist_of_habit(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    async def info(list_id):  # noqa: ANN001
+        return {"title": "Курс", "videos": [{"id": "aaaaaaaaaaa", "title": "Урок 1"}]}
+
+    monkeypatch.setattr(lessons, "playlist_info", info)
+    daily_tasks.add(1, "Урок английского", at="20:00", link="https://www.youtube.com/playlist?list=PLabcdefghij", total=40)
+    asyncio.run(lessons.adopt_daily_links(1))
+    assert [(s["key"], s["why"]) for s in lessons.saved(1)] == [("p:PLabcdefghij", "goal")]
+    assert lessons.note(1, {"title": "Урок 1", "position_s": 10, "duration_s": 600}) is not None
+
+
 def test_lessons_playlist_next_after_finished(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    lessons.note(1, {"title": "Урок 1", "position_s": 590, "duration_s": 600})  # досмотрел
+    lessons.register(1, key="p:PLxxxxxxxxxx", kind="playlist", list_id="PLxxxxxxxxxx", title="Курс",
+                     videos=[{"id": "aaaaaaaaaaa", "title": "Урок 1"}, {"id": "bbbbbbbbbbb", "title": "Урок 2"}])
+    assert lessons.note(1, {"title": "Урок 1", "position_s": 590, "duration_s": 600})  # досмотрел
 
     async def playlist(list_id):  # noqa: ANN001
         return [{"id": "aaaaaaaaaaa", "title": "Урок 1"}, {"id": "bbbbbbbbbbb", "title": "Урок 2"}]

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import daily_tasks, lessons
-from .agent_tools import ARR, P, ToolContext, _num, _str, tool
+from . import cache, daily_tasks, lessons, undo
+from .agent_tools import ARR, DATE, P, ToolContext, _bool, _num, _str, parse_day, tool
+from .context import db
 
 
 @tool(
@@ -30,6 +31,11 @@ async def _add_daily(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
                           link=_str(a.get("link")) or "", total=int(total) if total else None)
     except ValueError as exc:
         return {"error": str(exc)}
+    if item.get("link"):
+        try:
+            await lessons.save(ctx.profile.telegram_id, item["link"], why="goal")  # ссылку прислал сам — бот помнит, где он остановился
+        except ValueError:
+            pass
     return {"ok": True, **daily_tasks.describe(item, ctx.profile.now.date())}
 
 
@@ -78,6 +84,92 @@ async def _resume_video(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if res.get("error"):
         return res
     return {"ok": True, "title": res["title"], "from": res["position"], "next_lesson": res.get("next"), "url": lessons.url(res)}
+
+
+# ------------------------------------------------------------------ присланные видео и плейлисты (30.09)
+_SAVE_ASK = ["🎯 Цель — каждый день", "📝 Задача", "Просто помнить"]
+_TIME_ASK = ["09:00", "13:00", "20:00", "Без напоминания"]
+
+
+def _kind_word(entry: dict[str, Any]) -> str:
+    return "плейлист" if entry.get("kind") == "playlist" else "видео"
+
+
+@tool(
+    "save_video",
+    "Запомнить видео или плейлист YouTube, которые он САМ прислал ссылкой (бот хранит только такие; что он смотрит сам — не запоминает). "
+    "Потом бот помнит, где он остановился («продолжи урок»). purpose: goal — он сказал «цель» / «каждый день» / «пройти курс» (ежедневное дело с "
+    "прогрессом по плейлисту), task — «задача» / «посмотреть до пятницы» (разовая), keep — «просто запомни». Не сказал, что это, — purpose "
+    "НЕ передавай: инструмент сам спросит кнопками и ничего лишнего не создаст.",
+    {"link": P("STRING", "ссылка YouTube; без неё — последняя присланная"),
+     "purpose": P("STRING", "goal | task | keep — ТОЛЬКО если он сам сказал", enum=["goal", "task", "keep"]),
+     "time": P("STRING", "ЧЧ:ММ — во сколько напоминать каждый день (для goal), если назвал"),
+     "no_time": P("BOOLEAN", "для goal: он сказал «без напоминания»"),
+     "due_date": DATE, "title": P("STRING", "своё название цели/задачи, если он назвал")},
+)
+async def _save_video(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    uid = ctx.profile.telegram_id
+    links = lessons.find_links(_str(a.get("link")) or "")
+    if links:
+        try:
+            entry = await lessons.save(uid, links[0])
+        except ValueError:
+            return {"error": "это не ссылка на видео или плейлист YouTube"}
+    else:
+        entry = next(iter(lessons.saved(uid)), None)
+        if entry is None:
+            return {"error": "нет ссылки — пусть пришлёт ссылку на видео или плейлист"}
+    key, name = entry["key"], entry.get("title") or "без названия"
+    videos = len(entry.get("videos") or [])
+    base = {"saved": name, "kind": _kind_word(entry), "videos": videos or None}
+    purpose = _str(a.get("purpose"))
+    if purpose not in {"goal", "task", "keep"}:
+        ctx.ask = {"question": f"Запомнил {_kind_word(entry)} «{name[:70]}». Что с ним сделать?", "options": _SAVE_ASK, "by": "save_video"}
+        return {**base, "asked": ctx.ask["question"], "nothing_saved_more": True,
+                "hint": "ответ «Цель» → save_video(purpose=goal), «Задача» → purpose=task, «Просто помнить» → purpose=keep"}
+    if ctx.ask and ctx.ask.get("by") == "save_video":
+        ctx.ask = None
+    if purpose == "keep":
+        lessons.set_why(uid, key, None)
+        return {**base, "ok": True}
+    if purpose == "goal":
+        at, no_time = _str(a.get("time")), bool(_bool(a.get("no_time")))
+        if not at and not no_time:
+            ctx.ask = {"question": "Во сколько напоминать каждый день?", "options": _TIME_ASK, "by": "save_video"}
+            return {**base, "asked": ctx.ask["question"], "hint": "ответ: время → save_video(purpose=goal, time=ЧЧ:ММ); «Без напоминания» → no_time=true"}
+        try:
+            item = daily_tasks.add(uid, _str(a.get("title")) or name, at=None if no_time else at, link=entry.get("link") or "",
+                                   total=videos if entry.get("kind") == "playlist" and videos else None)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        lessons.set_why(uid, key, "goal")
+        ctx.mutated = True
+        return {**base, "ok": True, "goal": daily_tasks.describe(item, ctx.profile.now.date())}
+    # task
+    if not await db.ensure_available("tasks"):
+        return {"error": "таблица задач недоступна"}
+    day = parse_day(a.get("due_date"), ctx.profile.today)
+    text = (_str(a.get("title")) or f"Посмотреть: {name}")[:150] + f" — {entry.get('link') or ''}"
+    row = await db.add_task(uid, text=text.strip(), due_date=day.isoformat() if day else None, due_time=None)
+    cache.invalidate(uid, "tasks")
+    undo.push(uid, {"type": "delete_tasks", "ids": [row.get("id")]})
+    lessons.set_why(uid, key, "task")
+    ctx.mutated = True
+    return {**base, "ok": True, "task": {"text": text, "due_date": day.isoformat() if day else None}}
+
+
+@tool("list_saved_videos", "Видео и плейлисты, которые он присылал и просил запомнить («какие видео у меня сохранены?»).")
+async def _list_saved_videos(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    rows = lessons.saved(ctx.profile.telegram_id)
+    return {"saved": [{"title": r.get("title") or "без названия", "kind": _kind_word(r), "videos": len(r.get("videos") or []) or None,
+                       "as": {"goal": "цель", "task": "задача"}.get(str(r.get("why")), "просто помню"), "link": r.get("link")} for r in rows[:20]]}
+
+
+@tool("forget_video", "Забыть присланное видео или плейлист («удали видео про …», «забудь этот плейлист»).",
+      {"query": P("STRING", "слова из названия; без них — последнее")})
+async def _forget_video(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    hit = lessons.forget(ctx.profile.telegram_id, _str(a.get("query")) or "")
+    return {"ok": True, "forgot": hit.get("title") or "без названия"} if hit else {"error": "такого сохранённого видео нет"}
 
 
 # ------------------------------------------------------------------ напоминания по месту (bot/geo.py)
