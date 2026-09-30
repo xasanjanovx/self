@@ -135,9 +135,9 @@ async def send(bot: Bot, profile: Profile, p: Persona) -> bool:
         except Exception:
             logger.warning("weekly: голос не вышел", exc_info=True)
     if ogg:
-        await bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jes-week.ogg"), caption=caption)
+        await bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jes-week.ogg"), caption=caption, parse_mode="HTML")
     else:
-        await bot.send_message(profile.telegram_id, caption)
+        await bot.send_message(profile.telegram_id, caption, parse_mode="HTML")
     logger.info("weekly: итоги недели отправлены %s (%s)", profile.telegram_id, "голосом" if ogg else "текстом")
     return True
 

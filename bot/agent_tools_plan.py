@@ -27,7 +27,7 @@ async def _to_chat(uid: int, html: str, keyboard=None) -> bool:  # noqa: ANN001
     from .context import bot_instance
 
     try:
-        await bot_instance().send_message(uid, html, reply_markup=keyboard, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        await bot_instance().send_message(uid, html, reply_markup=keyboard, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
         return True
     except Exception:
         logger.warning("plan: в чат не ушло", exc_info=True)
@@ -44,15 +44,100 @@ async def _to_chat(uid: int, html: str, keyboard=None) -> bool:  # noqa: ANN001
      "city": P("STRING", "город или место, если в этот день он не дома («Самарканд», «Москва», «Стамбул»)")},
 )
 async def _day_plan(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from .context import bot_instance
+
     profile = ctx.profile
     day = parse_day(a.get("date"), profile.today) or profile.today
-    persona = await services.persona(ctx.uid)
-    text = await plan.build_plan(profile, persona, day=day, city=_str(a.get("city")))
-    if await _to_chat(ctx.uid, text, plan.keyboard(profile, "plan")):
-        return {"ok": True, "sent_to_chat": True,
-                "note": "полный план уже отправлен отдельным сообщением в чат; не повторяй его — скажи 2–3 главных пункта "
-                        "(голосом — одной-двумя фразами) и что план в чате"}
-    return {"ok": True, "plan_text": text, "note": "чат недоступен — перескажи план коротко"}
+    try:
+        bot = bot_instance()
+    except Exception:
+        return {"error": "чат сейчас недоступен"}
+    await plan.send(bot, profile, "tomorrow" if day > profile.today else "morning", city=_str(a.get("city")), day=day)
+    st = plan.load(ctx.uid)
+    main = [it["text"] for it in st.get("items") or [] if it.get("kind") == "main"][:3]
+    return {"ok": True, "sent_to_chat": True, "main": main,
+            "note": "план уже отправлен отдельным сообщением в чат (закреплён, пункты с галочками); не повторяй его — назови 2–3 главных "
+                    "пункта (голосом — одной-двумя фразами) и что план в чате"}
+
+
+@tool(
+    "edit_plan",
+    "ИЗМЕНИТЬ план дня, который уже в чате: «убери прогулку из плана», «добавь в план звонок Алишеру после асра», «перенеси урок на "
+    "вечер», «поставь главным оплату интернета». Сообщение с планом обновится само. Не для «сделал» — для этого plan_done.",
+    {"instruction": P("STRING", "что поменять в плане — своими словами, со всеми подробностями")},
+    ("instruction",),
+)
+async def _edit_plan(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from .context import bot_instance
+
+    ask = _str(a.get("instruction")) or ""
+    if not plan.load(ctx.uid).get("day"):
+        return {"error": "плана ещё нет — сначала day_plan"}
+    st = await plan.edit(bot_instance(), ctx.profile, ask)
+    if st is None:
+        return {"error": "не получилось поменять план"}
+    return {"ok": True, "items": [("✅ " if it.get("done") else "☐ ") + it["text"] for it in st["items"]],
+            "note": "план в чате обновлён; скажи одной фразой, что поменяла"}
+
+
+@tool(
+    "plan_done",
+    "ОТМЕТИТЬ пункт плана дня сделанным (или снять отметку): «сделал, позвонил Алишеру», «урок досмотрел», «оплатил интернет». "
+    "Отмечает и саму связанную задачу или ежедневное дело. done=false — снять отметку.",
+    {"item": P("STRING", "что он сделал — как назвал сам"), "done": P("BOOLEAN", "true — сделано (по умолчанию), false — снять")},
+    ("item",),
+)
+async def _plan_done(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from .context import bot_instance
+
+    res = await plan.mark_done(bot_instance(), ctx.profile, _str(a.get("item")) or "", done=a.get("done") is not False)
+    if res is None:
+        return {"error": "в плане дня такого пункта нет (это могло быть обычной задачей — тогда update_task/complete_tasks)"}
+    return {"ok": True, **res, "note": "отмечено в плане и в задаче; коротко подтверди, сколько пунктов осталось"}
+
+
+@tool(
+    "quran_text",
+    "СУРА или аяты Корана с арабским текстом и ТРАНСЛИТЕРАЦИЕЙ латиницей — точно из Корана (сам не пиши текст). «Пришли суру Ихлас», "
+    "«аят аль-Курси с транслитерацией», «первые 5 аятов Бакары». Приходит ему в чат отдельным сообщением.",
+    {"surah": P("INTEGER", "номер суры 1–114 (Фатиха 1, Бакара 2, аят аль-Курси — 2:255, Ясин 36, Ихлас 112, Фалак 113, Нас 114)"),
+     "from_ayah": P("INTEGER", "с какого аята (по умолчанию с первого)"), "to_ayah": P("INTEGER", "по какой аят (по умолчанию до конца суры)")},
+    ("surah",),
+)
+async def _quran_text(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import quran
+    from .context import bot_instance
+
+    try:
+        n = int(a.get("surah"))
+    except (TypeError, ValueError):
+        return {"error": "нужен номер суры 1–114"}
+
+    def num(key: str) -> int | None:
+        try:
+            return int(a.get(key)) if a.get(key) is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    texts = await quran.messages(n, num("from_ayah"), num("to_ayah"), lang=ctx.profile.lang)
+    if not texts:
+        return {"error": "не удалось получить текст суры — попробуй позже"}
+    bot = bot_instance()
+    for t in texts:
+        await bot.send_message(ctx.uid, t, parse_mode="HTML")
+    return {"ok": True, "sent_to_chat": True, "messages": len(texts), "note": "текст суры с транслитерацией в чате; скажи одной фразой"}
+
+
+@tool(
+    "week_plan",
+    "ПЛАНЁРКА НЕДЕЛИ: 3 цели на неделю по дням (из его целей, задач, платежей, итогов прошлой недели). «Поставь цели на неделю», "
+    "«планёрка». Приходит в чат; утренний план дня потом опирается на эти цели.",
+)
+async def _week_plan(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from .context import bot_instance
+
+    ok = await plan.send(bot_instance(), ctx.profile, "week")
+    return {"ok": bool(ok), "sent_to_chat": bool(ok), "note": "планёрка недели в чате; назови цели одной-двумя фразами"}
 
 
 @tool(

@@ -63,10 +63,10 @@ def test_weekly_text_and_voice(monkeypatch):
     sent: list = []
 
     class FakeBot:
-        async def send_voice(self, uid, voice, caption=None):  # noqa: ANN001, ANN202
+        async def send_voice(self, uid, voice, caption=None, parse_mode=None):  # noqa: ANN001, ANN202
             sent.append(("voice", caption))
 
-        async def send_message(self, uid, text):  # noqa: ANN001, ANN202
+        async def send_message(self, uid, text, parse_mode=None):  # noqa: ANN001, ANN202
             sent.append(("text", text))
 
     f = {"start": date(2026, 9, 21), "end": date(2026, 9, 27),

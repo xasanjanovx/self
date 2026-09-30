@@ -168,7 +168,7 @@ async def maybe_send(bot, profile: Profile) -> bool:  # noqa: ANN001
     _save(uid, st)
     text = await _phrase(profile, await services.persona(uid), tip)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="▶️ " + profile.tr("Продолжить урок", "Darsni davom ettirish"), url=tip.url)]]) if tip.url else None
-    await bot.send_message(uid, "💡 " + text, reply_markup=kb)
+    await bot.send_message(uid, "💡 " + text, reply_markup=kb, parse_mode="HTML")
     logger.info("advice: совет %s отправлен %s (%d/%d сегодня)", tip.key, uid, len(st["keys"]), MAX_PER_DAY)
     return True
 

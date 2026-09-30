@@ -13,6 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from .. import access, cache, capture
+from .. import plan as plan_mod
 from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
@@ -24,6 +25,7 @@ from ..profile import Profile, h
 from . import agent
 from . import finance as finance_h
 from . import nutrition as nutrition_h
+from . import plan as plan_h
 from . import vacancy as vacancy_h
 from . import wake as wake_h
 from .common import get_photo_bytes, get_profile, message_text, safe_delete, show_progress, transcribe_audio
@@ -141,12 +143,17 @@ async def handle_photo_message(message: Message, state: FSMContext, profile: Pro
 async def fallback(message: Message, state: FSMContext) -> None:
     profile = await get_profile(message.from_user)
     raw_text = message_text(message)
+    # 30.09: ответ на сообщение с планом дня (текстом или голосом) — поменять план: «убери прогулку», «добавь звонок в 15:00», «сделал урок»
+    reply = message.reply_to_message
+    to_plan = bool(reply and access.is_owner(profile.telegram_id) and plan_mod.is_plan_message(profile.telegram_id, reply.message_id))
 
     if message.photo:
         await handle_photo_message(message, state, profile)
         return
 
     if raw_text:
+        if to_plan and await plan_h.handle_reply(message, profile, raw_text):
+            return
         if await route_text(message, state, profile, raw_text):
             return
         await safe_delete(message)
@@ -160,6 +167,8 @@ async def fallback(message: Message, state: FSMContext) -> None:
         except Exception:
             logger.exception("transcribe failed")
             transcript = ""
+        if transcript and to_plan and await plan_h.handle_reply(message, profile, transcript):
+            return
         if transcript and access.is_owner(profile.telegram_id) and (capture.open_for(profile.telegram_id) or capture.eligible(transcript)):
             # 30.09: несколько дел голосом — собираем пачку, добавляем сразу и составляем план дня (bot/capture.py)
             await capture.push(message, state, profile, transcript)

@@ -76,9 +76,10 @@ async def report_worker(bot: Bot) -> None:
                 week_key = _due_key(local_now, "weekly")
                 if week_key is not None and access.is_owner(telegram_id):
                     try:
-                        from . import weekly
+                        from . import plan, weekly
 
                         await weekly.maybe_send(bot, profile, week_key)
+                        await plan.maybe_send_week(bot, profile, week_key)  # 30.09 его выбор: планёрка недели — 3 цели по дням
                     except TelegramForbiddenError:
                         pass
                     except Exception:

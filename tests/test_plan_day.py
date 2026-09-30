@@ -2,7 +2,7 @@
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 
-from bot import advice, capture, plan, prayer
+from bot import advice, capture, prayer
 from bot import ai as ai_mod
 from bot.persona import Persona
 from bot.profile import Profile
@@ -85,59 +85,7 @@ def test_smart_model_is_used_for_owner_chat_when_free_key_is_off(monkeypatch):
     assert seen == [ai_mod.smart_model(), None] and ai_mod._smart_turn.get() is None
 
 
-# ------------------------------------------------------------------ план
-def test_plan_uses_smart_model_and_falls_back_to_code(monkeypatch):
-    from bot import services
-
-    async def gather(profile, *, day, place=None):  # noqa: ANN001, ANN202
-        return {"text": "Намаз: Бомдод 04:52", "pray": {"times": {"Fajr": "04:52", "Dhuhr": "12:22"}}, "open": [{"text": "позвонить", "due_time": "15:00"}],
-                "habits": [{"title": "английский"}], "day": day}
-
-    async def persona(uid):  # noqa: ANN001, ANN202
-        return Persona(lang="ru")
-
-    asked: list = []
-
-    async def ask(prompt, **k):  # noqa: ANN001, ANN003, ANN202
-        asked.append(prompt)
-        return "**После бомдода** • главное дело"
-
-    monkeypatch.setattr(plan, "gather", gather)
-    monkeypatch.setattr(services, "persona", persona)
-    monkeypatch.setattr(plan, "_ask_model", ask)
-    text = asyncio.run(plan.build_plan(_profile(), Persona(lang="ru")))
-    assert text.startswith("🗓 <b>План:") and "<b>После бомдода</b>" in text
-    assert "босс" in asked[0].lower() and "никогда" in asked[0] and "окнам между ними" in asked[0]
-
-    async def dead(prompt, **k):  # noqa: ANN001, ANN003, ANN202
-        return None
-
-    monkeypatch.setattr(plan, "_ask_model", dead)
-    text = asyncio.run(plan.build_plan(_profile(), Persona(lang="ru")))
-    assert "Бомдод 04:52" in text and "позвонить (15:00)" in text and "английский" in text          # модель молчит — план кодом
-
-
-def test_plan_for_another_city_has_local_prayer_and_mosques_block(monkeypatch):
-    async def place_info(city):  # noqa: ANN001, ANN202
-        return {"name": "Самарканд", "lat": 39.65, "lon": 66.96}
-
-    async def gather(profile, *, day, place=None):  # noqa: ANN001, ANN202
-        assert place and place["name"] == "Самарканд"
-        return {"text": "ПОЕЗДКА", "pray": {}, "open": [], "habits": [], "day": day}
-
-    async def ask(prompt, **k):  # noqa: ANN001, ANN003, ANN202
-        return "План поездки"
-
-    async def near(lat, lon, **k):  # noqa: ANN001, ANN003, ANN202
-        return [{"name": "Хазрати Хызр", "distance_m": 350, "lat": 39.66, "lon": 66.97, "map": "https://maps.google.com/?q=39.66,66.97"},
-                {"name": "Мечеть", "distance_m": 1800, "lat": 39.6, "lon": 66.9, "map": "https://maps.google.com/?q=39.6,66.9"}]
-
-    monkeypatch.setattr(plan, "place_info", place_info)
-    monkeypatch.setattr(plan, "gather", gather)
-    monkeypatch.setattr(plan, "_ask_model", ask)
-    monkeypatch.setattr(prayer, "mosques_near", near)
-    text = asyncio.run(plan.build_plan(_profile(), Persona(lang="ru"), city="Самарканд"))
-    assert "· Самарканд" in text and "🕌 Мечети рядом" in text and "Хазрати Хызр</a> — 350 м" in text and "1.8 км" in text
+# ------------------------------------------------------------------ план: см. tests/test_plan_v2.py
 
 
 def test_mosque_search_dedups_and_sorts(monkeypatch):
@@ -200,7 +148,7 @@ def test_advice_rules_limit_and_gap(monkeypatch, tmp_path):
     sent: list = []
 
     class FakeBot:
-        async def send_message(self, uid, text, reply_markup=None):  # noqa: ANN001, ANN202
+        async def send_message(self, uid, text, reply_markup=None, parse_mode=None):  # noqa: ANN001, ANN202
             sent.append(text)
 
     async def dead(*a, **k):  # noqa: ANN002, ANN003, ANN202
