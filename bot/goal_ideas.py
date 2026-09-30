@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import timedelta
 from typing import Any
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 MAX_IDEAS = 4
 _DISCRETIONARY = set(goals_mod.DISCRETIONARY)
+# «учёба», а не развлечение: пробная проверка 30.09 предложила цель «4 раза в неделю» для видео Mimic Party
+_LEARN = re.compile(r"(урок|курс|лекци|обучен|учим|учу|учить|мастер-?класс|lesson|course|tutorial|lecture|learn|how to|dars|kurs|ma'ruza|"
+                    r"пдд|pdd|english|англий|ingliz|corан|коран|quran|qur'an|сура|surah|sura|python|программир)", re.IGNORECASE)
 
 
 def _round(v: float, step: int = 1000) -> int:
@@ -44,9 +48,10 @@ async def ideas(profile: Profile, existing: list[dict[str, Any]] | None = None) 
         if "weight" not in kinds and mode in {"gain", "muscle", "loss"} and weight:
             target = round(weight + (3 if mode in {"gain", "muscle"} else -4), 1)
             word = ("Vazn " if uz else "Набрать до " if mode in {"gain", "muscle"} else "Сбросить до ")
-            title = (f"{word}{target} kg" if uz else f"{word}{target} кг")
+            title = (f"{word}{target:g} kg" if uz else f"{word}{target:g} кг")
             out.append({"key": "weight", "icon": "⚖️", "title": title,
-                        "why": (f"reja: {plan.get('daily_calories')} kkal" if uz else f"у вас план питания {plan.get('daily_calories')} ккал/день — цель даст ему смысл и темп"),
+                        "why": (f"ovqatlanish rejasi {plan.get('daily_calories')} kkal — maqsad unga ma'no beradi" if uz
+                                else f"у вас план питания {plan.get('daily_calories')} ккал/день — цель даст плану смысл и темп: +3 кг за 3 месяца"),
                         "args": {"title": title, "kind": "weight", "target_amount": target, "current_weight": weight,
                                  "deadline": (today + timedelta(days=90)).isoformat()}})
     except Exception:
@@ -78,10 +83,10 @@ async def ideas(profile: Profile, existing: list[dict[str, Any]] | None = None) 
     # --- учёба: урок, который начал и не закончил
     try:
         watching = [r for r in lessons.items(uid) if int(r.get("position") or 0) >= 60 and int(r.get("duration") or 0) >= 8 * 60
-                    and not lessons.finished(r) and time.time() - float(r.get("at") or 0) < 14 * 86400]
+                    and not lessons.finished(r) and time.time() - float(r.get("at") or 0) < 14 * 86400 and _LEARN.search(str(r.get("title") or ""))]
         if watching and "habit" not in kinds:
             r = watching[0]
-            name = r["title"][:40]
+            name = r["title"][:38].rstrip() + ("…" if len(r["title"]) > 38 else "")
             title = (f"«{name}»: haftasiga 4 marta" if uz else f"«{name}»: 4 раза в неделю")
             out.append({"key": "lesson", "icon": "🎓", "title": title,
                         "why": (f"boshlagansiz: {lessons.fmt(int(r['position']))}" if uz else f"вы остановились на {lessons.fmt(int(r['position']))} — привычка доведёт до конца"),

@@ -165,11 +165,16 @@ def test_ideas_come_from_his_data_and_are_ready_to_add(monkeypatch):
 
     monkeypatch.setattr(services, "nutrition_profile", nprofile)
     monkeypatch.setattr(services, "finance_entries", entries)
-    monkeypatch.setattr(goal_ideas.lessons, "items", lambda uid: [{"title": "ПДД курс", "position": 700, "duration": 3600, "at": datetime.now(timezone.utc).timestamp()}])
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(goal_ideas.lessons, "items", lambda uid: [{"title": "Mimic Party — кто лучше подражает?", "position": 700, "duration": 3600, "at": now},
+                                                                  {"title": "ПДД курс: спецтранспорт", "position": 700, "duration": 3600, "at": now}])
     monkeypatch.setattr(Profile, "today", property(lambda self: TODAY))
     found = asyncio.run(goal_ideas.ideas(_profile(), []))
     keys = [i["key"] for i in found]
     assert "weight" in keys and any(k.startswith("cap:") for k in keys) and "lesson" in keys
+    lesson = next(i for i in found if i["key"] == "lesson")
+    assert "ПДД" in lesson["title"] and "Mimic" not in lesson["title"]             # развлекательное видео целью не предлагаем
+    assert next(i for i in found if i["key"] == "weight")["title"] == "Набрать до 65 кг"
     weight = next(i for i in found if i["key"] == "weight")
     assert weight["args"]["kind"] == "weight" and weight["args"]["target_amount"] == 65.0 and weight["args"]["current_weight"] == 62.0
     cap = next(i for i in found if i["key"].startswith("cap:"))
