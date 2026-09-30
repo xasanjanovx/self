@@ -306,7 +306,7 @@ async def _task_tick(bot: Bot) -> None:
 
 async def _proactive_tick(bot: Bot) -> None:
     """Подсказки по правилам (bot/proactive.py): раз в 10 минут, только новые (журнал alerts_log)."""
-    from . import proactive
+    from . import debt_tasks, proactive
     from . import screen as screen_mod
     from .keyboards import _btn, back_to_menu_keyboard
     from aiogram.types import InlineKeyboardMarkup
@@ -316,6 +316,7 @@ async def _proactive_tick(bot: Bot) -> None:
     user_ids = access.user_ids() or [int(u["telegram_id"]) for u in await db.list_users()]
     for telegram_id in user_ids:
         profile = await profile_by_id(telegram_id)
+        await debt_tasks.sync_safe(profile)  # долг со сроком → задача за день до срока (независимо от настройки подсказок)
         us = await services.user_settings(telegram_id)
         hints_on = us.get("proactive", True)
         if not hints_on and not (await services.persona(telegram_id)).alert_calls:

@@ -99,6 +99,10 @@ async def add_finance_entries(profile: Profile, items: list[dict[str, Any]], *, 
             )
     inserted = await db.add_finance_entries(profile.telegram_id, payload, entry_date=profile.today, source=source)
     cache.invalidate(profile.telegram_id, "fin_entries")
+    if any(item.get("kind") == "transfer" and ({fin.normalize_bucket(item.get("from_bucket")), fin.normalize_bucket(item.get("to_bucket"))} & {"debt", "lent"}) for item in items):
+        from . import debt_tasks  # debt_tasks сам использует services — импорт здесь, чтобы не было цикла
+
+        await debt_tasks.sync_safe(profile)
     return inserted
 
 

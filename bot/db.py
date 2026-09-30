@@ -538,17 +538,37 @@ class Database:
         res = await self._table("tasks").select("*").eq("done", False).not_.is_("due_time", "null").execute()
         return res.data or []
 
-    async def add_task(self, telegram_id: int, *, text: str, due_date: str | None, due_time: str | None) -> dict[str, Any]:
-        res = await self._table("tasks").insert({"telegram_id": telegram_id, "text": text, "due_date": due_date, "due_time": due_time}).execute()
+    async def add_task(self, telegram_id: int, *, text: str, due_date: str | None, due_time: str | None, ref_key: str | None = None) -> dict[str, Any]:
+        payload = {"telegram_id": telegram_id, "text": text, "due_date": due_date, "due_time": due_time}
+        if ref_key:
+            payload["ref_key"] = ref_key
+        res = await self._table("tasks").insert(payload).execute()
         rows = res.data or []
         return rows[0] if rows else {}
+
+    async def list_ref_tasks(self, telegram_id: int, prefix: str) -> list[dict[str, Any]]:
+        """Задачи, созданные ботом сам (ref_key начинается с prefix), — и открытые, и закрытые."""
+        res = await self._table("tasks").select("*").eq("telegram_id", telegram_id).like("ref_key", f"{prefix}%").limit(500).execute()
+        return res.data or []
 
     async def update_task(self, telegram_id: int, task_id: str | int, fields: dict[str, Any]) -> None:
         await self._table("tasks").update(fields).eq("telegram_id", telegram_id).eq("id", task_id).execute()
 
-    async def delete_tasks(self, telegram_id: int, ids: list[Any]) -> None:
+    async def delete_tasks(self, telegram_id: int, ids: list[Any], *, hard: bool = False) -> None:
+        """Удалить задачи. Автозадачи (ref_key) не стираются, а закрываются — иначе бот создал бы их заново."""
+        ids = list(ids)
+        if ids and not hard:
+            try:
+                res = await self._table("tasks").select("id").eq("telegram_id", telegram_id).in_("id", ids).not_.is_("ref_key", "null").execute()
+                kept = {str(r["id"]) for r in res.data or []}
+            except Exception:
+                kept = set()  # колонки ref_key ещё нет — обычное удаление
+            if kept:
+                await self._table("tasks").update({"done": True, "done_at": datetime.now(timezone.utc).isoformat()}) \
+                    .eq("telegram_id", telegram_id).in_("id", [i for i in ids if str(i) in kept]).execute()
+                ids = [i for i in ids if str(i) not in kept]
         if ids:
-            await self._table("tasks").delete().eq("telegram_id", telegram_id).in_("id", list(ids)).execute()
+            await self._table("tasks").delete().eq("telegram_id", telegram_id).in_("id", ids).execute()
 
     # ---------------------------------------------------------- 006: agent memory / log
     async def get_user_memory(self, telegram_id: int) -> dict[str, Any]:

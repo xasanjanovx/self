@@ -15,6 +15,7 @@ from datetime import date
 from typing import Any
 
 from . import cache
+from . import debt_tasks
 from . import debts
 from . import finance as fin
 from . import services
@@ -86,6 +87,7 @@ async def _record_debt(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     ids = [r.get("id") for r in inserted if r.get("id") is not None]
     undo.push(ctx.uid, {"type": "delete_entries", "ids": ids})
     ctx.mutated = True
+    await debt_tasks.sync_safe(ctx.profile)
     uz = ctx.profile.lang == "uz"
     balances = _money_line(p.before, p.after)
     debts_now = [debts.describe(cp, uz) for cp in p.people]
@@ -205,6 +207,7 @@ async def _set_deadline(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         entry_ids = [t for t in targets if t.isdigit()]
         changed = await _retag(ctx, entry_ids, day.isoformat())
         if entry_ids:
+            await debt_tasks.sync_safe(ctx.profile)
             return {"deadline": {"person": cp.name, "side": cp.side, "due_date": day.isoformat(), "days_left": (day - ctx.profile.today).days},
                     "loans": changed or entry_ids, "amount_now": round(sum(t.left for t in open_loans if t.id in targets), 2), "matched_person": cp.name}
     # займа-операции нет (стартовая сумма «без имени» или человека нет в учёте) — старый срок «по человеку»
@@ -217,6 +220,7 @@ async def _set_deadline(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     cache.invalidate(ctx.uid, "debt_deadlines")
     undo.push(ctx.uid, {"type": "restore_debt_deadline", "person": person, "side": side, "row": prev})
     ctx.mutated = True
+    await debt_tasks.sync_safe(ctx.profile)
     return {"deadline": {"person": person, "side": side, "due_date": day.isoformat(), "days_left": (day - ctx.profile.today).days},
             "amount_now": round(cp.total, 2) if cp is not None else 0, "matched_person": cp.name if cp is not None else None}
 
@@ -247,6 +251,7 @@ async def _clear_deadline(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
         ctx.mutated = True
     if not cleared:
         return {"error": "no deadline for that person"}
+    await debt_tasks.sync_safe(ctx.profile)
     return {"cleared": cleared}
 
 
