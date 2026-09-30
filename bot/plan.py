@@ -256,6 +256,8 @@ PLAN_PROMPT = (
     "opt — «если успеете», 2–3 необязательных. Всего не больше {max_items} пунктов, день не должен быть забит; между делами — воздух.\n"
     "• ref: если пункт — это его существующая задача (в данных «[id] текст»), цель или ежедневное дело — укажи её id ИЗ ДАННЫХ (type "
     "task|goal|daily). Нет такой записи — ref null (главные такие пункты станут задачами сами). Не выдумывай id.\n"
+    "• Пункты — только ДЕЛА: задачи, шаги к целям, ежедневные дела, уроки. Еда (для неё поле food), отдых, сон, прогулка, намаз (его уже "
+    "задают окна), видео и музыка для развлечения — НЕ пункты.\n"
     "• Решай по данным: калории и что съесть, можно ли свободно тратить (баланс, лимиты, платежи и долги), урок в процессе, цели, "
     "цели недели, календарь, где он сейчас. Дела, которые давно переносятся, — предложи разбить на шаг поменьше.\n"
     "• Если день уже идёт — планируй от текущего времени, прошедшее не трогай. Завтрашний план — на весь день.\n"
@@ -525,9 +527,11 @@ def _clean_surahs(raw: Any) -> list[dict[str, int]]:
 
 
 async def _remove_dropped_auto_tasks(profile: Profile, before: list[dict[str, Any]], after: list[dict[str, Any]]) -> None:
-    """Убрали пункт из плана — созданная им задача тоже удаляется (свои прежние задачи не трогаем)."""
-    kept = {it["id"] for it in after}
-    ids = [it["ref"]["id"] for it in before if it.get("auto") and it["id"] not in kept and (it.get("ref") or {}).get("type") == "task"]
+    """Убрали пункт из плана (правка или «Заново») — созданная им задача тоже удаляется, если она не сделана. Свои прежние задачи
+    и задачи, которые остались в плане, не трогаем."""
+    kept = {str((it.get("ref") or {}).get("id")) for it in after if (it.get("ref") or {}).get("type") == "task"}
+    ids = [it["ref"]["id"] for it in before if it.get("auto") and not it.get("done") and (it.get("ref") or {}).get("type") == "task"
+           and str(it["ref"]["id"]) not in kept]
     if ids and db.available("tasks"):
         try:
             await db.delete_tasks(profile.telegram_id, ids)
@@ -547,6 +551,11 @@ async def _publish(bot, profile: Profile, st: dict[str, Any], *, edit: bool, pin
     if edit and st.get("msg_id"):
         try:
             await bot.edit_message_text(text, chat_id=uid, message_id=int(st["msg_id"]), reply_markup=kb, parse_mode="HTML", link_preview_options=opts)
+            if pin:
+                try:
+                    await bot.pin_chat_message(uid, int(st["msg_id"]), disable_notification=True)
+                except Exception:
+                    logger.debug("plan: повторно закрепить не вышло", exc_info=True)
             return st
         except Exception as exc:
             if "not modified" in str(exc).lower():
@@ -579,8 +588,10 @@ async def send_quran(bot, profile: Profile, st: dict[str, Any]) -> int:  # noqa:
     return sent
 
 
-async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None = None, day: date | None = None) -> bool:  # noqa: ANN001
-    """kind: morning | tomorrow | review | week. True — отправлено."""
+async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None = None, day: date | None = None,
+               force: bool = False) -> bool:  # noqa: ANN001
+    """kind: morning | tomorrow | review | week. True — отправлено. force — явная просьба («Заново», «составь план»): всегда
+    пересобрать, а не просто закрепить старый утренний план."""
     persona = await services.persona(profile.telegram_id)
     if kind == "review":
         return await send_review(bot, profile, persona)
@@ -592,7 +603,7 @@ async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None
     day = day or (today + timedelta(days=1) if kind == "tomorrow" else today)
     old = load(profile.telegram_id)
     # утро: план на сегодня он уже составил (вечером «на завтра») и недавно трогал — просто закрепляем его снова
-    if kind == "morning" and old.get("day") == today.isoformat() and old.get("msg_id") and not city \
+    if kind == "morning" and not force and old.get("day") == today.isoformat() and old.get("msg_id") and not city \
             and time.time() - float(old.get("updated_at") or 0) < 8 * 3600:
         try:
             await bot.pin_chat_message(profile.telegram_id, int(old["msg_id"]), disable_notification=True)
@@ -607,7 +618,12 @@ async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None
             logger.warning("plan: перенос просроченного не удался", exc_info=True)
     st = await build_state(profile, persona, day=day, city=city)
     st["updated_at"] = time.time()
-    st = await _publish(bot, profile, st, edit=False, pin=True)
+    replace = bool(old.get("day") == day.isoformat() and old.get("msg_id"))
+    if replace:                        # план на этот день уже есть — обновляем то же закреплённое сообщение
+        st["msg_id"] = old["msg_id"]
+        await _remove_dropped_auto_tasks(profile, old.get("items") or [], st["items"])
+        st["quran_sent"] = old.get("quran_sent")
+    st = await _publish(bot, profile, st, edit=replace, pin=True)
     if st.get("surahs") and st.get("quran_sent") != st["day"]:
         await send_quran(bot, profile, st)
     save(profile.telegram_id, st)

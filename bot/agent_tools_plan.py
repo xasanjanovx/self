@@ -52,7 +52,7 @@ async def _day_plan(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         bot = bot_instance()
     except Exception:
         return {"error": "чат сейчас недоступен"}
-    await plan.send(bot, profile, "tomorrow" if day > profile.today else "morning", city=_str(a.get("city")), day=day)
+    await plan.send(bot, profile, "tomorrow" if day > profile.today else "morning", city=_str(a.get("city")), day=day, force=True)
     st = plan.load(ctx.uid)
     main = [it["text"] for it in st.get("items") or [] if it.get("kind") == "main"][:3]
     return {"ok": True, "sent_to_chat": True, "main": main,

@@ -323,3 +323,41 @@ def test_week_plan_saved_and_used_by_morning_plan(monkeypatch, tmp_path):
     text = bot.sent[0]["text"]
     assert "🎯 <b>Цели недели</b>\n<blockquote>1. Вернуть долги · <i>пн, ср</i>" in text and "🔦 <b>Фокус</b>" in text
     assert plan._week_line(1, date(2026, 10, 6)).startswith("ЦЕЛИ НЕДЕЛИ") and not plan._week_line(1, date(2026, 10, 13))
+
+
+def test_regenerate_updates_same_pinned_message_and_drops_junk_auto_tasks(monkeypatch, tmp_path):
+    added, _ = _setup(monkeypatch, tmp_path, raw=RAW, open_tasks=[{"id": 7, "text": "Позвонить Алишеру", "due_date": "2026-09-30"}])
+    bot = FakeBot()
+    deleted: list = []
+
+    async def delete_tasks(uid, ids):  # noqa: ANN001, ANN202
+        deleted.extend(str(i) for i in ids)
+
+    monkeypatch.setattr(plan.db, "delete_tasks", delete_tasks)
+    calls = {"n": 0}
+
+    def raw():  # noqa: ANN202
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return RAW
+        return {**RAW, "items": [{"text": "Позвонить Алишеру", "kind": "main", "window": "dhuhr", "ref": {"type": "task", "id": "7"}}]}   # «Заново»: осталось одно дело
+
+    monkeypatch.setattr(plan, "_ask_json", lambda prompt, **k: asyncio.sleep(0, result=raw()))
+
+    async def run():  # noqa: ANN202
+        async def no_quran(*a, **k):  # noqa: ANN002, ANN003, ANN202
+            return 0
+
+        monkeypatch.setattr(plan, "send_quran", no_quran)
+        await plan.send(bot, _profile(), "morning")
+        first = plan.load(1)["msg_id"]
+        await plan.send(bot, _profile(), "morning")            # автоматическое утро: план свежий — только закрепить
+        assert len(bot.sent) == 2 and "закреплён выше" in bot.sent[1]["text"]
+        bot.sent.pop()
+        await plan.send(bot, _profile(), "morning", force=True)   # «Заново» — пересобрать
+        return first
+
+    first = asyncio.run(run())
+    assert len(bot.sent) == 1 and bot.edited[-1]["id"] == first == plan.load(1)["msg_id"]        # то же сообщение, не второе
+    assert deleted == ["100"]                                                                    # лишняя «Написать должникам», созданная планом, удалена
+    assert "Написать должникам" not in bot.edited[-1]["text"]

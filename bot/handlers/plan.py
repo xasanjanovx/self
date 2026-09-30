@@ -48,9 +48,9 @@ async def cb_plan(callback: CallbackQuery) -> None:
         try:
             if action in {"r", "today"}:
                 old = plan.load(profile.telegram_id)
-                await plan.send(bot, profile, "morning", city=old.get("place"))
+                await plan.send(bot, profile, "morning", city=old.get("place"), force=True)
             else:
-                await plan.send(bot, profile, "tomorrow")
+                await plan.send(bot, profile, "tomorrow", force=True)
         except Exception:
             logger.exception("plan button failed")
             await callback.message.answer(profile.tr("Не получилось составить план — попробуйте ещё раз.", "Reja tuzilmadi — yana urinib ko'ring."))
