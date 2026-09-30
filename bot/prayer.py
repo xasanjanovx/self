@@ -79,6 +79,30 @@ _mosque_cache: dict[tuple[float, float, int], tuple[float, list[dict[str, Any]]]
 MOSQUE_TTL_S = 7 * 86400
 
 
+async def _overpass(query: str) -> list[dict[str, Any]] | None:
+    """Запрос ко ВСЕМ зеркалам Overpass сразу — берём первый ответивший (30.09: одно зеркало зависало на 25 с). None — никто."""
+    async def one(url: str) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "JarvisSelfBot/1.5 (personal assistant)", "Accept": "*/*"}) as client:
+            res = await client.post(url, data={"data": query})
+        if res.status_code != 200:
+            raise RuntimeError(f"HTTP {res.status_code}")
+        return res.json().get("elements") or []
+
+    tasks = {asyncio.create_task(one(url)): url for url in OVERPASS}
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if t.exception() is None:
+                    return t.result()
+                logger.info("mosques: %s не ответил (%s)", tasks[t][8:32], type(t.exception()).__name__)
+        return None
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
 async def mosques_near(latitude: float, longitude: float, *, radius: int = 3000, limit: int = 5) -> list[dict[str, Any]]:
     """Мечети рядом (30.09, «мечети рядом со мной»): [{"name", "distance_m", "lat", "lon", "map"}] от ближней. Карта
     OpenStreetMap: безымянные — «Мечеть». Нашли мало — расширяем до 3× радиуса (не больше 10 км). Кэш на неделю."""
@@ -99,16 +123,7 @@ async def mosques_near(latitude: float, longitude: float, *, radius: int = 3000,
     for r in (radius, min(radius * 3, 10000)):
         query = (f'[out:json][timeout:20];(nwr["amenity"="place_of_worship"]["religion"="muslim"](around:{r},{latitude},{longitude}););'
                  "out center 60;")
-        elements: list[dict[str, Any]] | None = None
-        for url in OVERPASS:
-            try:
-                async with httpx.AsyncClient(timeout=25, headers={"User-Agent": "JarvisSelfBot/1.5 (personal assistant)", "Accept": "*/*"}) as client:
-                    res = await client.post(url, data={"data": query})
-                if res.status_code == 200:
-                    elements = res.json().get("elements") or []
-                    break
-            except Exception:
-                logger.warning("mosques: %s не ответил", url[8:32], exc_info=True)
+        elements = await _overpass(query)
         if elements is None:
             return []
         seen: set[tuple[str, int, int]] = set()
