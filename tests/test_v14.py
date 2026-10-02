@@ -331,6 +331,46 @@ def test_quiz_progresses_and_never_repeats(tmp_path, monkeypatch):
     assert order.index(q.id) > order.index(first.id)          # каждый день — дальше по сложности
 
 
+def test_quiz_three_questions_a_day_stable_and_never_repeat(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+
+    from bot import islam_quiz
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    d = date(2026, 10, 2)
+    day1 = islam_quiz.for_day_set(7, d)
+    assert len(day1) == islam_quiz.QUESTIONS_PER_DAY == 3 and len({q.id for q in day1}) == 3
+    assert islam_quiz.for_day_set(7, d) == day1                 # весь день те же три (повторные звонки)
+    order = [q.id for q in islam_quiz.BANK]
+    assert [order.index(q.id) for q in day1] == sorted(order.index(q.id) for q in day1)   # от лёгкого к трудному
+    seen = {q.id for q in day1}
+    for i in range(1, 25):
+        for q in islam_quiz.for_day_set(7, d + timedelta(days=i)):
+            assert q.id not in seen
+            seen.add(q.id)
+    block = islam_quiz.prompt_block_set(day1)
+    assert block.count("Вопрос ") == 3 and all(q.q in block and q.a in block for q in day1)
+    card = islam_quiz.card_set(day1)
+    assert all(q.a.split("»")[0][:10] in card for q in day1) and card.count("✅") == 3
+
+
+def test_wake_call_prompt_asks_three_questions_then_voice_confirmation(tmp_path, monkeypatch):
+    from bot import islam_quiz, live_call
+
+    from datetime import date
+
+    from bot.persona import Persona
+    from bot.profile import Profile
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    qs = islam_quiz.for_day_set(7, date(2026, 10, 2))
+    profile = Profile(telegram_id=7, lang="ru", tz_name="Asia/Tashkent", currency="UZS", first_name="Тест", username="t")
+    text = live_call.system_instruction(profile, Persona(lang="ru", honorific="shef"), mode="wake",
+                                        wake={"takbir": "05:20", "minutes_left": 30, "quiz": islam_quiz.prompt_block_set(qs)})
+    assert "ТРИ ВОПРОСА ДНЯ" in text and "Шеф, вы встали? Не ляжете обратно?" in text and "confirm_awake НЕ вызывай" in text
+    assert all(q.q in text for q in qs) and "только голос" in text
+
+
 def test_quiz_duas_have_arabic_and_source():
     from bot import islam_quiz
 

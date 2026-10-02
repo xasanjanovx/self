@@ -376,6 +376,10 @@ async def wake_event(request: web.Request) -> web.Response:
         return web.json_response({"error": "no owner"}, status=400)
     profile = await profile_by_id(uid)
     event = str(data.get("event") or "")
+    if event in {"scheduled", "awake"} and not app_alarm.ENABLED:
+        # 02.10: подъём подтверждает только голос в звонке Telegram — тап в приложении (старый будильник мог остаться) ничего не отмечает
+        logger.info("app alarm %s: событие %s проигнорировано (будильник приложения выключен)", uid, event)
+        return web.json_response({"ok": True, "ignored": True})
     if event == "scheduled" and data.get("day") and data.get("at_ms"):
         app_alarm.scheduled(uid, str(data["day"])[:10], int(data["at_ms"]))
         logger.info("app alarm %s: поставлен в телефоне на %s", uid, str(data["day"])[:10])
@@ -420,8 +424,8 @@ async def _instant_command(uid: int, said: str, after: str, device: dict[str, An
     except Exception:
         logger.warning("instant: команда не вышла", exc_info=True)
         return None
-    if not instant.succeeded(result) or not (turn.actions or (isinstance(result, dict) and result.get("calling_via_telegram"))):
-        return None
+    if not instant.succeeded(result) or not (turn.actions or (isinstance(result, dict) and (result.get("calling_via_telegram") or result.get("server_done")))):
+        return None  # server_done — умный дом: команда ушла на сервере, телефону нечего делать (он просто вибрирует)
     phone_live.discard(uid)  # заготовленный разговор с Gemini не нужен
     phone._later(extra.remember_exchange(uid, "📱 " + said, f"(сделано: {cmd.tool})", when=profile.now.strftime("%d.%m %H:%M")))
     phone._later(services.log_agent(uid, text=said, kind="phone_instant", tools=cmd.tool, reply="", ok=True))

@@ -30,8 +30,8 @@ def test_wake_instruction_has_takbir_task_and_confirm_rule():
     text = live_call.system_instruction(_profile(), persona.Persona(honorific="shef"), mode="wake",
                                         wake={"takbir": "05:07", "minutes_left": 25})
     assert "05:07" in text and "25 мин" in text
-    # живой помощник: верит, когда он связно ответил, один вопрос дня, про намаз — в конце
-    assert "confirm_awake" in text and "ВЕРЬ ему" in text and "ВОПРОС ДНЯ" in text and "В самом конце" in text
+    # 02.10: три вопроса дня по одному, потом «вы встали?» голосом — confirm_awake только на ясное «встал»; про намаз — в конце
+    assert "confirm_awake" in text and "ТРИ ВОПРОСА ДНЯ" in text and "вы встали?" in text and "confirm_awake НЕ вызывай" in text and "В самом конце" in text
     assert "Доброе утро, Шеф" in text and "мунафик" not in text
     assert "ДАННЫЕ" not in text  # подъёму данные не нужны
 

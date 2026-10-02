@@ -16,12 +16,21 @@ def test_nearest_city():
 
 def test_app_alarm_holds_telegram_only_until_grace(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(app_alarm, "ENABLED", True)  # 02.10: по умолчанию выключен (подъём — только звонок Telegram)
     wake_at = datetime(2026, 9, 27, 4, 30, tzinfo=timezone.utc)
     assert not app_alarm.holds_telegram(1, "2026-09-27", wake_at, wake_at)  # приложение будильник не ставило
     app_alarm.scheduled(1, "2026-09-27", int(wake_at.timestamp() * 1000))
     assert app_alarm.holds_telegram(1, "2026-09-27", wake_at, wake_at + timedelta(minutes=4))
     assert not app_alarm.holds_telegram(1, "2026-09-27", wake_at, wake_at + timedelta(minutes=6))  # не встал — звонит Telegram
     assert not app_alarm.holds_telegram(1, "2026-09-28", wake_at, wake_at)  # другой день
+
+
+def test_app_alarm_is_off_by_default_so_telegram_call_is_the_only_wake(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert app_alarm.ENABLED is False
+    wake_at = datetime(2026, 9, 27, 4, 30, tzinfo=timezone.utc)
+    app_alarm.scheduled(1, "2026-09-27", int(wake_at.timestamp() * 1000))   # старый будильник в телефоне ещё стоит
+    assert not app_alarm.holds_telegram(1, "2026-09-27", wake_at, wake_at + timedelta(minutes=1))  # Telegram звонит вовремя
 
 
 def test_wake_clip_text():

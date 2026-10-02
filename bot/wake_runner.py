@@ -190,10 +190,10 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
 
     from . import islam_quiz
 
-    quiz = islam_quiz.for_day(profile.telegram_id, plan.day)
+    quiz = islam_quiz.for_day_set(profile.telegram_id, plan.day)  # 02.10: три вопроса утром, «встал?» — голосом в конце
     live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds), pregreet=attempt <= PREGREET_ATTEMPTS,
                                wake={"takbir": plan.takbir, "minutes_left": minutes_left,
-                                     "quiz": islam_quiz.prompt_block(quiz), "today": await _today_line(profile)})
+                                     "quiz": islam_quiz.prompt_block_set(quiz), "today": await _today_line(profile)})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
                            minutes_left=minutes_left, task_text="")
     state.confirmed = live.confirmed
@@ -312,12 +312,13 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
 
 
 async def _send_quiz_card(bot: Bot, profile: Profile, quiz: Any) -> None:
-    """Вопрос дня с ответом и точным арабским — в чат (исчезнет при нажатии любой кнопки, как всё присланное)."""
+    """Вопросы дня с ответами и точным арабским — в чат (исчезнут при нажатии любой кнопки, как всё присланное)."""
     from . import islam_quiz
     from . import screen as screen_mod
 
     try:
-        sent = await bot.send_message(profile.telegram_id, islam_quiz.card(quiz, profile.lang))
+        text = islam_quiz.card_set(quiz, profile.lang) if isinstance(quiz, list) else islam_quiz.card(quiz, profile.lang)
+        sent = await bot.send_message(profile.telegram_id, text)
         screen_mod.track_sent(profile.telegram_id, sent.message_id)
     except Exception:
         logger.debug("quiz card failed", exc_info=True)

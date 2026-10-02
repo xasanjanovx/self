@@ -210,14 +210,50 @@ def for_day(uid: int, day: date) -> Q:
     return pick
 
 
-def prompt_block(q: Q) -> str:
-    """Кусок системного промпта звонка: вопрос, ответ и точный арабский."""
-    lines = [f"ВОПРОС ДНЯ (задай ровно его, своими словами на языке разговора): {q.q}", f"Правильный ответ: {q.a}"]
+QUESTIONS_PER_DAY = 3   # 02.10 его выбор: утром в звонке три вопроса, а не один
+
+
+def for_day_set(uid: int, day: date, n: int = QUESTIONS_PER_DAY) -> list[Q]:
+    """n вопросов на этот день по нарастающей сложности: весь день одни и те же (повторные звонки), завтра — следующие n."""
+    state = _load(uid)
+    ids = [x for x in state.get("today_ids") or [] if x in _BY_ID]
+    if state.get("day") == day.isoformat() and len(ids) == n:
+        return [_BY_ID[i] for i in ids]
+    asked = [x for x in state.get("asked") or [] if x in _BY_ID]
+    picks: list[Q] = []
+    for _ in range(n):
+        taken = {q.id for q in picks}
+        fresh = [q for q in BANK if q.id not in asked and q.id not in taken]
+        if not fresh:
+            # всё спросили — второй круг с середины банка (лёгкие не повторяем)
+            asked = []
+            fresh = [q for q in BANK[len(BANK) // 2:] if q.id not in taken]
+        picks.append(fresh[0])
+    _save(uid, {"asked": asked + [q.id for q in picks], "day": day.isoformat(), "today": picks[0].id, "today_ids": [q.id for q in picks]})
+    return picks
+
+
+def _facts(q: Q) -> list[str]:
+    lines = [f"Правильный ответ: {q.a}"]
     if q.ar:
         lines.append(f"Точный арабский текст (если нужно произнести — читай СЛОВО В СЛОВО, ничего не меняя и не дописывая): {q.ar}")
     if q.ref:
         lines.append(f"Источник: {q.ref}")
-    return "\n".join(lines)
+    return lines
+
+
+def prompt_block(q: Q) -> str:
+    """Кусок системного промпта звонка: вопрос, ответ и точный арабский."""
+    return "\n".join([f"ВОПРОС ДНЯ (задай ровно его, своими словами на языке разговора): {q.q}", *_facts(q)])
+
+
+def prompt_block_set(qs: list[Q]) -> str:
+    """Три вопроса дня для звонка: порядок — от лёгкого к трудному, каждый со своим ответом и точным арабским."""
+    out = [f"ВОПРОСЫ ДНЯ — {len(qs)}, строго по порядку (каждый задай своими словами на языке разговора):"]
+    for i, q in enumerate(qs, 1):
+        out.append(f"Вопрос {i}: {q.q}")
+        out += _facts(q)
+    return "\n".join(out)
 
 
 def card(q: Q, lang: str = "ru") -> str:
@@ -233,4 +269,19 @@ def card(q: Q, lang: str = "ru") -> str:
     return "\n".join(out)
 
 
-__all__ = ["Q", "BANK", "for_day", "prompt_block", "card"]
+def card_set(qs: list[Q], lang: str = "ru") -> str:
+    """Все вопросы утра с ответами и точным арабским — одним сообщением в чат."""
+    from html import escape
+
+    uz = lang == "uz"
+    out = ["📿 <b>" + ("Kun savollari" if uz else "Вопросы дня") + "</b>"]
+    for i, q in enumerate(qs, 1):
+        out += ["", f"{i}. {escape(q.q)}", "✅ " + escape(q.a)]
+        if q.ar:
+            out.append(f"<b>{escape(q.ar)}</b>")
+        if q.ref:
+            out.append(f"<i>{escape(q.ref)}</i>")
+    return "\n".join(out)
+
+
+__all__ = ["Q", "BANK", "QUESTIONS_PER_DAY", "for_day", "for_day_set", "prompt_block", "prompt_block_set", "card", "card_set"]

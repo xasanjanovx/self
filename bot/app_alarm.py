@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 APP_GRACE = timedelta(minutes=5)
+# 02.10 его выбор: подъём — ТОЛЬКО звонок Telegram (три вопроса и «встали?» голосом), будильник в приложении выключен.
+# Вернуть: APP_ALARM=1 в .env сервера. Выключен — приложение при следующем обновлении плана само отменяет свой будильник.
+ENABLED = (os.getenv("APP_ALARM") or "").strip() == "1"
 
 
 def _file():
@@ -47,6 +51,8 @@ def scheduled(uid: int, day_iso: str, at_ms: int) -> None:
 
 def holds_telegram(uid: int, day_iso: str, wake_at: datetime, now: datetime) -> bool:
     """Будильник в приложении на этот день стоит, и его время + APP_GRACE ещё не прошло — Telegram пока молчит."""
+    if not ENABLED:
+        return False
     st = _load().get(str(uid)) or {}
     if st.get("day") != day_iso:
         return False
@@ -63,6 +69,8 @@ async def next_plan(profile) -> dict[str, Any]:  # noqa: ANN001
     s = None
     for day in (profile.today, profile.today + timedelta(days=1)):
         s, plan = await wake_runner.plan_for(profile, day)
+        if not ENABLED:
+            break  # будильник приложения выключен: enabled=false → приложение отменяет свой будильник
         if not plan.active or plan.wake_at is None or plan.wake_at <= now:
             continue
         log = await services.wake_log(profile.telegram_id, day) or {}
@@ -80,11 +88,11 @@ def morning_note(profile, persona) -> str:  # noqa: ANN001
     from . import islam_quiz
 
     title = {"shef": "Шеф", "ser": "Сэр", "boss": "Босс", "mix": "Шеф"}.get(persona.honorific, profile.first_name or "")
-    quiz = islam_quiz.for_day(profile.telegram_id, profile.today)
-    return (f"[Утро: он только что встал по будильнику JES. Бодро и тепло: «Доброе утро, {title}!» — и сразу ВОПРОС ДНЯ ниже, "
-            "один, коротко, как викторину. Ответит: верно — коротко похвали; неверно или не знает — спокойно скажи правильный ответ; "
+    quiz = islam_quiz.for_day_set(profile.telegram_id, profile.today)
+    return (f"[Утро: он только что встал по будильнику JES. Бодро и тепло: «Доброе утро, {title}!» — и ТРИ ВОПРОСА ДНЯ ниже, "
+            "по одному, коротко, как викторину. Ответит: верно — коротко похвали; неверно или не знает — спокойно скажи правильный ответ; "
             "дуа или аят — арабский текст ТОЧНО как написан, слово в слово, потом коротко смысл. В конце одной фразой — "
-            "«Пусть Аллах примет ваш намаз». Коротко, без лекций.]\n" + islam_quiz.prompt_block(quiz))
+            "«Пусть Аллах примет ваш намаз». Коротко, без лекций.]\n" + islam_quiz.prompt_block_set(quiz))
 
 
-__all__ = ["APP_GRACE", "scheduled", "holds_telegram", "next_plan", "morning_note"]
+__all__ = ["APP_GRACE", "ENABLED", "scheduled", "holds_telegram", "next_plan", "morning_note"]
