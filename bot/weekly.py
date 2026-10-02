@@ -135,9 +135,13 @@ async def send(bot: Bot, profile: Profile, p: Persona) -> bool:
         except Exception:
             logger.warning("weekly: голос не вышел", exc_info=True)
     if ogg:
-        await bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jes-week.ogg"), caption=caption, parse_mode="HTML")
+        sent = await bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jes-week.ogg"), caption=caption, parse_mode="HTML")
     else:
-        await bot.send_message(profile.telegram_id, caption, parse_mode="HTML")
+        sent = await bot.send_message(profile.telegram_id, caption, parse_mode="HTML")
+    if getattr(sent, "message_id", None):  # 02.10: итоги недели не копятся в чате — исчезают при следующем действии, как остальное
+        from . import screen as screen_mod
+
+        screen_mod.track_ephemeral(profile.telegram_id, int(sent.message_id))
     logger.info("weekly: итоги недели отправлены %s (%s)", profile.telegram_id, "голосом" if ogg else "текстом")
     return True
 

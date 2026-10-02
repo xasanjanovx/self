@@ -1,9 +1,10 @@
-"""30.09: план цитатами, пункты с галочками, правка ответом, закрепление, суры с транслитерацией, умный перенос, планёрка."""
+"""План дня: КОРОТКИЙ список с галочками (02.10: без окон, цитат, сур, мечетей, закрепа; исчезает как остальное в боте),
+правка ответом, умный перенос; суры по просьбе, вечерний разбор и планёрка недели — только по запросу."""
 import asyncio
 import re
 from datetime import date
 
-from bot import carry, plan, quran
+from bot import carry, plan, quran, screen
 from bot.persona import Persona
 from bot.profile import Profile
 
@@ -20,8 +21,9 @@ class FakeMsg:
 
 class FakeBot:
     def __init__(self):
-        self.sent, self.edited, self.pinned, self.unpinned = [], [], [], []
+        self.sent, self.edited, self.pinned, self.unpinned, self.deleted = [], [], [], [], []
         self.n = 500
+        self.edit_fails = False
 
     async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None, link_preview_options=None, **k):  # noqa: ANN001, ANN003, ANN202
         self.n += 1
@@ -31,7 +33,12 @@ class FakeBot:
         return m
 
     async def edit_message_text(self, text, chat_id=None, message_id=None, reply_markup=None, parse_mode=None, **k):  # noqa: ANN001, ANN003, ANN202
+        if self.edit_fails:
+            raise RuntimeError("Bad Request: message to edit not found")
         self.edited.append({"text": text, "id": message_id, "kb": reply_markup, "parse_mode": parse_mode})
+
+    async def delete_message(self, chat_id, message_id):  # noqa: ANN001, ANN202
+        self.deleted.append(message_id)
 
     async def pin_chat_message(self, chat_id, message_id, disable_notification=None):  # noqa: ANN001, ANN202
         self.pinned.append(message_id)
@@ -93,38 +100,52 @@ RAW = {"intro": "Доброе утро, сэр!", "food": "Осталось 1800
        "surahs": [{"surah": 112, "from": 1, "to": 0}]}
 
 
-def test_plan_is_rendered_with_quotes_windows_and_checkboxes(monkeypatch, tmp_path):
+def test_plan_is_a_short_checklist_not_pinned_and_vanishes_like_the_rest(monkeypatch, tmp_path):
     added, _ = _setup(monkeypatch, tmp_path, raw=RAW, open_tasks=[{"id": 7, "text": "Позвонить Алишеру", "due_date": "2026-09-30"}])
     bot = FakeBot()
-    monkeypatch.setattr(plan.services, "user_settings", lambda uid: asyncio.sleep(0, result={}))
-
-    async def run():  # noqa: ANN202
-        async def no_quran(*a, **k):  # noqa: ANN002, ANN003, ANN202
-            return 0
-
-        monkeypatch.setattr(plan, "send_quran", no_quran)
-        return await plan.send(bot, _profile(), "morning")
-
-    assert asyncio.run(run())
+    screen._ephemerals.clear()
+    assert asyncio.run(plan.send(bot, _profile(), "morning"))
     msg = bot.sent[0]
     text = msg["text"]
     assert msg["parse_mode"] == "HTML"                                   # разметка задана явно — не зависит от настроек бота
-    assert text.startswith("🗓 <b>План · ") and "<i>Доброе утро, сэр!</i>" in text
-    assert "☀️ <b>До пешина</b> · 06:22–12:22\n<blockquote>☐ ⭐ Написать должникам</blockquote>" in text
-    assert "🕛 <b>Между пешином и асром</b> · 12:22–15:43\n<blockquote>☐ ⭐ Позвонить Алишеру</blockquote>" in text
-    assert "✨ <b>Если успеете</b>\n<blockquote>☐ Прогулка</blockquote>" in text
-    assert "🍽 <b>Еда</b>" in text and "💰 <b>Деньги</b>" in text and "📊 Выполнено: <b>0</b> из 4" in text
-    assert "<i>Ответьте на этот план" in text
-    assert bot.pinned == [msg["id"]]                                      # закреплён
+    # заголовок + список: главные первыми, остальное за ними (прогулка из «если успеете» — просто пункт); ничего лишнего
+    lines = text.splitlines()
+    assert lines[0].startswith("🗓 <b>План · ") and lines[1:5] == ["☐ ⭐ Позвонить Алишеру", "☐ ⭐ Написать должникам", "☐ Английский", "☐ Прогулка"]
+    for junk in ("<blockquote>", "Еда", "Деньги", "Доброе утро", "барака", "До пешина", "асром", "📊", "Если успеете", "мечет"):
+        assert junk not in text, junk
+    assert "Нажмите пункт" in text and len(text) < 400
+    assert bot.pinned == [] and bot.unpinned == []                        # без закрепа
+    assert msg["id"] in screen._ephemerals[1]                             # исчезнет при следующем действии, как остальное
     # «Главное» без задачи стало задачей само; существующая — привязана, не задублирована
     assert [r["text"] for r in added] == ["Написать должникам"]
     st = plan.load(1)
     assert st["msg_id"] == msg["id"] and {it["text"]: (it["ref"] or {}).get("id") for it in st["items"]}["Позвонить Алишеру"] == "7"
     assert next(it for it in st["items"] if it["text"] == "Написать должникам")["auto"] is True
-    # кнопки: пункты с галочками + изменить/заново/на завтра/сура
+    # кнопки: пункты с галочками + изменить/заново/на завтра; суры в плане больше нет
     data = [b.callback_data for row in msg["kb"].inline_keyboard for b in row]
-    assert {"pl:d:0", "pl:d:1", "pl:d:2", "pl:d:3"} <= set(data)
-    assert {"pl:e", "pl:r", "pl:t", "pl:q"} <= set(data)
+    assert {"pl:d:0", "pl:d:1", "pl:d:2", "pl:d:3", "pl:e", "pl:r", "pl:t"} <= set(data) and "pl:q" not in data
+
+
+def test_plan_has_at_most_five_items_and_two_main(monkeypatch, tmp_path):
+    many = {"items": [{"text": f"Дело {i}", "kind": "main", "ref": None} for i in range(9)]}
+    _setup(monkeypatch, tmp_path, raw=many)
+    bot = FakeBot()
+    asyncio.run(plan.send(bot, _profile(), "morning"))
+    st = plan.load(1)
+    assert len(st["items"]) == plan.MAX_ITEMS == 5
+    assert [it["kind"] for it in st["items"]].count("main") == plan.MAX_MAIN == 2
+
+
+def test_empty_plan_says_so_in_one_line(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, raw={"items": []})
+    bot = FakeBot()
+    asyncio.run(plan.send(bot, _profile(), "morning"))
+    assert "Дел на этот день нет" in bot.sent[0]["text"]
+
+
+def test_plan_prompt_forbids_food_money_and_prayer_filler():
+    assert "ПЛАН ДНЯ" in plan.PLAN_PROMPT and "НЕ пиши" in plan.PLAN_PROMPT and "food" not in plan.PLAN_PROMPT
+    assert '"window"' not in plan.SCHEMA and '"surahs"' not in plan.SCHEMA and '"food"' not in plan.SCHEMA
 
 
 def test_checkbox_marks_task_and_message_is_edited_in_place(monkeypatch, tmp_path):
@@ -132,10 +153,6 @@ def test_checkbox_marks_task_and_message_is_edited_in_place(monkeypatch, tmp_pat
     bot = FakeBot()
 
     async def run():  # noqa: ANN202
-        async def no_quran(*a, **k):  # noqa: ANN002, ANN003, ANN202
-            return 0
-
-        monkeypatch.setattr(plan, "send_quran", no_quran)
         await plan.send(bot, _profile(), "morning")
         st = plan.load(1)
         idx = next(i for i, it in enumerate(st["items"]) if it["text"] == "Позвонить Алишеру")
@@ -144,7 +161,7 @@ def test_checkbox_marks_task_and_message_is_edited_in_place(monkeypatch, tmp_pat
     assert asyncio.run(run()) == "Позвонить Алишеру"
     assert updated and updated[-1][0] == "7" and updated[-1][1]["done"] is True            # задача отмечена
     edited = bot.edited[-1]["text"]
-    assert edited.count("✅") >= 1 and "<s>Позвонить Алишеру</s>" in edited and "Выполнено: <b>1</b> из 4" in edited
+    assert edited.count("✅") >= 1 and "<s>Позвонить Алишеру</s>" in edited and " · 1/4" in edited
     assert bot.edited[-1]["id"] == bot.sent[0]["id"]                                         # то же сообщение, не новое
 
 
@@ -229,16 +246,16 @@ def test_surah_text_comes_from_quran_api_not_from_model(monkeypatch, tmp_path):
     assert quran.wants("выучить суру Ихлас") and quran.wants("аяты Бакары") and not quran.wants("купить хлеб")
 
 
-def test_plan_sends_quran_when_plan_mentions_it(monkeypatch, tmp_path):
-    _setup(monkeypatch, tmp_path, raw=RAW)
+def test_plan_no_longer_sends_surahs_on_its_own(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, raw=RAW)            # модель вернула surahs — план их игнорирует (сура — по просьбе, quran_text)
     bot = FakeBot()
 
     async def messages(n, a=None, b=None, lang="ru"):  # noqa: ANN001, ANN202
-        return [f"📖 сура {n}"]
+        raise AssertionError("суры в плане больше не отправляются")
 
     monkeypatch.setattr(quran, "messages", messages)
     asyncio.run(plan.send(bot, _profile(), "morning"))
-    assert [m["text"] for m in bot.sent][-1] == "📖 сура 112" and plan.load(1)["quran_sent"] == plan.load(1)["day"]
+    assert len(bot.sent) == 1 and plan.load(1)["surahs"] == []
 
 
 # ------------------------------------------------------------------ умный перенос
@@ -345,19 +362,28 @@ def test_regenerate_updates_same_pinned_message_and_drops_junk_auto_tasks(monkey
     monkeypatch.setattr(plan, "_ask_json", lambda prompt, **k: asyncio.sleep(0, result=raw()))
 
     async def run():  # noqa: ANN202
-        async def no_quran(*a, **k):  # noqa: ANN002, ANN003, ANN202
-            return 0
-
-        monkeypatch.setattr(plan, "send_quran", no_quran)
         await plan.send(bot, _profile(), "morning")
         first = plan.load(1)["msg_id"]
-        await plan.send(bot, _profile(), "morning")            # автоматическое утро: план свежий — только закрепить
-        assert len(bot.sent) == 2 and "закреплён выше" in bot.sent[1]["text"]
-        bot.sent.pop()
         await plan.send(bot, _profile(), "morning", force=True)   # «Заново» — пересобрать
         return first
 
     first = asyncio.run(run())
     assert len(bot.sent) == 1 and bot.edited[-1]["id"] == first == plan.load(1)["msg_id"]        # то же сообщение, не второе
-    assert deleted == ["100"]                                                                    # лишняя «Написать должникам», созданная планом, удалена
+    assert bot.pinned == [] and deleted == ["100"]                                               # лишняя «Написать должникам», созданная планом, удалена
     assert "Написать должникам" not in bot.edited[-1]["text"]
+
+
+def test_plan_message_that_vanished_is_replaced_and_old_id_is_dropped(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path, raw=RAW, open_tasks=[{"id": 7, "text": "Позвонить Алишеру", "due_date": "2026-09-30"}])
+    bot = FakeBot()
+
+    async def run():  # noqa: ANN202
+        await plan.send(bot, _profile(), "morning")
+        first = plan.load(1)["msg_id"]
+        bot.edit_fails = True                                   # он нажал кнопку в боте — прежнее сообщение плана исчезло
+        await plan.send(bot, _profile(), "morning", force=True)
+        return first
+
+    first = asyncio.run(run())
+    assert len(bot.sent) == 2 and plan.load(1)["msg_id"] == bot.sent[1]["id"] != first
+    assert first in bot.deleted                                 # старый id на всякий случай убираем

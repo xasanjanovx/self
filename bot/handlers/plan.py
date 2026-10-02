@@ -1,5 +1,5 @@
-"""Кнопки плана дня (bot/plan.py): ☐/✅ пункты · ✏️ Изменить · 🔄 Заново · 🗓 На завтра · 📖 Сура — и вечернего разбора / переноса
-(bot/carry.py). Старые кнопки прежней версии (plan:*) тоже работают."""
+"""Кнопки плана дня (bot/plan.py): ☐/✅ пункты · ✏️ Изменить · 🔄 Заново · 🗓 На завтра — и переноса дел (bot/carry.py).
+Старые кнопки прежней версии (plan:*) тоже работают."""
 from __future__ import annotations
 
 import logging
@@ -102,9 +102,13 @@ async def handle_reply(message: Message, profile, text: str) -> bool:  # noqa: A
         await progress.delete()
     except Exception:
         pass
+    from .. import screen as screen_mod
+
     if st is None:
-        await message.answer(profile.tr("Не получилось поменять — попробуйте сказать иначе.", "O'zgartirib bo'lmadi — boshqacha ayting."))
+        note = profile.tr("Не получилось поменять — попробуйте сказать иначе.", "O'zgartirib bo'lmadi — boshqacha ayting.")
     else:
         done = sum(1 for it in st["items"] if it.get("done"))
-        await message.answer(profile.tr(f"✅ План обновлён · пунктов: {len(st['items'])}, выполнено {done}", f"✅ Reja yangilandi · {len(st['items'])} punkt, {done} bajarildi"))
+        note = profile.tr(f"✅ План обновлён · пунктов: {len(st['items'])}, выполнено {done}", f"✅ Reja yangilandi · {len(st['items'])} punkt, {done} bajarildi")
+    # 02.10: короткое подтверждение само исчезает (план обновился на месте — отдельное сообщение не должно висеть)
+    await screen_mod.send_ephemeral(message.bot, message.chat.id, note, keep_previous=True, ttl=8)
     return True

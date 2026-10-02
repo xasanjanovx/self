@@ -38,11 +38,14 @@ _MONTHS_RU = ["января", "февраля", "марта", "апреля", "�
 _MONTHS_UZ = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
 _LANG_NAME = {"ru": "русском", "uz": "узбекском (латиницей, живой литературный)", "en": "английском"}
 WINDOW_KEYS = ("fajr", "morning", "dhuhr", "asr", "maghrib", "isha")
-MAX_ITEMS = 10
-MAX_MAIN = 3
+# 02.10 его решение: план КОРОТКИЙ — до 5 дел списком, без окон между намазами, цитат, сур, мечетей, еды/денег/настроя и без закрепа;
+# сообщение исчезает при следующем действии в боте, как остальное (а не висит закреплённым). Вечернего разбора и воскресной планёрки нет.
+MAX_ITEMS = 5
+MAX_MAIN = 2
+PLAN_TTL_S = 18 * 3600   # не открывал бота — уберётся само к вечеру
 HTML_LIMIT = 3900
-REPLY_HINT_RU = "Ответьте на этот план — поменяю. Нажмите на пункт, когда сделаете."
-REPLY_HINT_UZ = "Rejaga javob yozing — o'zgartiraman. Bajarganingizda punktni bosing."
+REPLY_HINT_RU = "Нажмите пункт, когда сделаете. Ответьте — поменяю."
+REPLY_HINT_UZ = "Bajarganingizda punktni bosing. Javob yozing — o'zgartiraman."
 
 
 def weekday(profile: Profile, day: date) -> str:
@@ -180,18 +183,6 @@ async def gather(profile: Profile, *, day: date, place: dict[str, Any] | None = 
                         f"План на: {weekday(profile, day)} {day:%d.%m}" + (" (сегодня)" if day == today else " (завтра)" if day == today + timedelta(days=1) else "")]
     out: dict[str, Any] = {"day": day, "pray": {}, "wins": [], "open": [], "habits": [], "goals": []}
     try:
-        out["pray"] = await prayers(profile, day, place)
-        out["wins"] = windows(profile, out["pray"].get("times") or {})
-        if line := prayer_line(profile, out["pray"]):
-            parts.append(line)
-        if out["wins"]:
-            parts.append("ОКНА ДНЯ (key → время): " + "; ".join(f"{w['key']} = {w['title']} {w['range']}" for w in out["wins"]))
-    except Exception:
-        logger.warning("plan: намаз не получил", exc_info=True)
-    if place:
-        parts.append(f"ПОЕЗДКА: в этот день он в городе «{place['name']}» — намаз по времени этого города; мечети рядом ниже "
-                     "добавит код (в тексте их не перечисляй).")
-    try:
         parts.append(await agent_tools.snapshot(profile))
     except Exception:
         logger.warning("plan: срез данных не получил", exc_info=True)
@@ -218,14 +209,6 @@ async def gather(profile: Profile, *, day: date, place: dict[str, Any] | None = 
             parts.append("Каждый день (ref type=daily, id в квадратных скобках): " + "; ".join(
                 f"[{x['id']}] {x['title']}" + (f" в {x['time']}" if x.get("time") else "") + (f" ({x['progress']})" if x.get("progress") else "")
                 for x in out["habits"]))
-    watching = [r for r in lessons.items(uid) if int(r.get("position") or 0) >= 60 and int(r.get("duration") or 0) >= 8 * 60
-                and not lessons.finished(r) and time.time() - float(r.get("at") or 0) < 10 * 86400][:2]
-    if watching:
-        parts.append("Уроки в процессе: " + "; ".join(f"{r['title'][:60]} (остановился на {lessons.fmt(int(r.get('position') or 0))})" for r in watching))
-    if not place and (loc := where.now_line(uid).strip()):
-        parts.append(loc)
-    if week := _week_line(uid, today):
-        parts.append(week)
     out["text"] = "\n".join(p for p in parts if p)
     return out
 
@@ -236,45 +219,33 @@ def _persona_rules(profile: Profile, persona) -> str:  # noqa: ANN001
 
 
 SCHEMA = (
-    '{"intro": "одна тёплая строка приветствия", '
-    '"items": [{"text": "коротко, с глагола, до 70 знаков", "kind": "main|task|opt", "window": "fajr|morning|dhuhr|asr|maghrib|isha|any", '
-    '"ref": {"type": "task|goal|daily", "id": "id из данных"} или null}], '
-    '"food": "1–2 предложения: сколько ккал осталось из плана и что съесть (простые продукты Узбекистана)", '
-    '"money": "1 предложение: можно ли сегодня тратить свободно, что важно оплатить или вернуть", '
-    '"closing": "одна тёплая фраза-настрой (барака), без нравоучений", '
-    '"surahs": [{"surah": 112, "from": 1, "to": 4}]}'
+    '{"items": [{"text": "коротко, с глагола, до 70 знаков", "kind": "main|task", '
+    '"ref": {"type": "task|goal|daily", "id": "id из данных"} или null}]}'
 )
 
 PLAN_PROMPT = (
-    "Ты — JES, личный помощник {name}. Составь ПРИМЕРНЫЙ ПЛАН ДНЯ — мягкий и реалистичный, чтобы день был эффективным и с баракой "
-    "(духом, а не давлением). {rules}\n\n"
+    "Ты — JES, личный помощник {name}. Составь КОРОТКИЙ ПЛАН ДНЯ: только то, что на самом деле нужно сделать. {rules}\n\n"
     "Верни ТОЛЬКО JSON по схеме (оформлением займётся код, ничего не форматируй, без markdown и эмодзи):\n{schema}\n\n"
     "ПРАВИЛА:\n"
-    "• Опора дня — окна между намазами (ключи window из «ОКНА ДНЯ»). Время в минутах — нигде; окно уже определяет время. "
-    "any — если дело не привязано к окну.\n"
-    "• kind: main — не больше 3 главных дел (срочные и просроченные задачи, шаг к цели, ежедневные дела); task — обычные дела дня; "
-    "opt — «если успеете», 2–3 необязательных. Всего не больше {max_items} пунктов, день не должен быть забит; между делами — воздух.\n"
+    "• Не больше {max_items} пунктов — самое важное, день не должен быть забит. kind: main — не больше {max_main} главных "
+    "(срочные и просроченные задачи, платежи и долги к сроку, шаг к цели); остальное task.\n"
     "• Цели: «ШАГ СЕГОДНЯ» у цели в данных — возьми как пункт (главный, если срочно) с ref type=goal и id цели; формулировку сократи. "
     "Отметка такого пункта сама двигает цель.\n"
     "• ref: если пункт — это его существующая задача (в данных «[id] текст»), цель или ежедневное дело — укажи её id ИЗ ДАННЫХ (type "
     "task|goal|daily). Нет такой записи — ref null (главные такие пункты станут задачами сами). Не выдумывай id.\n"
-    "• Пункты — только ДЕЛА: задачи, шаги к целям, ежедневные дела, уроки. Еда (для неё поле food), отдых, сон, прогулка, намаз (его уже "
-    "задают окна), видео и музыка для развлечения — НЕ пункты.\n"
-    "• Решай по данным: калории и что съесть, можно ли свободно тратить (баланс, лимиты, платежи и долги), урок в процессе, цели, "
-    "цели недели, календарь, где он сейчас. Дела, которые давно переносятся, — предложи разбить на шаг поменьше.\n"
-    "• Если день уже идёт — планируй от текущего времени, прошедшее не трогай. Завтрашний план — на весь день.\n"
-    "• surahs — ТОЛЬКО если в данных есть задача, цель или ежедневное дело выучить суру или аяты Корана: номер суры (1–114) и "
-    "аяты (from/to; вся сура — с 1 до последнего аята). Иначе []. Текст суры пришлёт код из Корана — сам его НЕ пиши.\n"
-    "• Ничего не выдумывай: нет данных — не пиши про это. Пустые food/money — пустая строка.\n\n"
+    "• Пункты — только ДЕЛА: задачи, шаги к целям, ежедневные дела. НЕ пиши: еду и калории, деньги и советы, отдых, сон, прогулку, намаз, "
+    "суры, видео и музыку, приветствия, настрой и пожелания.\n"
+    "• Дела, которые давно переносятся, — сократи до маленького шага.\n"
+    "• Если день уже идёт — планируй от текущего времени, прошедшее не трогай. Дел нет — items [].\n"
+    "• Ничего не выдумывай: нет данных — не пиши про это.\n\n"
     "ДАННЫЕ:\n{data}"
 )
 
 EDIT_PROMPT = (
     "Ты — JES, личный помощник {name}. Вот его ТЕКУЩИЙ план дня (JSON) и его просьба, что поменять. {rules}\n"
     "Верни ПОЛНЫЙ обновлённый план ТОЙ ЖЕ схемы (только JSON): у пунктов, которые остались, сохрани поле id и done; новые пункты — без id "
-    "(kind main — не больше 3); «убери X» — удали; «добавь / поставь X в такое-то время» — добавь в подходящее окно (window); "
-    "«перенеси» — смени window; «сделал X» — done true. Остальное не трогай.\n"
-    "ОКНА: {wins}\n"
+    f"(kind main — не больше {MAX_MAIN}; всего не больше {MAX_ITEMS}); «убери X» — удали; «добавь X» — добавь; «сделал X» — done true. "
+    "Остальное не трогай.\n"
     "СХЕМА: {schema}\nК каждому пункту добавлены id и done.\n\n"
     "ТЕКУЩИЙ ПЛАН:\n{state}\n\nЕГО ПРОСЬБА: {ask}\n\nДАННЫЕ (для справки):\n{data}"
 )
@@ -317,13 +288,11 @@ def clean_items(raw: Any, data: dict[str, Any], *, previous: list[dict[str, Any]
         if not text or _norm(text) in seen:
             continue
         seen.add(_norm(text))
-        kind = str(it.get("kind") or "task")
-        kind = kind if kind in {"main", "task", "opt"} else "task"
+        kind = "main" if str(it.get("kind") or "task") == "main" else "task"
         if kind == "main":
             main += 1
             kind = "main" if main <= MAX_MAIN else "task"
-        window = str(it.get("window") or "any")
-        window = window if window in WINDOW_KEYS else "any"
+        window = "any"   # окон между намазами в плане больше нет
         prev = next((p for p in old if it.get("id") and p.get("id") == it.get("id")), None) or \
             next((p for p in old if _similar(p.get("text", ""), text) >= 0.8), None)
         items.append({"id": (prev or {}).get("id") or f"i{int(time.time() * 1000) % 10**8}{n}", "text": text, "kind": kind, "window": window,
@@ -381,12 +350,12 @@ async def _ask_json(prompt: str, *, max_tokens: int = 4500) -> dict[str, Any] | 
 def fallback_state(profile: Profile, data: dict[str, Any]) -> dict[str, Any]:
     """Модель недоступна — план без неё: дела на день (первые три — главные) и ежедневные дела."""
     items = []
-    for n, r in enumerate((data.get("open") or [])[:6]):
+    for n, r in enumerate((data.get("open") or [])[:MAX_ITEMS]):
         items.append({"text": str(r.get("text") or "")[:90], "kind": "main" if n < MAX_MAIN else "task", "window": "any",
                       "ref": {"type": "task", "id": str(r.get("id"))}})
-    for x in (data.get("habits") or [])[:4]:
+    for x in (data.get("habits") or [])[:max(0, MAX_ITEMS - len(items))]:
         items.append({"text": x["title"][:90], "kind": "task", "window": "any", "ref": {"type": "daily", "id": str(x["id"])}})
-    return {"intro": "", "items": items, "food": "", "money": "", "closing": "", "surahs": []}
+    return {"items": items}
 
 
 # ------------------------------------------------------------------ оформление
@@ -402,42 +371,15 @@ def _line(it: dict[str, Any], notes: dict[str, str]) -> str:
 
 
 def render(profile: Profile, st: dict[str, Any], *, carry_notes: dict[str, str] | None = None) -> str:
-    """Оформление плана (HTML Telegram): окна дня с временем, цитаты, ☐/✅, прогресс."""
+    """Оформление плана (HTML Telegram): заголовок и список ☐/✅ — главные первыми, без окон, цитат и прочего."""
     notes = carry_notes or {}
     day = date.fromisoformat(st["day"])
-    items = st.get("items") or []
-    trip = f" · {h(st['place'])}" if st.get("place") else ""
-    parts = [f"🗓 <b>{profile.tr('План', 'Reja')} · {date_text(profile, day)}</b>{trip}"]
-    if st.get("intro"):
-        parts.append(f"<i>{h(st['intro'])}</i>")
-    wins = st.get("wins") or []
-    titles = {w["key"]: w for w in wins}
-    for key in [w["key"] for w in wins] + ["any"]:
-        rows = [it for it in items if it.get("kind") != "opt" and (it.get("window", "any") == key or (key == "any" and it.get("window") not in titles))]
-        if not rows:
-            continue
-        w = titles.get(key)
-        head = f"{w['emoji']} <b>{h(w['title'])}</b> · {w['range']}" if w else "📌 <b>" + profile.tr("В течение дня", "Kun davomida") + "</b>"
-        parts.append(head + "\n<blockquote>" + "\n".join(_line(it, notes) for it in rows) + "</blockquote>")
-    opts = [it for it in items if it.get("kind") == "opt"]
-    if opts:
-        parts.append("✨ <b>" + profile.tr("Если успеете", "Ulgursangiz") + "</b>\n<blockquote>" + "\n".join(_line(it, notes) for it in opts) + "</blockquote>")
-    if st.get("food"):
-        parts.append("🍽 <b>" + profile.tr("Еда", "Ovqat") + "</b>\n<blockquote>" + h(st["food"]) + "</blockquote>")
-    if st.get("money"):
-        parts.append("💰 <b>" + profile.tr("Деньги", "Pul") + "</b>\n<blockquote>" + h(st["money"]) + "</blockquote>")
-    if items:
-        done = sum(1 for it in items if it.get("done"))
-        parts.append(f"📊 {profile.tr('Выполнено', 'Bajarildi')}: <b>{done}</b> {profile.tr('из', '/')} {len(items)}")
-    if st.get("closing"):
-        parts.append(f"<i>{h(st['closing'])}</i>")
-    if st.get("mosques_html"):
-        parts.append(st["mosques_html"])
+    items = sorted(st.get("items") or [], key=lambda it: 0 if it.get("kind") == "main" else 1)   # сортировка устойчивая — порядок модели сохраняется
+    done = sum(1 for it in items if it.get("done"))
+    head = f"🗓 <b>{profile.tr('План', 'Reja')} · {date_text(profile, day)}</b>" + (f" · {done}/{len(items)}" if items and done else "")
+    rows = [_line(it, notes) for it in items] or [profile.tr("Дел на этот день нет — отдыхайте 🙂", "Bu kunga ish yo'q — dam oling 🙂")]
     hint = "<i>" + profile.tr(REPLY_HINT_RU, REPLY_HINT_UZ) + "</i>"
-    text = "\n\n".join(parts + [hint])
-    if len(text) > HTML_LIMIT:  # слишком длинно — без «Если успеете» и подсказки
-        text = "\n\n".join(p for p in parts if not p.startswith("✨"))
-    return text[:4090]
+    return "\n".join([head, *rows, "", hint])[:4090]
 
 
 def keyboard(profile: Profile, st: dict[str, Any]):  # noqa: ANN201
@@ -452,11 +394,8 @@ def keyboard(profile: Profile, st: dict[str, Any]):  # noqa: ANN201
         label = f"{_mark(items[i])} {items[i]['text']}"
         buttons.append(_btn(label if len(label) <= 30 else label[:29] + "…", f"pl:d:{i}"))
     rows = [[b] for b in buttons] if len(buttons) <= 5 else [buttons[j:j + 2] for j in range(0, len(buttons), 2)]
-    rows.append([_btn("✏️ " + profile.tr("Изменить", "O'zgartirish"), "pl:e"), _btn("🔄 " + profile.tr("Заново", "Qayta"), "pl:r")])
-    tail = [_btn("🗓 " + profile.tr("На завтра", "Ertaga"), "pl:t")]
-    if st.get("surahs"):
-        tail.insert(0, _btn("📖 " + profile.tr("Сура", "Sura"), "pl:q"))
-    rows.append(tail)
+    rows.append([_btn("✏️ " + profile.tr("Изменить", "O'zgartirish"), "pl:e"), _btn("🔄 " + profile.tr("Заново", "Qayta"), "pl:r"),
+                 _btn("🗓 " + profile.tr("На завтра", "Ertaga"), "pl:t")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -492,27 +431,19 @@ async def sync_done(profile: Profile, st: dict[str, Any]) -> bool:
 async def build_state(profile: Profile, persona, *, day: date, city: str | None = None, previous: dict[str, Any] | None = None,
                       ask: str | None = None) -> dict[str, Any]:
     """Новый план (или правка прежнего по просьбе ask) → состояние с окнами, пунктами, задачами."""
-    place = await place_info(city) if city else None
-    data = await gather(profile, day=day, place=place)
+    data = await gather(profile, day=day)   # city больше не нужен: ни намаза по городу, ни мечетей в плане нет
     args = dict(name=profile.first_name or "пользователя", rules=_persona_rules(profile, persona), schema=SCHEMA, data=data["text"])
     if ask and previous:
-        shown = {"intro": previous.get("intro"), "food": previous.get("food"), "money": previous.get("money"), "closing": previous.get("closing"),
-                 "items": [{k: it.get(k) for k in ("id", "text", "kind", "window", "ref", "done")} for it in previous.get("items") or []]}
-        prompt = EDIT_PROMPT.format(wins="; ".join(f"{w['key']} = {w['title']}" for w in data["wins"]) or "нет",
-                                    state=json.dumps(shown, ensure_ascii=False), ask=ask, **args)
+        shown = {"items": [{k: it.get(k) for k in ("id", "text", "kind", "ref", "done")} for it in previous.get("items") or []]}
+        prompt = EDIT_PROMPT.format(state=json.dumps(shown, ensure_ascii=False), ask=ask, **args)
     else:
-        prompt = PLAN_PROMPT.format(max_items=MAX_ITEMS, **args)
+        prompt = PLAN_PROMPT.format(max_items=MAX_ITEMS, max_main=MAX_MAIN, **args)
     raw = await _ask_json(prompt) or fallback_state(profile, data)
-    same_day = (previous or {}).get("day") == day.isoformat()
     st: dict[str, Any] = {
-        "day": day.isoformat(), "place": place["name"] if place else None, "wins": data["wins"], "created_at": (previous or {}).get("created_at") or time.time(),
-        "intro": str(raw.get("intro") or "")[:200], "food": str(raw.get("food") or "")[:400], "money": str(raw.get("money") or "")[:300],
-        "closing": str(raw.get("closing") or "")[:200], "items": clean_items(raw.get("items"), data, previous=(previous or {}).get("items")),
-        "surahs": _clean_surahs(raw.get("surahs")), "msg_id": (previous or {}).get("msg_id"), "quran_sent": (previous or {}).get("quran_sent") if same_day else None}
+        "day": day.isoformat(), "place": None, "wins": [], "created_at": (previous or {}).get("created_at") or time.time(),
+        "items": clean_items(raw.get("items"), data, previous=(previous or {}).get("items")), "surahs": [],
+        "msg_id": (previous or {}).get("msg_id"), "quran_sent": None}
     await _link_and_add(profile, st["items"], data, day)
-    if place:
-        items, name = await mosques_for(profile, place)
-        st["mosques_html"] = mosques_block(profile, items, place=name)
     return st
 
 
@@ -543,9 +474,12 @@ async def _remove_dropped_auto_tasks(profile: Profile, before: list[dict[str, An
             logger.warning("plan: задачи не удалил", exc_info=True)
 
 
-async def _publish(bot, profile: Profile, st: dict[str, Any], *, edit: bool, pin: bool) -> dict[str, Any]:  # noqa: ANN001
-    """Отправить или обновить сообщение плана; закрепить (предыдущий план открепляется, но не удаляется)."""
+async def _publish(bot, profile: Profile, st: dict[str, Any], *, edit: bool, pin: bool = False) -> dict[str, Any]:  # noqa: ANN001
+    """Отправить или обновить сообщение плана. Без закрепа (pin оставлен для совместимости и не используется): сообщение — временное,
+    как остальное в боте, — исчезает при следующем действии; прежний план при отправке нового удаляется."""
     from aiogram.types import LinkPreviewOptions
+
+    from . import screen as screen_mod
 
     uid = profile.telegram_id
     text = render(profile, st, carry_notes=await _carry_notes(profile, st))
@@ -554,11 +488,6 @@ async def _publish(bot, profile: Profile, st: dict[str, Any], *, edit: bool, pin
     if edit and st.get("msg_id"):
         try:
             await bot.edit_message_text(text, chat_id=uid, message_id=int(st["msg_id"]), reply_markup=kb, parse_mode="HTML", link_preview_options=opts)
-            if pin:
-                try:
-                    await bot.pin_chat_message(uid, int(st["msg_id"]), disable_notification=True)
-                except Exception:
-                    logger.debug("plan: повторно закрепить не вышло", exc_info=True)
             return st
         except Exception as exc:
             if "not modified" in str(exc).lower():
@@ -567,13 +496,12 @@ async def _publish(bot, profile: Profile, st: dict[str, Any], *, edit: bool, pin
     old = load(uid)
     msg = await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML", link_preview_options=opts)
     st["msg_id"] = msg.message_id
-    if pin:
+    screen_mod.track_ephemeral(uid, msg.message_id, PLAN_TTL_S)
+    if old.get("msg_id") and int(old["msg_id"]) != msg.message_id:
         try:
-            if old.get("msg_id") and int(old["msg_id"]) != msg.message_id:
-                await bot.unpin_chat_message(uid, message_id=int(old["msg_id"]))
-            await bot.pin_chat_message(uid, msg.message_id, disable_notification=True)
+            await bot.delete_message(uid, int(old["msg_id"]))   # прежний план — не копим в чате
         except Exception:
-            logger.info("plan: закрепить не вышло", exc_info=True)
+            logger.debug("plan: прежний план не удалился", exc_info=True)
     return st
 
 
@@ -605,15 +533,6 @@ async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None
     today = profile.today
     day = day or (today + timedelta(days=1) if kind == "tomorrow" else today)
     old = load(profile.telegram_id)
-    # утро: план на сегодня он уже составил (вечером «на завтра») и недавно трогал — просто закрепляем его снова
-    if kind == "morning" and not force and old.get("day") == today.isoformat() and old.get("msg_id") and not city \
-            and time.time() - float(old.get("updated_at") or 0) < 8 * 3600:
-        try:
-            await bot.pin_chat_message(profile.telegram_id, int(old["msg_id"]), disable_notification=True)
-            await bot.send_message(profile.telegram_id, "☀️ " + profile.tr("Доброе утро! Ваш план на сегодня — закреплён выше 👆", "Xayrli tong! Bugungi rejangiz yuqorida 👆"), parse_mode="HTML")
-            return True
-        except Exception:
-            logger.info("plan: старый план не закрепился — составлю новый", exc_info=True)
     if kind == "morning":
         try:
             await carry.rollover(bot, profile)          # просроченное переезжает на сегодня (или JES спрашивает, что с ним)
@@ -622,13 +541,10 @@ async def send(bot, profile: Profile, kind: str = "morning", *, city: str | None
     st = await build_state(profile, persona, day=day, city=city)
     st["updated_at"] = time.time()
     replace = bool(old.get("day") == day.isoformat() and old.get("msg_id"))
-    if replace:                        # план на этот день уже есть — обновляем то же закреплённое сообщение
+    if replace:                        # план на этот день уже есть — обновляем то же сообщение (исчезло — придёт новое)
         st["msg_id"] = old["msg_id"]
         await _remove_dropped_auto_tasks(profile, old.get("items") or [], st["items"])
-        st["quran_sent"] = old.get("quran_sent")
-    st = await _publish(bot, profile, st, edit=replace, pin=True)
-    if st.get("surahs") and st.get("quran_sent") != st["day"]:
-        await send_quran(bot, profile, st)
+    st = await _publish(bot, profile, st, edit=replace)
     save(profile.telegram_id, st)
     logger.info("plan: %s отправлен %s (%d пунктов)", kind, profile.telegram_id, len(st["items"]))
     return True
@@ -641,10 +557,10 @@ async def edit(bot, profile: Profile, ask: str) -> dict[str, Any] | None:  # noq
     if not old.get("day"):
         return None
     persona = await services.persona(uid)
-    st = await build_state(profile, persona, day=date.fromisoformat(old["day"]), city=old.get("place"), previous=old, ask=ask)
+    st = await build_state(profile, persona, day=date.fromisoformat(old["day"]), previous=old, ask=ask)
     await _remove_dropped_auto_tasks(profile, old.get("items") or [], st["items"])
     st["updated_at"] = time.time()
-    st = await _publish(bot, profile, st, edit=True, pin=True)
+    st = await _publish(bot, profile, st, edit=True)
     save(uid, st)
     return st
 

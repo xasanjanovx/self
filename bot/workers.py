@@ -40,7 +40,10 @@ async def _send_report(bot: Bot, telegram_id: int, frequency: str, due_key: str)
     )
     summary = build_summary(profile, days=days, entries=payload["all_finance_entries"], logs=payload["calorie_logs"], nutrition_profile=nutrition_profile, title=title)
     text = summary.text
-    await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang))
+    # 02.10: отчёт не копится в чате — исчезает при следующем действии, как остальное в боте
+    from . import screen as screen_mod
+
+    await screen_mod.send_ephemeral(bot, telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang), keep_previous=True)
     await db.save_report_preferences(telegram_id, enabled=True, frequency=frequency, last_sent_key=due_key)
     cache.invalidate(telegram_id, "report_prefs")
 
@@ -76,10 +79,10 @@ async def report_worker(bot: Bot) -> None:
                 week_key = _due_key(local_now, "weekly")
                 if week_key is not None and access.is_owner(telegram_id):
                     try:
-                        from . import plan, weekly
+                        from . import weekly
 
                         await weekly.maybe_send(bot, profile, week_key)
-                        await plan.maybe_send_week(bot, profile, week_key)  # 30.09 его выбор: планёрка недели — 3 цели по дням
+                        # 02.10 его решение: воскресной планёрки (3 цели недели) больше нет — по просьбе остаётся инструмент week_plan
                     except TelegramForbiddenError:
                         pass
                     except Exception:
@@ -194,15 +197,7 @@ async def _brief_tick(bot: Bot) -> None:
                     logger.info("evening brief skipped: user %s blocked the bot", telegram_id)
                 except Exception:
                     logger.exception("evening brief failed for %s", telegram_id)
-                if access.is_owner(telegram_id) and us.get("day_plan", True):
-                    try:
-                        from . import plan
-
-                        await plan.send(bot, profile, "review")  # 30.09: разбор дня — что сделано, что перенести, идея на завтра
-                    except TelegramForbiddenError:
-                        pass
-                    except Exception:
-                        logger.exception("evening review failed for %s", telegram_id)
+                # 02.10 его решение: вечернего разбора дня («отчёта» по плану) больше нет
 
 
 async def brief_worker(bot: Bot) -> None:
