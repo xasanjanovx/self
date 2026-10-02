@@ -523,6 +523,25 @@ async def media_progress(request: web.Request) -> web.Response:
     return web.json_response({"ok": item is not None})
 
 
+async def tv_event(request: web.Request) -> web.Response:
+    """02.10: приложение сопряглось с ТВ на Android TV / забыло его: {"event": "paired", "name": "Artel …"} | {"event": "forget"} —
+    после этого «Джес, включи ТВ» превращается в действие для телефона (bot/smarthome.py: tv_action)."""
+    from . import smarthome
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    data = await _json(request)
+    event = str(data.get("event") or "")
+    if event == "paired":
+        row = smarthome.register_phone_tv(uid, str(data.get("name") or "ТВ"))
+        logger.info("tv %s: сопряжён (%s)", uid, row.get("name"))
+        return web.json_response({"ok": True, "name": row.get("name")})
+    if event == "forget":
+        return web.json_response({"ok": smarthome.forget_phone_tv(uid)})
+    return web.json_response({"error": "bad event"}, status=400)
+
+
 async def bank_notification(request: web.Request) -> web.Response:
     """Уведомление банка/SMS об операции (2.9): {"app", "package", "title", "text", "t"} → вопрос в боте «Записать?».
     Отвечаем сразу, разбор — фоном (телефону ждать нечего)."""
@@ -754,6 +773,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
     app.router.add_post("/jarvis/v1/media", media_progress)
+    app.router.add_post("/jarvis/v1/tv", tv_event)
     app.router.add_post("/jarvis/v1/where", where_update)
     app.router.add_get("/jarvis/v1/geo", geo_zones)
     app.router.add_post("/jarvis/v1/geo/place", geo_place)

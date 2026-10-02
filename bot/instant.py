@@ -54,7 +54,7 @@ _HOME_OFF = re.compile(rf"^(?:выключи|выруби|отключи|пог�
 _HOME_TEMP = re.compile(r"^(?:поставь|установи|сделай|выставь)\s+((?:[a-zа-яё]+\s+){0,2}?(?:кондиционер|кондей|кондер)\w*)\s+(?:на\s+)?(.+?)(?:\s+градус\w*)?$")
 _HOME_STOP = {"фонарик", "звук", "музыку", "будильник", "таймер", "лайв", "режим"}
 # «поставь музыку Шахзоды», «включи Бенома», «включи видео про…» — YouTube (Music) по запросу
-_PLAY =re.compile(r"^(?:поставь|включи|вруби|запусти|сыграй)\s+(?:(музыку|песню|песни|трек|клип|видео)\s*)?(.*)$")
+_PLAY = re.compile(r"^(?:поставь|включи|вруби|запусти|сыграй)\s+(?:(музыку|песню|песни|трек|клип|видео)\s*)?(.*)$")
 _PLAY_SKIP = {"будильник", "таймер", "фонарик", "звук", "громкость", "свет", "вайфай", "wifi", "блютуз", "bluetooth", "интернет",
               "камеру", "камера", "экран", "режим", "не", "уведомления", "яркость", "геолокацию", "навигатор", "приложение", "задачу"}
 _ALARM = re.compile(r"^(?:поставь\s+|заведи\s+|установи\s+)?будильник\s+(?:на|в)\s+(.+)$|^разбуди(?:\s+меня)?\s+(?:в|на)\s+(.+)$")
@@ -130,11 +130,59 @@ def _timer_seconds(rest: str) -> int | None:
     return None
 
 
+# 02.10: ТВ на Android TV через приложение (инструмент tv_control): «включи тв», «громче на телевизоре», «следующий канал», «открой ютуб на тв»…
+_TVW = re.compile(r"^(?:тв|телевизор\w*|телик\w*|телек\w*)$")
+_TV_UP = {"громче", "погромче", "прибавь", "добавь", "увеличь"}
+_TV_DOWN = {"тише", "потише", "убавь", "уменьши", "приглуши"}
+_TV_MUTE = re.compile(r"\b(?:выключи звук|отключи звук|убери звук|без звука|заглуши|включи звук|верни звук|mute)\b")
+_TV_CHANNEL = re.compile(r"^(?:(?:включи|переключи|поставь)\s+)?(следующий|предыдущий|дальше)\s+канал$|^(?:переключи|поменяй)\s+канал$|^канал\s+(вперед|назад|плюс|минус)$")
+_TV_KEYS = {"назад": "back", "домой": "home", "главная": "home", "главный": "home", "ок": "ok", "окей": "ok", "вверх": "up", "вниз": "down",
+            "влево": "left", "вправо": "right", "меню": "menu", "пауза": "play_pause", "плей": "play_pause", "воспроизведи": "play_pause"}
+_TV_APPS = {"ютуб": "youtube", "youtube": "youtube", "ютюб": "youtube", "нетфликс": "netflix", "netflix": "netflix", "кинопоиск": "kinopoisk", "prime": "prime"}
+
+
+def _parse_tv(t: str) -> Command | None:
+    if m := _TV_CHANNEL.match(t):
+        word = m.group(1) or m.group(2) or "дальше"
+        return Command("tv_control", {"action": "channel_down" if word in {"предыдущий", "назад", "минус"} else "channel_up"}, t)
+    words = t.split()
+    if not any(_TVW.match(w) for w in words):
+        return None
+    rest = [w for w in words if not _TVW.match(w) and w not in {"на", "в", "мне", "а", "у", "сделай", "пожалуйста"}]
+    if not rest:
+        return None
+    if _TV_MUTE.search(" ".join(words)):
+        return Command("tv_control", {"action": "mute"}, t)
+    steps = [str(n) for n in numbers(rest) if 1 <= n <= 30]
+    first = rest[0]
+    if first in _TV_UP or first in _TV_DOWN:
+        args: dict[str, Any] = {"action": "volume_up" if first in _TV_UP else "volume_down"}
+        if steps:
+            args["value"] = steps[0]
+        return Command("tv_control", args, t)
+    if first in {"включи", "вруби", "запусти", "открой"} and len(rest) >= 2 and rest[1] in _TV_APPS:
+        return Command("tv_control", {"action": "app", "value": _TV_APPS[rest[1]]}, t)
+    if rest[0] in _TV_APPS and len(rest) == 1:
+        return Command("tv_control", {"action": "app", "value": _TV_APPS[rest[0]]}, t)
+    if any(w in {"hdmi", "хдми"} for w in rest):
+        n = next((str(x) for x in numbers(rest) if 1 <= x <= 4), "")
+        return Command("tv_control", {"action": "input", "value": n}, t) if n else None
+    if len(rest) == 1 and rest[0] in _TV_KEYS:
+        return Command("tv_control", {"action": "key", "value": _TV_KEYS[rest[0]]}, t)
+    if len(rest) == 1 and rest[0] in {"включи", "вруби", "зажги"}:
+        return Command("tv_control", {"action": "on"}, t)
+    if len(rest) == 1 and rest[0] in {"выключи", "выруби", "отключи", "погаси"}:
+        return Command("tv_control", {"action": "off"}, t)
+    return None
+
+
 def parse(text: str) -> Command | None:
     """Фраза (уже без имени JES) → команда телефона или None (тогда — Gemini)."""
     t = _clean(text)
     if not t:
         return None
+    if cmd := _parse_tv(t):
+        return cmd
     if m := _TAXI.match(t):
         # «вызови такси» / «такси до вокзала»: без адреса — Яндекс Go от его места (27.09: Live подставлял «меня», «куда»)
         return Command("taxi", {"to": (m.group(1) or "").strip()}, t)

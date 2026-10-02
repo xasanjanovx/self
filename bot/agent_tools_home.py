@@ -10,7 +10,7 @@ from typing import Any
 from . import smarthome
 from .agent_tools import ARR, P, ToolContext, _str, tool
 
-ACTIONS = ["on", "off", "brightness", "temperature", "mode", "wind", "volume_up", "volume_down", "mute", "channel_up", "channel_down", "key"]
+ACTIONS = ["on", "off", "brightness", "temperature", "mode", "wind", "volume_up", "volume_down", "mute", "channel_up", "channel_down", "key", "app", "input"]
 
 
 @tool(
@@ -37,7 +37,8 @@ async def _home_control(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 @tool("home_list", "Какие устройства умного дома подключены (свет, ТВ, кондиционер) и подключён ли дом вообще; «что у меня в умном доме?».")
 async def _home_list(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     rows = smarthome.devices(ctx.uid)
-    out: dict[str, Any] = {"connected": smarthome.configured(), "devices": [{"name": r["name"], "type": r["type"], "aliases": r.get("aliases") or []} for r in rows]}
+    out: dict[str, Any] = {"connected": smarthome.configured(), "tv_via_phone": smarthome.phone_tv(ctx.uid) is not None,
+                           "devices": [{"name": r["name"], "type": r["type"], "aliases": r.get("aliases") or []} for r in rows]}
     if not smarthome.configured():
         out["setup"] = smarthome.SETUP
     elif not rows:

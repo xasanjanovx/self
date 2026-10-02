@@ -702,6 +702,27 @@ async def _save_place_here(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any])
     return _action(turn, "save_place", name=name) | {"place": name, "note": "телефон определит, где он, и сохранит (нужен доступ к геолокации)"}
 
 
+@ptool("tv_control", "ТВ на Android TV через приложение JES по Wi-Fi дома: «включи/выключи ТВ», «громче на ТВ», «следующий канал», «открой YouTube на ТВ», "
+       "«переключи на HDMI 2», «назад / домой / ОК на ТВ». action: on | off | volume_up | volume_down | mute | channel_up | channel_down | key | app | input.",
+       {"action": P("STRING", "что сделать", enum=["on", "off", "volume_up", "volume_down", "mute", "channel_up", "channel_down", "key", "app", "input"]),
+        "value": P("STRING", "volume_*: на сколько шагов (по умолчанию 2); key: home|back|ok|up|down|left|right|menu|play_pause; "
+                             "app: youtube|netflix|prime|kinopoisk; input: номер HDMI 1–4")}, ("action",))
+async def _tv_control(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import smarthome
+
+    action = _str(a.get("action")) or ""
+    try:
+        act = smarthome.tv_action(turn.uid, action, a.get("value"))
+    except smarthome.SmartHomeError as exc:
+        return {"error": str(exc)}
+    if act is None:
+        if not smarthome.devices(turn.uid):
+            return {"error": "ТВ ещё не привязан: в приложении JES → Ещё → «ТВ (Android TV)» найти ТВ и ввести код с экрана (один раз, дома)"}
+        return await smarthome.control(turn.uid, "тв", action, a.get("value"))   # ТВ на ИК-хабе Tuya
+    _action(turn, "tv", cmd=act["cmd"], value=act["value"])
+    return {"ok": True, "done_on_phone": "tv", "note": "команда ушла на ТВ с телефона (по Wi-Fi дома)"}
+
+
 @ptool("resume_video", "Продолжить YouTube с того места, где он остановился: «продолжи урок», «продолжи уроки английского», «включи "
        "видео, где я остановился». Досмотрел, а у ежедневного дела есть плейлист — следующий урок.",
        {"query": P("STRING", "что именно: слова из названия, канал или ежедневное дело (необязательно)")})

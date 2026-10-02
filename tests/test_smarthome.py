@@ -177,8 +177,6 @@ def test_tool_marks_mutation_and_validates_action(tuya):
 @pytest.mark.parametrize("phrase,args", [
     ("включи свет", {"target": "свет", "action": "on"}),
     ("выключи свет в комнате", {"target": "свет в комнате", "action": "off"}),
-    ("включи телевизор", {"target": "телевизор", "action": "on"}),
-    ("выключи тв", {"target": "тв", "action": "off"}),
     ("выключи кондиционер", {"target": "кондиционер", "action": "off"}),
     ("поставь кондиционер на двадцать четыре", {"target": "кондиционер", "action": "temperature", "value": "24"}),
     ("Включи, пожалуйста, свет!", {"target": "свет", "action": "on"}),
@@ -198,3 +196,65 @@ def test_wanted_type_and_matching_words():
     assert smarthome.wanted_type("свет в комнате") == ("light", ["komnate"])
     assert smarthome.wanted_type("кондей") == ("ac", []) and smarthome.wanted_type("телик") == ("tv", [])
     assert smarthome.wanted_type("чайник")[0] is None
+
+
+# ------------------------------------------------------------------ ТВ на Android TV через приложение JES (по Wi-Fi дома)
+def test_phone_tv_registration_and_action_mapping(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert smarthome.phone_tv(51) is None and smarthome.tv_action(51, "on") is None
+    row = smarthome.register_phone_tv(51, "Artel A43")
+    assert row["via"] == "phone" and smarthome.register_phone_tv(51, "другое")["name"] == "Artel A43"      # повторно не дублируется
+    assert smarthome.tv_action(51, "on") == {"type": "tv", "cmd": "power_on", "value": ""}
+    assert smarthome.tv_action(51, "volume_up", "5") == {"type": "tv", "cmd": "volume_up", "value": "5"}
+    assert smarthome.tv_action(51, "volume_down")["value"] == "2" and smarthome.tv_action(51, "volume_up", "900")["value"] == "30"
+    assert smarthome.tv_action(51, "app", "YouTube") == {"type": "tv", "cmd": "app", "value": "https://www.youtube.com"}
+    assert smarthome.tv_action(51, "input", "hdmi 2") == {"type": "tv", "cmd": "key", "value": "hdmi2"}
+    assert smarthome.tv_action(51, "key", "home")["value"] == "home" and smarthome.tv_action(51, "mute")["cmd"] == "mute"
+    with pytest.raises(smarthome.SmartHomeError):
+        smarthome.tv_action(51, "app", "тикток")
+    with pytest.raises(smarthome.SmartHomeError):
+        smarthome.tv_action(51, "input", "9")
+    assert smarthome.forget_phone_tv(51) and smarthome.phone_tv(51) is None and not smarthome.forget_phone_tv(51)
+
+
+def test_tv_control_phone_tool_sends_action_to_the_phone(tmp_path, monkeypatch):
+    from bot import phone
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    turn = phone.PhoneTurn(uid=52)
+    ctx = tools.ToolContext(profile=_profile(52), text="")
+    out = _run(phone.PHONE_TOOLS["tv_control"].handler(turn, ctx, {"action": "on"}))
+    assert "не привязан" in out["error"]                                  # ТВ ещё не сопряжён
+    smarthome.register_phone_tv(52, "Artel")
+    out = _run(phone.PHONE_TOOLS["tv_control"].handler(turn, ctx, {"action": "volume_up", "value": "3"}))
+    assert out["ok"] and turn.actions == [{"type": "tv", "cmd": "volume_up", "value": "3"}]
+    bad = _run(phone.PHONE_TOOLS["tv_control"].handler(turn, ctx, {"action": "app", "value": "тикток"}))
+    assert "не знаю" in bad["error"] and len(turn.actions) == 1
+    # из чата (не с телефона) ТВ с телефона не включить — инструмент честно говорит, как
+    chat = _run(tools.run("home_control", {"target": "тв", "action": "on"}, ctx))
+    assert "tv_control" in chat["error"]
+
+
+@pytest.mark.parametrize("phrase,args", [
+    ("включи тв", {"action": "on"}),
+    ("выключи телевизор", {"action": "off"}),
+    ("громче на телевизоре", {"action": "volume_up"}),
+    ("сделай потише на тв на пять", {"action": "volume_down", "value": "5"}),
+    ("выключи звук на тв", {"action": "mute"}),
+    ("следующий канал", {"action": "channel_up"}),
+    ("предыдущий канал", {"action": "channel_down"}),
+    ("открой ютуб на тв", {"action": "app", "value": "youtube"}),
+    ("включи нетфликс на телевизоре", {"action": "app", "value": "netflix"}),
+    ("переключи тв на hdmi два", {"action": "input", "value": "2"}),
+    ("на тв назад", {"action": "key", "value": "back"}),
+    ("домой на телевизоре", {"action": "key", "value": "home"}),
+])
+def test_instant_tv_phrases(phrase, args):
+    cmd = instant.parse(phrase)
+    assert cmd is not None and cmd.tool == "tv_control" and cmd.args == args
+
+
+@pytest.mark.parametrize("phrase", ["громче", "тише", "назад", "домой", "открой ютуб", "включи видео про телевизор", "позвони маме"])
+def test_instant_leaves_phone_phrases_without_tv_word_alone(phrase):
+    cmd = instant.parse(phrase)
+    assert cmd is None or cmd.tool != "tv_control"

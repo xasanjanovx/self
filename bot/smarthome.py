@@ -315,12 +315,15 @@ async def _tv(row: dict[str, Any], action: str, value: Any) -> str:
 
 async def control(uid: int, query: str, action: str, value: Any = None) -> dict[str, Any]:
     """«свет в комнате» + on → результат: {"ok", "did": [{"device", "result"}], "errors": […]}. ИК-устройства — отправка без подтверждения."""
+    rows = devices(uid)
+    hit = _match(rows, query)
+    if hit and all(r.get("via") == "phone" for r in hit):
+        return {"error": "ТВ управляется приложением JES на телефоне — это делает инструмент tv_control (на телефоне дома, по Wi-Fi)"}
+    hit = [r for r in hit if r.get("via") != "phone"]
     if not configured():
         return {"error": "умный дом не подключён", "setup": SETUP}
-    rows = devices(uid)
     if not rows:
         return {"error": "устройств нет — сначала «найди устройства дома» (home_scan)", "setup": None if configured() else SETUP}
-    hit = _match(rows, query)
     if not hit:
         return {"error": f"не нашла устройство «{query}»", "devices": [r["name"] for r in rows]}
     kind = hit[0].get("type")
@@ -347,4 +350,66 @@ async def control(uid: int, query: str, action: str, value: Any = None) -> dict[
     return {"ok": True, "server_done": True, "did": did, "errors": errors, "ir_note": "ИК-команда отправлена; состояние ТВ не проверить" if any(r["type"] == "tv" for r in hit) else None}
 
 
-__all__ = ["configured", "control", "scan", "devices", "rename", "wanted_type", "sign", "call", "SETUP", "SmartHomeError"]
+# ------------------------------------------------------------------ ТВ на Android TV через телефон (приложение JES по Wi-Fi дома)
+# 02.10: у него Artel на Android TV и Xiaomi 17 Pro: сервер в Германии до домашнего ТВ не достаёт, поэтому команду исполняет
+# приложение JES (протокол Android TV Remote v2 по Wi-Fi, запасной путь — ИК-порт телефона). Приложение при сопряжении сообщает
+# серверу «ТВ есть» (POST /jarvis/v1/tv), сервер превращает «включи ТВ» в действие {"type": "tv", "cmd", "value"} для телефона.
+PHONE_TV_ID = "phone:tv"
+TV_COMMANDS = {"on": "power_on", "off": "power_off", "volume_up": "volume_up", "volume_down": "volume_down", "mute": "mute",
+               "channel_up": "channel_up", "channel_down": "channel_down", "key": "key", "app": "app", "input": "input"}
+TV_APPS = {"youtube": "https://www.youtube.com", "ютуб": "https://www.youtube.com", "netflix": "https://www.netflix.com", "нетфликс": "https://www.netflix.com",
+           "prime": "https://app.primevideo.com", "primevideo": "https://app.primevideo.com", "kinopoisk": "https://www.kinopoisk.ru", "кинопоиск": "https://www.kinopoisk.ru"}
+
+
+def phone_tv(uid: int) -> dict[str, Any] | None:
+    return next((r for r in devices(uid) if r.get("via") == "phone" and r.get("type") == "tv"), None)
+
+
+def register_phone_tv(uid: int, name: str = "ТВ") -> dict[str, Any]:
+    """Приложение сопряглось с ТВ: запомнить, что «ТВ» управляется телефоном (имя можно поменять: home_rename)."""
+    rows = devices(uid)
+    row = next((r for r in rows if r.get("id") == PHONE_TV_ID), None)
+    if row is None:
+        row = {"id": PHONE_TV_ID, "name": (name or "ТВ").strip()[:60] or "ТВ", "type": "tv", "via": "phone", "aliases": ["тв", "телевизор"]}
+        rows.append(row)
+        save_devices(uid, rows)
+    return row
+
+
+def forget_phone_tv(uid: int) -> bool:
+    rows = devices(uid)
+    keep = [r for r in rows if r.get("id") != PHONE_TV_ID]
+    if len(keep) != len(rows):
+        save_devices(uid, keep)
+    return len(keep) != len(rows)
+
+
+def tv_action(uid: int, action: str, value: Any = None) -> dict[str, Any] | None:
+    """Действие для телефона {"type": "tv", "cmd", "value"} — если ТВ привязан к приложению; иначе None (тогда — Tuya-ТВ, если есть)."""
+    if phone_tv(uid) is None:
+        return None
+    cmd = TV_COMMANDS.get(action)
+    if cmd is None:
+        raise SmartHomeError(f"для ТВ не бывает «{action}»")
+    val = str(value).strip().lower() if value not in (None, "") else ""
+    if cmd == "app":
+        link = TV_APPS.get(val.replace(" ", ""))
+        if link is None:
+            raise SmartHomeError(f"приложение «{value}» не знаю; могу: YouTube, Netflix, Prime Video, Кинопоиск")
+        return {"type": "tv", "cmd": "app", "value": link}
+    if cmd in {"volume_up", "volume_down"}:
+        try:
+            steps = max(1, min(30, int(float(val)))) if val else 2
+        except ValueError:
+            steps = 2
+        return {"type": "tv", "cmd": cmd, "value": str(steps)}
+    if cmd == "input":
+        n = "".join(ch for ch in val if ch.isdigit()) or "1"
+        if n not in {"1", "2", "3", "4"}:
+            raise SmartHomeError("вход HDMI 1–4")
+        return {"type": "tv", "cmd": "key", "value": f"hdmi{n}"}
+    return {"type": "tv", "cmd": cmd, "value": val}
+
+
+__all__ = ["configured", "control", "scan", "devices", "rename", "wanted_type", "sign", "call", "SETUP", "SmartHomeError", "phone_tv",
+           "register_phone_tv", "forget_phone_tv", "tv_action", "TV_COMMANDS"]
