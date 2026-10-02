@@ -33,7 +33,8 @@ _SKIP = {"ai_status", "calculate", "currency_rates", "weather", "recall_deeds", 
          "ask_user", "open_screen", "expect_photo", "remember_about_me", "remember_contact", "screen_look", "look", "phone_status",
          "recent_calls", "telegram_read", "telegram_search", "youtube_search", "cancel_send", "confirm_awake", "snooze",
          "device_action", "set_volume", "brightness", "media", "flashlight", "undo_last", "settings_panel", "live_mode",
-         "send_to_chat", "gallery", "set_ai_balance", "video_resume_link", "list_place_reminders", "list_daily"}
+         "send_to_chat", "gallery", "set_ai_balance", "video_resume_link", "list_place_reminders", "list_daily",
+         "gcloud_billing", "set_gcloud_info", "list_saved_videos", "home_list", "home_scan"}
 _SKIP_PREFIX = ("get_", "list_", "find_", "search_", "show_", "check_")
 _LABELS = {
     "phone_call": "звонок", "call_back": "перезвонила", "send_sms": "SMS", "telegram_send": "сообщение в Telegram",

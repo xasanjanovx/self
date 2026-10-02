@@ -1139,5 +1139,6 @@ from . import agent_tools_debts  # noqa: E402  — бухгалтер долго
 from . import agent_tools_daily  # noqa: E402,F401  — каждый день (дела с напоминанием и целью), «продолжи урок» YouTube
 from . import agent_tools_deeds  # noqa: E402,F401  — «что я делал вчера?», «когда звонил Алишеру?» (bot/deeds.py)
 from . import agent_tools_plan  # noqa: E402,F401  — план дня, мечети рядом, намаз в другом городе, мозговой штурм (bot/plan.py)
+from . import agent_tools_home  # noqa: E402,F401  — умный дом: свет, ТВ, кондиционер голосом (bot/smarthome.py)
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

@@ -340,14 +340,46 @@ async def _ai_tokens(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return billing.tokens_report(str(a.get("period") or "today"))
 
 
-# ------------------------------------------------------------------ баланс Gemini и версия
+# ------------------------------------------------------------------ баланс Gemini, Google Cloud и версия
+GCLOUD_RULES = (
+    "Вопрос «сколько потратили на API / на ИИ» → назови ТОЛЬКО расход API за нужный период (spend.spent_usd), одной фразой, без оговорок. "
+    "Вопрос про баланс/остаток/расход Google Cloud → google_ai.credit.credit_left_usd (и откуда число — basis); если есть google_cloud_billing — берёшь оттуда. "
+    "Другие расходы Google Cloud (other_cloud_usd, сейчас $30) — это НЕ API: не упоминай их, пока он не спросил про облако целиком, "
+    "и никогда не говори, что они «за API» или «за Vertex». Не знаешь точной цифры — скажи, что это оценка, и откуда она.")
+
+
+async def _gcloud_numbers() -> dict[str, Any]:
+    """Кредит Google Cloud: оценка бота (+ он сам назвал) и, если настроен экспорт биллинга в BigQuery, точные цифры оттуда."""
+    import asyncio
+
+    from . import billing, gcp_billing
+
+    mine = billing.gcp_credit()
+    out: dict[str, Any] = {**mine}
+    try:
+        auto = await asyncio.wait_for(gcp_billing.fetch(), timeout=8)
+    except Exception:
+        auto = None
+    if auto and not auto.get("error"):
+        out["google_cloud_billing"] = auto
+        out["credit_left_usd"] = round(min(float(auto["credit"]["left_usd"]), float(mine["credit_left_usd"])), 2)
+        out["basis"] = (f"биллинг Google (данные с {auto.get('export_since')}); расход до этой даты в нём не виден, поэтому берём меньшее из "
+                        "биллинга и оценки бота")
+    elif auto and auto.get("error"):
+        out["google_cloud_billing_error"] = auto["error"]
+    elif not gcp_billing.configured():
+        out["google_cloud_billing"] = "не подключён (экспорт биллинга Google в BigQuery не настроен) — цифры по счёту бота и по его словам"
+    return out
+
+
 @tool(
     "ai_status",
     "ВСЁ про самого JES и наш проект: сколько потрачено на ИИ (сегодня/вчера/неделя/месяц) и НА ЧТО — по назначению "
     "(звонки, телефон, чат, озвучка…), по моделям (какая версия сколько стоила), самые дорогие разговоры, сколько сделал "
     "бесплатный ключ и сколько этим сэкономил, клиенты; остаток предоплаты и на сколько дней хватит; какие модели и версии "
     "на чём работают; все сервисы, на которых мы работаем (Google AI Studio, сервер, база, Telegram, погода, поиск…); "
-    "версия бота и приложения. «Сколько потратили за звонки?», «на что ушли деньги?», «какая модель у голоса?», «какая версия?».",
+    "версия бота и приложения; БАЛАНС и расход Google Cloud (кредит $300) — google_ai.credit. «Сколько потратили за звонки?», "
+    "«на что ушли деньги?», «какая модель у голоса?», «какая версия?», «сколько осталось на Google Cloud?».",
     {"period": P("STRING", "today | yesterday | week | month | 30d (по умолчанию today)", enum=["today", "yesterday", "week", "month", "30d"])},
 )
 async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
@@ -376,10 +408,10 @@ async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         },
         "free_key": ai_mod.free_status(),
         # 29.09: через что идёт Gemini — его баланс AI Studio или кредит Google Cloud через Vertex AI ($300 на 90 дней)
-        # 29.09 он трижды спросил «сколько осталось» — JES не могла ответить: остаток кредита теперь считаем явно
-        "google_ai": {**gcloud.status(), "vertex_credit_used_usd": billing.vertex_spent(),
-                      "vertex_credit_left_usd": round(gcloud.TRIAL_USD - billing.vertex_spent()["total"], 2),
+        # 02.10: остаток кредита считаем с учётом $30 других расходов Google Cloud (не API) и, если настроен экспорт биллинга, берём точные цифры
+        "google_ai": {**gcloud.status(), "vertex_credit_used_usd": billing.vertex_spent(), "credit": await _gcloud_numbers(),
                       "ai_studio_balance": "см. balance_usd; None — он ещё не называл остаток в AI Studio: попроси назвать и вызови set_ai_balance"},
+        "answer_rules": GCLOUD_RULES,
         "services": {
             "Google AI Studio (Gemini API)": "два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)",
             "сервер": "Hetzner, 167.235.249.200, Docker: бот JES (codex-self-bot) и бот Ishdasiz (codex-ishdasiz-bot)",
@@ -408,3 +440,35 @@ async def _set_ai_balance(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
     if balance is None and topup is None:
         return {"error": "назови сумму: остаток или пополнение в долларах"}
     return billing.set_balance(usd=balance, topup=topup if balance is None else None)
+
+
+@tool(
+    "gcloud_billing",
+    "GOOGLE CLOUD: баланс (остаток кредита $300) и расход — на API (Gemini/Vertex) и на другие сервисы облака; точные цифры из биллинга "
+    "Google, если он подключён, иначе оценка по счёту бота и по его словам. «Какой баланс на Google Cloud?», «сколько осталось кредита?», "
+    "«сколько мы потратили на Google Cloud?». Вопрос только про API — отвечай цифрой API, другие расходы облака не упоминай.",
+)
+async def _gcloud_billing(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    numbers = await _gcloud_numbers()
+    return {"credit": numbers, "api_spent_today_usd": billing_api_today(), "answer_rules": GCLOUD_RULES}
+
+
+def billing_api_today() -> float:
+    from . import billing
+
+    return billing.vertex_spent()["today"]
+
+
+@tool(
+    "set_gcloud_info",
+    "Он сам назвал про Google Cloud: остаток кредита («на Google Cloud осталось 270 долларов») — credit_left_usd; или сумму, которая ушла НЕ на "
+    "API («30 долларов — это другие сервисы, не API») — other_usd. Суммы в долларах США.",
+    {"credit_left_usd": P("NUMBER", "фактический остаток кредита, $"), "other_usd": P("NUMBER", "расход Google Cloud не на API, $")},
+)
+async def _set_gcloud_info(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import billing
+
+    left, other = _num(a.get("credit_left_usd")), _num(a.get("other_usd"))
+    if left is None and other is None:
+        return {"error": "назови сумму: остаток кредита или расход не на API"}
+    return {"ok": True, "credit": billing.set_gcp(other_usd=other, credit_left_usd=left)}

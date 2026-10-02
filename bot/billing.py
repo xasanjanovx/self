@@ -546,6 +546,52 @@ def vertex_spent() -> dict[str, float]:
             "total": round(sum(float(v.get("vertex_usd") or 0) for v in days.values()), 2)}
 
 
+# 02.10 его слова: «30 долларов на Google Cloud — это расход НЕ на API» (другие сервисы облака). Кредит $300 тратится на всё,
+# что списывает Google Cloud, поэтому остаток кредита = $300 − эти $30 − API через Vertex. JES путал и называл $30 расходом на API.
+GCP_OTHER_USD_DEFAULT = float(os.getenv("GCP_OTHER_USD") or 30.0)
+
+
+def gcp_info() -> dict[str, Any]:
+    """Что он сам сказал про Google Cloud: other_usd — расход НЕ на API; credit_left_usd (+credit_left_at) — названный остаток."""
+    return dict(_load().get("gcp") or {})
+
+
+def set_gcp(other_usd: float | None = None, credit_left_usd: float | None = None, credit_total_usd: float | None = None) -> dict[str, Any]:
+    st = _load()
+    gcp = st.setdefault("gcp", {})
+    if other_usd is not None:
+        gcp["other_usd"] = round(max(0.0, float(other_usd)), 2)
+    if credit_total_usd is not None:
+        gcp["credit_total_usd"] = round(max(0.0, float(credit_total_usd)), 2)
+    if credit_left_usd is not None:
+        gcp["credit_left_usd"] = round(max(0.0, float(credit_left_usd)), 2)
+        gcp["credit_left_at"] = _today()
+    _save_now()
+    return gcp_credit()
+
+
+def gcp_credit() -> dict[str, Any]:
+    """Кредит Google Cloud: сколько всего, сколько ушло на API (Vertex — по счёту бота) и на другое, сколько осталось и откуда это число."""
+    from . import gcloud
+
+    gcp = gcp_info()
+    total = float(gcp.get("credit_total_usd") or gcloud.TRIAL_USD)
+    other = float(gcp.get("other_usd") if gcp.get("other_usd") is not None else GCP_OTHER_USD_DEFAULT)
+    days = _load().get("days") or {}
+    spent = vertex_spent()
+    out: dict[str, Any] = {"credit_total_usd": total, "other_cloud_usd": other, "api_spent_usd": spent["total"], "api_today_usd": spent["today"]}
+    if gcp.get("credit_left_usd") is not None and gcp.get("credit_left_at"):
+        since = str(gcp["credit_left_at"])
+        api_after = sum(float(v.get("vertex_usd") or 0) for k, v in days.items() if k > since)
+        out["credit_left_usd"] = round(float(gcp["credit_left_usd"]) - api_after, 2)
+        out["basis"] = f"остаток, который он назвал {since}, минус API после этой даты"
+    else:
+        out["credit_left_usd"] = round(total - other - spent["total"], 2)
+        out["basis"] = (f"оценка: ${total:g} кредита минус ${other:g} других расходов Google Cloud минус API через Vertex по счёту бота "
+                        "(точнее — из биллинга Google или по его слову)")
+    return out
+
+
 def over_limit() -> bool:
     """Сегодняшний расход ВЛАДЕЛЬЦА дошёл до дневного лимита — экономный режим до полуночи. Клиенты сюда не входят
     (у них свой лимит, user_over_limit) — иначе их чаты съедали бы его живой голос."""
