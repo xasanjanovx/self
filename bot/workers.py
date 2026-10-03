@@ -418,6 +418,10 @@ async def _wake_tick(bot: Bot) -> None:
             continue  # звонок этому человеку ещё идёт
         try:
             profile = await profile_by_id(telegram_id)
+            try:
+                await app_alarm.evening_guard(bot, profile)  # вечером: будильник на завтра выключен / не стоит в телефоне — скажем сейчас
+            except Exception:
+                logger.warning("alarm guard failed for %s", telegram_id, exc_info=True)
             s, plan = await wake_runner.plan_for(profile)
             if not plan.active:
                 continue
@@ -458,6 +462,15 @@ async def wake_worker(bot: Bot) -> None:
     logger.info("Wake worker started (caller: %s)", caller.status())
     if caller.configured():
         await caller.start()
+    try:
+        from . import alarm_voice
+        from . import phone_api
+
+        owner = phone_api.owner_id()
+        if owner is not None:
+            asyncio.create_task(alarm_voice.warm(owner), name="alarm-voice-warm")  # фразы будильника записаны заранее
+    except Exception:
+        logger.warning("alarm voice warm-up not started", exc_info=True)
     while True:
         try:
             await _wake_tick(bot)

@@ -39,13 +39,17 @@ class CallStats:
     errors: list[str] = field(default_factory=list)
     states: list[str] = field(default_factory=list)
     protocol: str = ""
+    tg: list[str] = field(default_factory=list)   # что сказал Telegram о самом звонке: запрошен → доставлен на телефон → отменён…
+    delivered: bool | None = None                 # звонок дошёл до телефона (receive_date): нет = Telegram на телефоне не на связи
 
     def at(self) -> str:
         return f"{time.monotonic() - self.t0:.1f}с"
 
     def summary(self) -> str:
+        delivered = {True: "дошёл до телефона", False: "НЕ дошёл до телефона (Telegram там не на связи)", None: "—"}[self.delivered]
         return (f"протокол [{self.protocol or '—'}] · сигналов пришло {self.sig_in}, ушло {self.sig_out}, придержано {self.held}"
-                + (f" · ошибки {self.errors}" if self.errors else "") + f" · состояния {' → '.join(self.states) or '—'}")
+                + (f" · ошибки {self.errors}" if self.errors else "") + f" · состояния {' → '.join(self.states) or '—'}"
+                + f" · Telegram: {' → '.join(self.tg) or '—'} · {delivered}")
 
 
 _stats: dict[int, CallStats] = {}
@@ -64,6 +68,19 @@ def get(uid: int) -> CallStats | None:
 
 def end(uid: int) -> None:
     _stats.pop(int(uid), None)
+
+
+def note_tg_state(kind: str, *, received: bool | None = None, detail: str = "") -> None:
+    """Событие звонка от самого Telegram (UpdatePhoneCall): идёт в статистику каждой текущей попытки (обычно она одна).
+
+    03.10: 20 утренних звонков подряд закончились «не состоялся», и по логу нельзя было сказать, зазвонил ли телефон.
+    PhoneCallWaiting.receive_date появляется, когда звонок ДОШЁЛ до устройства; пока его нет — телефон звонка не получил."""
+    for st in _stats.values():
+        st.tg.append(f"{kind}@{st.at()}" + (f"({detail})" if detail else ""))
+        if received is True:
+            st.delivered = True
+        elif received is False and st.delivered is None:
+            st.delivered = False
 
 
 class _BindingProxy:
@@ -163,4 +180,4 @@ def instrument(calls: Any) -> None:
     logger.info("caller: диагностика соединения звонков включена")
 
 
-__all__ = ["instrument", "begin", "get", "end", "CallStats"]
+__all__ = ["instrument", "begin", "get", "end", "note_tg_state", "CallStats"]

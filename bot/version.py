@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "2.17"         # выпуск JES (бот + приложение на телефоне); меняется вместе с APK
-APP_VERSION = "2.17"       # последняя версия приложения JES (uz.flow.jes)
+VERSION = "2.19"         # выпуск JES (бот + приложение на телефоне); меняется вместе с APK
+APP_VERSION = "2.19"       # последняя версия приложения JES (uz.flow.jes)
 
 _ROOT = Path(__file__).resolve().parent.parent
 

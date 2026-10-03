@@ -10,6 +10,8 @@
   POST /jarvis/v1/warm          — услышал «JES»: прогреть кэши, пока человек договаривает
   GET  /jarvis/v1/live          — WebSocket: живой разговор через Gemini Live (протокол — bot/phone_live.py)
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
+  GET  /jarvis/v1/alarm_voice   — фразы будильника («Доброе утро, шеф! Пора вставать на фаджр») голосом бота, WAV в base64
+  GET  /jarvis/v1/wake_state    — {"awake": bool}: встал ли уже (звонящий будильник замолкает сам)
   POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «JES» (защита от чужих и ТВ)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
@@ -376,13 +378,17 @@ async def wake_event(request: web.Request) -> web.Response:
         return web.json_response({"error": "no owner"}, status=400)
     profile = await profile_by_id(uid)
     event = str(data.get("event") or "")
-    if event in {"scheduled", "awake"} and not app_alarm.ENABLED:
-        # 02.10: подъём подтверждает только голос в звонке Telegram — тап в приложении (старый будильник мог остаться) ничего не отмечает
+    if event in {"scheduled", "awake", "ring"} and not app_alarm.ENABLED:
+        # APP_ALARM=0: подъём подтверждает только голос в звонке Telegram — тап в приложении (старый будильник мог остаться) ничего не отмечает
         logger.info("app alarm %s: событие %s проигнорировано (будильник приложения выключен)", uid, event)
         return web.json_response({"ok": True, "ignored": True})
     if event == "scheduled" and data.get("day") and data.get("at_ms"):
         app_alarm.scheduled(uid, str(data["day"])[:10], int(data["at_ms"]))
         logger.info("app alarm %s: поставлен в телефоне на %s", uid, str(data["day"])[:10])
+        return web.json_response({"ok": True})
+    if event == "ring":
+        app_alarm.rang(uid, profile.today.isoformat())
+        logger.info("app alarm %s: ЗВОНИТ в телефоне (Telegram — через %s мин, если не встанет)", uid, int(app_alarm.APP_GRACE.total_seconds() // 60))
         return web.json_response({"ok": True})
     if event == "awake":
         await wake_runner.mark_awake(bot_instance(), profile, source="app")
@@ -392,6 +398,27 @@ async def wake_event(request: web.Request) -> web.Response:
         until = await wake_runner.snooze(profile, int(data.get("minutes") or 5))
         return web.json_response({"ok": True, "until": until.astimezone(profile.tz).strftime("%H:%M")})
     return web.json_response({"error": "bad event"}, status=400)
+
+
+async def wake_state(request: web.Request) -> web.Response:
+    """Звонящий будильник спрашивает: уже встал (ответил в звонке Telegram, нажал в боте)? Тогда он замолкает сам."""
+    from . import services
+    from .handlers.common import profile_by_id
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"awake": False})
+    profile = await profile_by_id(uid)
+    log = await services.wake_log(uid, profile.today) or {}
+    return web.json_response({"awake": bool(log.get("woke_at")), "day": profile.today.isoformat()})
+
+
+async def alarm_voice(request: web.Request) -> web.Response:
+    """Голосовые фразы будильника («Доброе утро, шеф! Пора вставать на фаджр»): телефон хранит их и произносит между звонками мелодии."""
+    from . import alarm_voice as av
+
+    uid = owner_id()
+    return web.json_response(await av.clips(uid) if uid else {"clips": []})
 
 
 async def _no_voice() -> dict[str, Any]:
@@ -770,6 +797,8 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/wake_check", wake_check)
     app.router.add_get("/jarvis/v1/wake_plan", wake_plan)
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
+    app.router.add_get("/jarvis/v1/wake_state", wake_state)
+    app.router.add_get("/jarvis/v1/alarm_voice", alarm_voice)
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
     app.router.add_post("/jarvis/v1/media", media_progress)

@@ -75,6 +75,7 @@ async def start() -> bool:
             helper_id = getattr(me, "id", None)
             helper_username = getattr(me, "username", None)
             _hook_updates()  # сразу: входящие звонки Джарвису и «положили трубку» — с первой секунды
+            _hook_call_diag()
             logger.info("caller started as @%s (id=%s)", getattr(me, "username", None), helper_id)
             await _ensure_display_name(me)
             await _allow_p2p()
@@ -277,6 +278,42 @@ def _hook_updates() -> None:
             logger.debug("frame hook failed", exc_info=True)
 
     _hooked = True
+
+
+_diag_hooked = False
+
+
+def _hook_call_diag() -> None:
+    """Пишет в лог, что Telegram сообщает о самом звонке: «набран» → «дошёл до телефона» (receive_date) → «ответили / отменён».
+    Без этого «не состоялся: TimedOutAnswer» не отличить от «телефон звонка вообще не получил» (спящий Telegram на HyperOS)."""
+    global _diag_hooked
+    if _diag_hooked or _client is None:
+        return
+    try:
+        from telethon import events  # type: ignore
+        from telethon.tl.types import UpdatePhoneCall  # type: ignore
+    except Exception:
+        return
+
+    @_client.on(events.Raw(UpdatePhoneCall))
+    async def _on_phone_call(update):  # noqa: ANN001
+        try:
+            from . import call_net
+
+            pc = getattr(update, "phone_call", None)
+            kind = type(pc).__name__
+            if kind == "PhoneCallWaiting":
+                got = bool(getattr(pc, "receive_date", None))
+                call_net.note_tg_state("доставлен" if got else "запрошен", received=got)
+            elif kind == "PhoneCallDiscarded":
+                reason = type(getattr(pc, "reason", None)).__name__.replace("PhoneCallDiscardReason", "") or "—"
+                call_net.note_tg_state("закрыт", detail=f"{reason}, {getattr(pc, 'duration', 0) or 0} с")
+            elif kind in {"PhoneCallAccepted", "PhoneCall"}:
+                call_net.note_tg_state("принят" if kind == "PhoneCallAccepted" else "соединён")
+        except Exception:
+            logger.debug("call diag hook failed", exc_info=True)
+
+    _diag_hooked = True
 
 
 def _answer_or_decline(chat_id: int) -> None:
