@@ -12,6 +12,7 @@
   GET  /jarvis/v1/greetings     — короткие отклики («Да?») голосом бота, WAV в base64
   GET  /jarvis/v1/alarm_voice   — фразы будильника («Доброе утро, шеф! Пора вставать на фаджр») голосом бота, WAV в base64
   GET  /jarvis/v1/wake_state    — {"awake": bool}: встал ли уже (звонящий будильник замолкает сам)
+  POST /jarvis/v1/test_wake     — проверить будильник сейчас: звонок в Telegram как утром (в журнал подъёмов не пишется)
   POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «JES» (защита от чужих и ТВ)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
@@ -413,6 +414,20 @@ async def wake_state(request: web.Request) -> web.Response:
     return web.json_response({"awake": bool(log.get("woke_at")), "day": profile.today.isoformat()})
 
 
+async def test_wake(request: web.Request) -> web.Response:
+    """Проверить будильник сейчас: звонок в Telegram ровно как утром (в журнал подъёмов не пишется)."""
+    from . import call_assistant, caller
+    from .handlers.common import profile_by_id
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    if not caller.available():
+        return web.json_response({"error": "звонки не настроены"}, status=503)
+    task = call_assistant.wake_test_in_background(await profile_by_id(uid))
+    return web.json_response({"calling": task is not None, "busy": task is None})
+
+
 async def alarm_voice(request: web.Request) -> web.Response:
     """Голосовые фразы будильника («Доброе утро, шеф! Пора вставать на фаджр»): телефон хранит их и произносит между звонками мелодии."""
     from . import alarm_voice as av
@@ -799,6 +814,7 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/wake_event", wake_event)
     app.router.add_get("/jarvis/v1/wake_state", wake_state)
     app.router.add_get("/jarvis/v1/alarm_voice", alarm_voice)
+    app.router.add_post("/jarvis/v1/test_wake", test_wake)
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
     app.router.add_post("/jarvis/v1/media", media_progress)
