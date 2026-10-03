@@ -350,6 +350,7 @@ async def accept_stream_call(user_id: int) -> dict[str, Any]:
     uid = int(user_id)
     queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
     _incoming[uid] = queue
+    _audio.pop(uid, None)
     ended = asyncio.Event()
     _ended[uid] = ended
     stats = call_net.begin(uid)
@@ -406,6 +407,7 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
 
     queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3000)
     _incoming[uid] = queue
+    _audio.pop(uid, None)
     last_exc: Exception | None = None
     media_fails = 0
     deadline = time.monotonic() + RETRY_WINDOW
@@ -477,15 +479,37 @@ CONNECT_GRACE = 15.0   # трубку взяли, а звук ещё соеди�
 _answered_at: dict[int, float] = {}
 
 
-async def send_audio(user_id: int, pcm: bytes) -> bool | None:
+_audio: dict[int, dict[str, Any]] = {}   # сколько звука реально ушло в звонок (03.10: «будильник вообще не говорит ничего»)
+
+
+def audio_report(user_id: int) -> str:
+    """Итог по звуку в звонок: сколько секунд отправлено (из них речи) и сколько кадров не ушло — для лога в конце звонка."""
+    st = _audio.pop(int(user_id), None)
+    if not st:
+        return "звук в звонок не отправлялся"
+    frame_s = FRAME_MS / 1000
+    return (f"звук в звонок: отправлено {st['ok'] * frame_s:.1f} с, из них речь {st['speech'] * frame_s:.1f} с, "
+            f"не ушло {st['err']} кадров" + (f" (первая ошибка: {st['first']})" if st["first"] else ""))
+
+
+async def send_audio(user_id: int, pcm: bytes, *, speech: bool = False) -> bool | None:
     """Отправить в звонок кусок PCM (24 кГц моно, кратно 10 мс). False — звонка уже нет; None — звонок принят,
-    но звук ещё соединяется (кусок не ушёл — отправить позже)."""
+    но звук ещё соединяется (кусок не ушёл — отправить позже). speech — это голос JES, а не тишина (для итога по звуку)."""
+    st = _audio.setdefault(int(user_id), {"ok": 0, "speech": 0, "err": 0, "first": ""})
     try:
         from pytgcalls.types import Device  # type: ignore
 
         await _calls.send_frame(int(user_id), Device.MICROPHONE, pcm)
+        st["ok"] += 1
+        st["speech"] += 1 if speech else 0
         return True
     except Exception as exc:
+        if "notincall" not in type(exc).__name__.lower():
+            # раньше — debug и «всё хорошо»: звук мог молча не уходить весь звонок
+            st["err"] += 1
+            if not st["first"]:
+                st["first"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                logger.warning("call %s: кадр звука не ушёл — %s", user_id, st["first"])
         if "notincall" in type(exc).__name__.lower():
             # 27.09 05:05: будильник — трубку взяли, через 0.75 с первый кадр «не в звонке» → бот решил, что трубку
             # положили, и сам оборвал звонок. Первые секунды после ответа звук ещё соединяется — ждём.
@@ -507,6 +531,8 @@ async def hang_up(user_id: int) -> None:
     _incoming.pop(uid, None)
     _ended.pop(uid, None)
     call_net.end(uid)
+    if uid in _audio:
+        logger.info("call %s: %s", uid, audio_report(uid))
     try:
         await _calls.leave_call(uid)
     except Exception:

@@ -403,3 +403,28 @@ def test_media_playing_only_clear_name(tmp_path, monkeypatch):
     assert not wakeword.lenient("дж позвони мам", strong=True, confident=True, uid=5, media=True)[0]
     assert not wakeword.lenient("позвони маме", strong=True, confident=True, uid=5, media=True)[0]
     assert wakeword.match("джес позвони маме") == (True, "позвони маме")
+
+
+def test_audio_report_counts_what_really_left_for_the_call(monkeypatch):
+    """03.10: звук мог молча не уходить в звонок весь разговор — теперь в логе видно, сколько секунд ушло и сколько кадров нет."""
+    import asyncio
+
+    from bot import caller
+
+    class Calls:
+        def __init__(self):
+            self.n = 0
+
+        async def send_frame(self, uid, device, pcm):  # noqa: ANN001
+            self.n += 1
+            if self.n > 3:
+                raise RuntimeError("boom")
+
+    monkeypatch.setattr(caller, "_calls", Calls())
+    caller._audio.pop(9, None)
+    for i in range(5):
+        assert asyncio.run(caller.send_audio(9, b"\0" * 480, speech=i < 2)) is True   # ошибка не прерывает звонок, но считается
+    report = caller.audio_report(9)
+    assert "отправлено 0.0" in report or "отправлено 0.03" in report
+    assert "из них речь 0.0" in report and "не ушло 2 кадров" in report and "RuntimeError" in report
+    assert caller.audio_report(9) == "звук в звонок не отправлялся"                # отчёт выдаётся один раз

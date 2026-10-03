@@ -62,6 +62,11 @@ PHRASES = {
            "wait": ("Bir soniya, {t}.", "Hozir qarayman, {t}.")},
 }
 _TITLES = {"ru": ("сэр", "сэр", "шеф"), "uz": ("ser", "ser", "shef")}
+# 03.10 тест будильника: он сказал что-то, модель ответила «-» (шум) — в трубке тишина, и будильник «вообще не говорит». На подъёме
+# молчать в ответ нельзя: мягко переспрашиваем (не чаще раза в REASK_GAP_S)
+WAKE_REASK = {"ru": ("Не расслышала, {t}. Вы проснулись?", "{t}, вы меня слышите? Скажите пару слов, пожалуйста."),
+              "uz": ("Eshitolmadim, {t}. Uyg'ondingizmi?", "{t}, meni eshityapsizmi? Bir-ikki so'z ayting.")}
+REASK_GAP_S = 10.0
 
 
 def quick_kind(text: str) -> str | None:
@@ -132,6 +137,7 @@ class CheapSession(_Session):
         # 0.6 с тишины, а здесь прощание ещё только пишется и озвучивается
         self.hang_after_turn = False
         self._say_task: asyncio.Task | None = None
+        self._reask_at = -1e9
         self.result.model = f"{ai.agent_model} (экономно)"
 
     # --- слух
@@ -379,9 +385,25 @@ class CheapSession(_Session):
         say = "" if re.fullmatch(r"[\W_]*", text or "") else text
         if stt is not None and not calls and (not heard or is_echo(heard, self.last_said)):
             say = ""  # шум или эхо собственного ответа из трубки — не отвечаем на то, чего он не говорил
+        if not say and self.mode == "wake" and stt is not None and not calls:
+            say = self.wake_reask(heard)  # подъём: тишиной на его слова не отвечаем
+            if say and self.contents and self.contents[-1].get("role") == "model":
+                self.contents[-1] = {"role": "model", "parts": [{"text": say}]}  # модель знает, что переспросила, а не промолчала
         logger.info("cheap voice: %.1f с, инструменты %s, «%s» → «%s»", time.monotonic() - started, calls, heard[:60], say[:60])
         if say:
             await self.say(say)
+
+    def wake_reask(self, heard: str) -> str:
+        """Подъём: он что-то сказал или хрипнул, а ответа нет — мягко переспросить. Не во время речи JES, не на эхо её слов
+        и не чаще раза в REASK_GAP_S; уже подтвердил подъём — молчим."""
+        now = time.monotonic()
+        if self.out or self.speaking or self.result.confirmed or now - self._reask_at < REASK_GAP_S:
+            return ""
+        if heard and is_echo(heard, self.last_said):
+            return ""
+        self._reask_at = now
+        lang = "uz" if self.persona.lang == "uz" else "ru"
+        return random.choice(WAKE_REASK[lang]).format(t=random.choice(_TITLES[lang]))
 
     async def nudger(self) -> None:
         """Будильник: замолчал (мог снова заснуть) — позвать; уже разговаривали — ждём дольше."""

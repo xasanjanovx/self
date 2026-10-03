@@ -153,3 +153,54 @@ def test_echo_over_own_answer_never_reaches_the_model(monkeypatch):
 
     sess = asyncio.run(run())
     assert calls == [] and not sess.out
+
+
+def test_wake_call_never_answers_his_words_with_silence(monkeypatch):
+    """03.10 тест будильника: он что-то сказал, модель ответила «-», в трубке тишина. На подъёме — мягкий переспрос (не чаще раза в 10 с)."""
+    from bot.context import ai
+
+    async def agent_step(contents, **kw):  # noqa: ANN001, ANN003
+        return AgentStep(parts=[{"text": "-"}], text="-", calls=[], finish="STOP")
+
+    async def transcribe(data, mime, prompt=None):  # noqa: ANN001
+        return ""
+
+    async def speak(text, voice="Kore"):  # noqa: ANN001
+        yield b"\x01\x00" * 2400
+
+    monkeypatch.setattr(ai, "agent_step", agent_step)
+    monkeypatch.setattr(ai, "transcribe_audio", transcribe)
+    monkeypatch.setattr(ai, "speak_stream", speak)
+
+    async def run(mode):  # noqa: ANN001, ANN202
+        sess = cheap_voice.CheapSession(_profile(), persona.Persona(lang="ru"), mode=mode, system="x", decls=[])
+        await sess.on_phrase(b"\x00\x10" * 12000)
+        first = list(sess.result.transcript)
+        sess.out.clear()
+        await sess.on_phrase(b"\x00\x10" * 12000)   # сразу ещё раз — повторно не дёргаем
+        return first, list(sess.result.transcript)
+
+    first, both = asyncio.run(run("wake"))
+    assert len(first) == 1 and first[0].startswith("я: ") and ("Не расслышала" in first[0] or "слышите" in first[0])
+    assert both == first                                    # второй раз в пределах 10 с — молчим
+    first, _ = asyncio.run(run("assistant"))
+    assert first == []                                      # в обычном звонке шум по-прежнему игнорируется
+
+
+def test_wake_reask_is_silent_for_echo_and_after_confirmation():
+    sess = cheap_voice.CheapSession(_profile(), persona.Persona(lang="ru"), mode="wake", system="x", decls=[])
+    sess.last_said = "Доброе утро, шеф! Проснулись?"
+    assert sess.wake_reask("доброе утро шеф проснулись") == ""     # эхо её же слов
+    assert sess.wake_reask("") != ""                                # не расслышала — переспросить
+    sess2 = cheap_voice.CheapSession(_profile(), persona.Persona(lang="uz"), mode="wake", system="x", decls=[])
+    assert any(w in sess2.wake_reask("") for w in ("Eshitolmadim", "eshityapsizmi"))
+    sess3 = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="wake", system="x", decls=[])
+    sess3.result.confirmed = True
+    assert sess3.wake_reask("") == ""                                # подъём уже подтверждён
+
+
+def test_wake_prompt_does_not_invite_weather_chatter():
+    text = live_call.system_instruction(_profile(), persona.Persona(lang="ru"), mode="wake",
+                                        wake={"takbir": "05:18", "minutes_left": 8, "quiz": "ВОПРОС 1: …", "today": ""})
+    assert "инструмент weather" not in text                 # 03.10: «Погода в Андижане сегодня отличная» — выдумка вместо подъёма
+    assert "Не расслышала" in text and "Молчать в ответ на его слова нельзя" in text
