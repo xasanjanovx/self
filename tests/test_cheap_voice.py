@@ -193,7 +193,8 @@ def test_wake_reask_is_silent_for_echo_and_after_confirmation():
     assert sess.wake_reask("доброе утро шеф проснулись") == ""     # эхо её же слов
     assert sess.wake_reask("") != ""                                # не расслышала — переспросить
     sess2 = cheap_voice.CheapSession(_profile(), persona.Persona(lang="uz"), mode="wake", system="x", decls=[])
-    assert any(w in sess2.wake_reask("") for w in ("Eshitolmadim", "eshityapsizmi"))
+    said = sess2.wake_reask("")
+    assert any(w in said for w in ("Eshitolmadim", "eshityapsizmi"))
     sess3 = cheap_voice.CheapSession(_profile(), persona.Persona(), mode="wake", system="x", decls=[])
     sess3.result.confirmed = True
     assert sess3.wake_reask("") == ""                                # подъём уже подтверждён

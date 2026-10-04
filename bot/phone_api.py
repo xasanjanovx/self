@@ -340,8 +340,8 @@ async def wake_plan(request: web.Request) -> web.Response:
 
 
 async def wake_settings(request: web.Request) -> web.Response:
-    """Будильник из приложения (26.09 «чтобы и в боте менялся»): {"enabled": bool} | {"offset_delta": ±5} — те же настройки,
-    что в боте (одна таблица), с той же проверкой окна фаджра. Ответ — как wake_plan."""
+    """Будильник из приложения (26.09 «чтобы и в боте менялся»): {"enabled": bool} | {"offset_delta": ±5} | {"app_alarm": bool} —
+    те же настройки, что в боте (одна таблица), с той же проверкой окна фаджра. Ответ — как wake_plan."""
     from . import app_alarm, places, services, wake_runner
     from . import wake as wake_mod
     from .handlers.common import profile_by_id
@@ -362,15 +362,17 @@ async def wake_settings(request: web.Request) -> web.Response:
         if (err := await wake_runner.window_error(profile, s, offset=offset)):
             return web.json_response({"error": err}, status=400)
         fields["offset_min"] = offset
+    if "app_alarm" in data:
+        app_alarm.set_app(uid, bool(data["app_alarm"]))   # дополнительный будильник в приложении (звонок Telegram идёт в любом случае)
     if fields:
         await services.save_wake_settings(uid, fields)
     return web.json_response(await app_alarm.next_plan(profile))
 
 
 async def wake_event(request: web.Request) -> web.Response:
-    """Будильник в приложении: {"event": "scheduled", "day", "at_ms"} | {"event": "awake"} | {"event": "snooze", "minutes"}."""
-    from . import app_alarm, wake_runner
-    from .context import bot_instance
+    """Будильник в приложении: {"event": "scheduled", "day", "at_ms"} | {"event": "ring"}; «awake» и «snooze» приходят, но подъём
+    и звонки не трогают (подъём засчитывает только голос в звонке Telegram)."""
+    from . import app_alarm
     from .handlers.common import profile_by_id
 
     data = await _json(request)
@@ -379,8 +381,8 @@ async def wake_event(request: web.Request) -> web.Response:
         return web.json_response({"error": "no owner"}, status=400)
     profile = await profile_by_id(uid)
     event = str(data.get("event") or "")
-    if event in {"scheduled", "awake", "ring"} and not app_alarm.ENABLED:
-        # APP_ALARM=0: подъём подтверждает только голос в звонке Telegram — тап в приложении (старый будильник мог остаться) ничего не отмечает
+    if event in {"scheduled", "ring"} and not app_alarm.app_enabled(uid):
+        # будильник в приложении выключен (по умолчанию): будит звонок Telegram; если на телефоне остался старый будильник — не мешаем
         logger.info("app alarm %s: событие %s проигнорировано (будильник приложения выключен)", uid, event)
         return web.json_response({"ok": True, "ignored": True})
     if event == "scheduled" and data.get("day") and data.get("at_ms"):
@@ -389,21 +391,20 @@ async def wake_event(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
     if event == "ring":
         app_alarm.rang(uid, profile.today.isoformat())
-        logger.info("app alarm %s: ЗВОНИТ в телефоне (Telegram — через %s мин, если не встанет)", uid, int(app_alarm.APP_GRACE.total_seconds() // 60))
+        logger.info("app alarm %s: звонит в телефоне (звонок Telegram идёт в то же время)", uid)
         return web.json_response({"ok": True})
-    if event == "awake":
-        await wake_runner.mark_awake(bot_instance(), profile, source="app")
-        logger.info("app alarm %s: проснулся (кнопка в приложении)", uid)
-        return web.json_response({"ok": True})
-    if event == "snooze":
-        until = await wake_runner.snooze(profile, int(data.get("minutes") or 5))
-        return web.json_response({"ok": True, "until": until.astimezone(profile.tz).strftime("%H:%M")})
+    if event in {"awake", "snooze"}:
+        # 04.10: он нажал «Проснулся» в приложении через 8 секунд после звонка, сервер засчитал подъём — и Telegram не позвонил.
+        # Подъём засчитывает только голос в звонке (или JES на телефоне, когда он ответил ей голосом); «ещё 5 минут» звонок не откладывает
+        logger.info("app alarm %s: %s в приложении — звонок Telegram это не отменяет", uid, event)
+        return web.json_response({"ok": True, "ignored": True})
     return web.json_response({"error": "bad event"}, status=400)
 
 
 async def wake_state(request: web.Request) -> web.Response:
-    """Звонящий будильник спрашивает: уже встал (ответил в звонке Telegram, нажал в боте)? Тогда он замолкает сам."""
-    from . import services
+    """Звонящий будильник спрашивает: уже встал (ответил в звонке Telegram, нажал в боте)? Взял трубку звонка Telegram? Тогда он
+    замолкает сам (оборвётся звонок и он не встал — Telegram перезвонит, а будильник в приложении уже не нужен)."""
+    from . import app_alarm, services
     from .handlers.common import profile_by_id
 
     uid = owner_id()
@@ -411,7 +412,7 @@ async def wake_state(request: web.Request) -> web.Response:
         return web.json_response({"awake": False})
     profile = await profile_by_id(uid)
     log = await services.wake_log(uid, profile.today) or {}
-    return web.json_response({"awake": bool(log.get("woke_at")), "day": profile.today.isoformat()})
+    return web.json_response({"awake": bool(log.get("woke_at")) or app_alarm.in_call(uid), "day": profile.today.isoformat()})
 
 
 async def test_wake(request: web.Request) -> web.Response:

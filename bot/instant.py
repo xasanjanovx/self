@@ -280,7 +280,7 @@ def local_answer(kind: str, now: Any, device: dict[str, Any], alarm: dict[str, A
             return None
         return f"Заряд {int(level)} процентов" + (", заряжается." if device.get("charging") else ".")
     if kind == "alarm":
-        if not alarm or not alarm.get("enabled"):
+        if not alarm or not (alarm.get("on") or alarm.get("enabled")) or not alarm.get("wake_at"):
             return "Будильник выключен."
         when = "завтра" if alarm.get("day") != now.date().isoformat() else "сегодня"
         return f"Будильник {when} в {alarm.get('wake_at')}" + (f", такбир в {alarm['takbir']}." if alarm.get("takbir") else ".")

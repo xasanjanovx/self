@@ -453,6 +453,12 @@ async def open_stream_call(user_id: int, *, username: str | None = None, ring_se
     logger.info("call %s: соединение через %s · %s", uid, stats.at(), stats.summary())
     logger.info("call %s: трубку взяли", uid)
     try:
+        from . import app_alarm
+
+        app_alarm.call_answered(uid)  # звонящий будильник в приложении (если включён) замолкает: он на связи с JES
+    except Exception:
+        logger.debug("app alarm silence failed", exc_info=True)
+    try:
         await _calls.record(uid, RecordStream(audio=True, audio_parameters=AudioQuality.LOW))
     except Exception:
         logger.warning("record() failed — собеседника не слышно", exc_info=True)

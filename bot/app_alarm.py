@@ -1,29 +1,29 @@
-"""Будильник на фаджр в самом приложении JES (26.09.2026, его выбор «у меня — на программе, у других — Telegram»).
+"""Будильник в приложении JES — НЕОБЯЗАТЕЛЬНЫЙ дополнительный слой к звонку Telegram.
 
-Приложение раз в несколько часов берёт время подъёма (GET /jarvis/v1/wake_plan) и ставит настоящий будильник
-Android: он звенит через канал будильника — громко, на беззвучном и в «Не беспокоить», без интернета и бесплатно.
-Звонит мелодией и ГОЛОСОМ JES («Доброе утро, шеф! Пора вставать на фаджр» — записи из bot/alarm_voice.py).
-Нажал «Проснулся» — JES голосом: доброе утро + вопросы дня; будильник стихает, когда он ответил.
-«Ещё 5 минут» — пауза. Не встал за APP_GRACE после того, как будильник прозвенел, — запасной звонок в Telegram.
-Не прозвенел вовсе (приложение убили, будильник стёрла прошивка) — Telegram звонит через RING_WAIT после времени подъёма.
-Состояние — DATA_DIR/app_alarm.json: {uid: {"day": "2026-09-27", "at_ms": …, "rang_day": "…", "rang_at": "…"}}.
+04.10.2026 его слова: «он должен будить по звонку Telegram ВСЕГДА». Основной подъём — звонок Telegram от JES в назначенное время
+(bot/wake_runner.py): он не ждёт приложение и не отменяется тапом в приложении. Будильник Android в приложении можно ВКЛЮЧИТЬ
+дополнительно (кнопка «📱 Будильник в приложении» в боте, по умолчанию выключен): он звенит мелодией и голосом JES в то же
+время, что и звонок (работает без интернета и в «Не беспокоить»), а когда он берёт трубку Telegram, приложение замолкает само.
+Тап «Проснулся» в приложении подъём НЕ засчитывает (04.10 он нажал его через 8 секунд, сервер решил «встал» и Telegram не позвонил) —
+засчитывает только голос в звонке (или JES на телефоне, когда он ответил ей голосом).
+Состояние — DATA_DIR/app_alarm.json: {uid: {"day", "at_ms", "set_at", "rang_day", "rang_at"}, "prefs": {uid: {"app": bool}},
+"guard": {uid: день вечерней проверки}}.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-APP_GRACE = timedelta(minutes=3)   # будильник прозвенел, а он не встал — звонит ещё и Telegram
-RING_WAIT = timedelta(seconds=90)  # будильник должен был прозвенеть, а приложение не сказало «звоню» — звонит Telegram
-# 02.10 он выбрал «только звонок Telegram» — 03.10 он проспал фаджр: звонок не дошёл до спящего телефона (HyperOS без Google-
-# сервисов), а будильник в приложении был выключен. Теперь будильник приложения — основной слой (работает без интернета и
-# в «Не беспокоить»), Telegram-звонок — второй. Выключить: APP_ALARM=0 в .env сервера.
+# APP_ALARM=0 в .env сервера — будильник приложения нельзя включить вовсе
 ENABLED = (os.getenv("APP_ALARM") or "1").strip() != "0"
+CALL_ANSWERED_TTL = 600.0   # столько секунд после «взял трубку» приложение молчит (если звонок оборвался — Telegram перезвонит сам)
+_call_answered: dict[int, float] = {}
 
 
 def _file():
@@ -46,6 +46,29 @@ def _save(data: dict[str, Any]) -> None:
         logger.warning("app alarm: не сохранил", exc_info=True)
 
 
+def app_enabled(uid: int) -> bool:
+    """Включил ли он дополнительный будильник в приложении (по умолчанию — нет: будит звонок Telegram)."""
+    return ENABLED and bool(((_load().get("prefs") or {}).get(str(uid)) or {}).get("app", False))
+
+
+def set_app(uid: int, on: bool) -> None:
+    data = _load()
+    prefs = data.get("prefs") or {}
+    prefs[str(uid)] = {"app": bool(on)}
+    data["prefs"] = prefs
+    _save(data)
+
+
+def call_answered(uid: int) -> None:
+    """Он взял трубку звонка-будильника Telegram — звонящий будильник в приложении может замолчать."""
+    _call_answered[int(uid)] = time.monotonic()
+
+
+def in_call(uid: int) -> bool:
+    at = _call_answered.get(int(uid))
+    return at is not None and time.monotonic() - at < CALL_ANSWERED_TTL
+
+
 def scheduled(uid: int, day_iso: str, at_ms: int) -> None:
     """Приложение поставило будильник Android на этот день и время."""
     data = _load()
@@ -64,38 +87,6 @@ def rang(uid: int, day_iso: str) -> None:
     st.update({"rang_day": day_iso, "rang_at": datetime.now(timezone.utc).isoformat()})
     data[str(uid)] = st
     _save(data)
-
-
-def _rang_at(st: dict[str, Any], day_iso: str) -> datetime | None:
-    if st.get("rang_day") != day_iso:
-        return None
-    try:
-        return datetime.fromisoformat(str(st.get("rang_at")))
-    except (TypeError, ValueError):
-        return None
-
-
-def holds_telegram(uid: int, day_iso: str, wake_at: datetime, now: datetime) -> bool:
-    """Будильник в приложении на этот день стоит и работает — Telegram пока молчит.
-
-    Молчит, пока: (а) время ещё не пришло + RING_WAIT на «приложение сказало, что звонит»; (б) после «звоню» — APP_GRACE.
-    Будильник в телефоне стоит на другое время, чем в плане сервера (поменяли в боте, приложение не обновилось), или не
-    зазвонил вовсе — Telegram звонит сразу, без ожидания."""
-    if not ENABLED:
-        return False
-    st = _load().get(str(uid)) or {}
-    if st.get("day") != day_iso:
-        return False
-    try:
-        at = datetime.fromtimestamp(int(st.get("at_ms") or 0) / 1000, tz=timezone.utc)
-    except (OSError, OverflowError, ValueError):
-        return False
-    rang_at = _rang_at(st, day_iso)
-    if rang_at is not None:
-        return now < rang_at + APP_GRACE
-    if abs((at - wake_at).total_seconds()) > 90:
-        return False  # в телефоне стоит устаревшее время
-    return now < wake_at + RING_WAIT
 
 
 def tomorrow_ready(uid: int, day_iso: str) -> bool:
@@ -125,8 +116,9 @@ async def evening_problem(profile) -> str | None:  # noqa: ANN001
     if not s.enabled:
         history = await services.wake_history(profile.telegram_id, days=7)
         return "off" if any(r.get("woke_at") for r in history) else None   # писать только тем, кто будильником пользуется
-    if plan.active and ENABLED and _uses_app(profile.telegram_id) and not tomorrow_ready(profile.telegram_id, tomorrow.isoformat()):
-        return "no_phone_alarm"
+    if plan.active and app_enabled(profile.telegram_id) and _uses_app(profile.telegram_id) \
+            and not tomorrow_ready(profile.telegram_id, tomorrow.isoformat()):
+        return "no_phone_alarm"   # только если он сам включил будильник в приложении; звонок Telegram идёт в любом случае
     return None
 
 
@@ -182,20 +174,22 @@ async def next_plan(profile) -> dict[str, Any]:  # noqa: ANN001
     from . import places
 
     now = datetime.now(timezone.utc)
+    app_on = app_enabled(profile.telegram_id)
     s = None
     for day in (profile.today, profile.today + timedelta(days=1)):
         s, plan = await wake_runner.plan_for(profile, day)
-        if not ENABLED:
-            break  # будильник приложения выключен: enabled=false → приложение отменяет свой будильник
         if not plan.active or plan.wake_at is None or plan.wake_at <= now:
             continue
         log = await services.wake_log(profile.telegram_id, day) or {}
         if log.get("woke_at"):
             continue
-        return {"enabled": True, "day": day.isoformat(), "at_ms": int(plan.wake_at.timestamp() * 1000), "wake_at": plan.wake_at.strftime("%H:%M"),
-                "takbir": plan.takbir, "fajr": plan.fajr, "window": list(plan.window) if plan.window else None,
-                "offset_min": s.offset_min, "place": places.label(profile.telegram_id, profile.lang)}
-    return {"enabled": False, "on": bool(s and s.enabled), "offset_min": s.offset_min if s else None,
+        # enabled — ставить ли будильник Android в приложении (иначе приложение отменяет свой); on — подъём вообще включён
+        # (звонит Telegram): приложение показывает время и «звонит Telegram», а не «Выключен»
+        return {"enabled": app_on, "on": True, "app": app_on, "day": day.isoformat(), "at_ms": int(plan.wake_at.timestamp() * 1000),
+                "wake_at": plan.wake_at.strftime("%H:%M"), "takbir": plan.takbir, "fajr": plan.fajr,
+                "window": list(plan.window) if plan.window else None, "offset_min": s.offset_min,
+                "place": places.label(profile.telegram_id, profile.lang)}
+    return {"enabled": False, "on": bool(s and s.enabled), "app": app_on, "offset_min": s.offset_min if s else None,
             "place": places.label(profile.telegram_id, profile.lang)}
 
 
@@ -211,4 +205,5 @@ def morning_note(profile, persona) -> str:  # noqa: ANN001
             "«Пусть Аллах примет ваш намаз». Коротко, без лекций.]\n" + islam_quiz.prompt_block_set(quiz))
 
 
-__all__ = ["APP_GRACE", "RING_WAIT", "ENABLED", "scheduled", "rang", "holds_telegram", "tomorrow_ready", "evening_problem", "evening_guard", "next_plan", "morning_note"]
+__all__ = ["ENABLED", "app_enabled", "set_app", "call_answered", "in_call", "scheduled", "rang", "tomorrow_ready", "evening_problem",
+           "evening_guard", "next_plan", "morning_note"]

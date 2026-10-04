@@ -329,7 +329,7 @@ def jarvis_hub_keyboard(lang: str, *, alert_calls: bool = False, morning_voice: 
 
 
 def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk: bool, voice_lang: str,
-                           mode: str, days: list[int], place: str = "") -> InlineKeyboardMarkup:
+                           mode: str, days: list[int], place: str = "", app: bool = False) -> InlineKeyboardMarkup:
     """Экран «Будильник»: всё, что чаще всего меняют, — кнопками. Заданий и упражнений нет —
     JES будит мотивирующими словами и сам по голосу убеждается, что встал."""
     uz = lang == "uz"
@@ -342,6 +342,9 @@ def wake_settings_keyboard(lang: str, *, enabled: bool, call_enabled: bool, talk
               "wakeset:toggle:call_enabled", style="success" if call_enabled else None)],
         [_btn(("💬 Suhbat rejimi" if uz else "💬 Режим разговора") if talk else ("🔈 Faqat gapiradi" if uz else "🔈 Просто говорит"),
               "wakeset:toggle:talk", style="success" if talk else None)],
+        [_btn(("📱 Ilovadagi budilnik: yoqilgan (qo'ng'iroqqa qo'shimcha)" if uz else "📱 Будильник в приложении: вкл (вместе со звонком)") if app
+              else ("📱 Ilovadagi budilnik: o'chiq" if uz else "📱 Будильник в приложении: выкл"),
+              "wakeset:toggle:app", style="success" if app else None)],
         [
             _btn(("🕌 Bomdodga" if uz else "🕌 К фаджру") + (" ✓" if mode == "fajr" else ""), "wakeset:mode:fajr", style="primary" if mode == "fajr" else None),
             _btn(("🕘 Aniq vaqt" if uz else "🕘 Точное время") + (" ✓" if mode == "fixed" else ""), "jarvis:alarm:time", style="primary" if mode == "fixed" else None),

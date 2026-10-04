@@ -429,8 +429,7 @@ async def _wake_tick(bot: Bot) -> None:
             snoozed = wake_runner.snoozed_until(telegram_id)
             if snoozed and now_utc < snoozed:
                 continue
-            if plan.wake_at and app_alarm.holds_telegram(telegram_id, plan.day.isoformat(), plan.wake_at, now_utc):
-                continue  # будит будильник в приложении; Telegram — запасной, если не встал за 5 минут
+            # 04.10 его слова: «он должен будить по звонку Telegram ВСЕГДА» — звонок не ждёт будильник в приложении
             state_last = None
             if log and log.get("attempts"):
                 # последняя попытка держится в памяти процесса; после рестарта считаем, что пауза прошла

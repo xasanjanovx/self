@@ -308,6 +308,11 @@ async def render_wake(target: Message | CallbackQuery, profile: Profile, *, noti
     else:
         lines.append(f"{'Aniq vaqt' if uz else 'Точное время'}: <b>{s.fixed_time or '—'}</b>")
     lines.append(f"{'Qo`ng`iroqlar' if uz else 'Звонки'}: {'✅' if caller.available() else '⚠️'}")
+    from .. import app_alarm
+
+    app_on = app_alarm.app_enabled(profile.telegram_id)
+    lines.append(("📞 JES Telegram orqali qo'ng'iroq qilib uyg'otadi — har doim" if uz else "📞 Будит звонок JES в Telegram — всегда")
+                 + (("\n📱 + ilovadagi budilnik (bir vaqtda)" if uz else "\n📱 + будильник в приложении (в то же время)") if app_on else ""))
 
     history = await services.wake_history(profile.telegram_id, days=14)
     stats = wake_mod.stats_line(history, profile.lang) if history else None
@@ -321,7 +326,7 @@ async def render_wake(target: Message | CallbackQuery, profile: Profile, *, noti
         text += f"\n\n{notice}"
     await _show(target, text, wake_settings_keyboard(
         profile.lang, enabled=s.enabled, call_enabled=s.call_enabled, talk=s.talk, voice_lang=s.voice_lang,
-        mode=s.mode, days=list(s.days_of_week), place=places.label(profile.telegram_id, profile.lang)))
+        mode=s.mode, days=list(s.days_of_week), place=places.label(profile.telegram_id, profile.lang), app=app_on))
 
 
 # ------------------------------------------------------------------ место (для будильника): геолокация или город
@@ -437,6 +442,18 @@ async def cb_wake_change(callback: CallbackQuery, state: FSMContext) -> None:
         from .menu import render_dashboard
 
         await render_dashboard(callback, state, profile, notice=profile.tr("📞 Звоню… возьми трубку", "📞 Qo'ng'iroq qilyapman… trubkani oling"))
+        return
+    if action == "toggle" and value == "app":  # 04.10: будильник в приложении — по желанию, поверх звонка Telegram (не вместо)
+        from .. import app_alarm
+
+        if not app_alarm.ENABLED:
+            await answer_now(callback, profile.tr("Отключён на сервере (APP_ALARM=0)", "Serverda o'chirilgan"), alert=True)
+            return
+        on = not app_alarm.app_enabled(profile.telegram_id)
+        app_alarm.set_app(profile.telegram_id, on)
+        await answer_now(callback, profile.tr("📱 Будильник в приложении: включён" if on else "📱 Будильник в приложении: выключен",
+                                              "📱 Ilovadagi budilnik: yoqildi" if on else "📱 Ilovadagi budilnik: o'chirildi"))
+        await render_wake(callback, profile)
         return
     if not await db.ensure_available("wake_settings"):
         await answer_now(callback, profile.tr("Нужна миграция 008_wake.sql", "008_wake.sql migratsiyasi kerak"), alert=True)
