@@ -1141,5 +1141,6 @@ from . import agent_tools_deeds  # noqa: E402,F401  — «что я делал �
 from . import agent_tools_screen  # noqa: E402,F401  — экранное время: «я работаю до 18:00», «сколько я в телефоне?»
 from . import agent_tools_plan  # noqa: E402,F401  — план дня, мечети рядом, намаз в другом городе, мозговой штурм (bot/plan.py)
 from . import agent_tools_home  # noqa: E402,F401  — умный дом: свет, ТВ, кондиционер голосом (bot/smarthome.py)
+from . import agent_tools_watch  # noqa: E402,F401  — часы Amazfit: пульс, сон, шаги, стресс (bot/watch.py)
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

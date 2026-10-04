@@ -1,0 +1,274 @@
+"""Часы Amazfit (04.10.2026): кто отвечает, канал на телефон, ответ часам (текст + MP3, ночью без голоса), «Джес» с часов."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import time
+
+import numpy as np
+import pytest
+
+from bot import phone_api
+from bot import phone_link
+from bot import phone_live
+from bot import watch
+
+
+@pytest.fixture(autouse=True)
+def fresh(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    watch._watches.clear()
+    for d in (phone_link._actions, phone_link._events, phone_link._seen, phone_link._state, phone_link._asleep):
+        d.clear()
+    yield
+    watch._watches.clear()
+
+
+def _worn_watch(uid=7, mode="idle"):
+    w = watch.get(uid)
+    w.touch({"sid": "s1", "wear": 1, "bat": 80, "sleeping": 0, "st": mode})
+    return w
+
+
+# ------------------------------------------------------------------ кто отвечает
+def test_watch_answers_when_worn_listening_and_phone_locked():
+    _worn_watch()
+    assert watch.should_answer(7, phone_locked=True) is True
+
+
+def test_phone_answers_when_unlocked_or_watch_off_or_stale_or_paused():
+    w = _worn_watch()
+    assert watch.should_answer(7, phone_locked=False) is False      # телефон в руках — отвечает телефон
+    w.wear = 0
+    assert watch.should_answer(7, phone_locked=True) is False       # часы сняты
+    w.wear = 1
+    w.pauses = {"namaz"}
+    assert watch.should_answer(7, phone_locked=True) is False       # на паузе (намаз)
+    w.pauses = set()
+    w.seen = time.monotonic() - 120
+    assert watch.should_answer(7, phone_locked=True) is False       # часы давно молчат
+    assert watch.should_answer(99, phone_locked=True) is False      # часов нет вовсе
+
+
+class _Req:
+    def __init__(self, body: dict) -> None:
+        self._body = body
+
+    async def json(self) -> dict:
+        return self._body
+
+
+def test_wake_check_hands_over_to_the_watch(monkeypatch):
+    monkeypatch.setattr(phone_api, "owner_id", lambda: 7)
+    monkeypatch.setattr(phone_live, "prewarm", lambda uid: None)
+
+    async def judge(uid, audio, **kw):
+        return {"ok": True, "text": "джес позвони маме", "after": "позвони маме", "voice": 0.7, "fast": True}
+
+    taken = []
+    monkeypatch.setattr(phone_api, "judge_wake", judge)
+    monkeypatch.setattr(watch, "take_over", lambda uid, heard, wav: taken.append((uid, heard, bool(wav))))
+    _worn_watch()
+    body = {"audio": base64.b64encode(b"RIFF" + b"\0" * 100).decode(), "act": True, "device": {"locked": True}}
+    out = json.loads(asyncio.run(phone_api.wake_check(_Req(body))).text)
+    assert out == {"ok": False, "reason": "watch", "text": "джес позвони маме"}
+    assert taken == [(7, "джес позвони маме", True)]
+
+
+def test_wake_check_keeps_phone_when_unlocked(monkeypatch):
+    monkeypatch.setattr(phone_api, "owner_id", lambda: 7)
+    monkeypatch.setattr(phone_live, "prewarm", lambda uid: None)
+
+    async def judge(uid, audio, **kw):
+        return {"ok": True, "text": "джес", "after": "", "voice": 0.7, "fast": True}
+
+    monkeypatch.setattr(phone_api, "judge_wake", judge)
+    _worn_watch()
+    body = {"audio": base64.b64encode(b"RIFF" + b"\0" * 100).decode(), "device": {"locked": False}}
+    out = json.loads(asyncio.run(phone_api.wake_check(_Req(body))).text)
+    assert out["ok"] is True and out["text"] == "джес"
+
+
+# ------------------------------------------------------------------ канал на телефон
+def test_phone_link_delivers_actions_and_hand_state():
+    async def run():
+        phone_link._seen[7] = time.monotonic()
+        assert phone_link.push(7, {"type": "call", "number": "+998"}) is True
+        got = await phone_link.pull(7, wait=0.1)
+        assert got["actions"] == [{"type": "call", "number": "+998"}]
+        empty = await phone_link.pull(7, wait=0.05)
+        assert empty["actions"] == []
+
+    asyncio.run(run())
+    phone_link.note_state(7, screen=True, locked=False)
+    assert phone_link.in_hand(7) is True
+    phone_link.note_state(7, screen=False, locked=None)
+    assert phone_link.in_hand(7) is False
+
+
+def test_pull_wakes_up_when_watch_says_asleep():
+    async def run():
+        task = asyncio.create_task(phone_link.pull(7, wait=5))
+        await asyncio.sleep(0.05)
+        phone_link.set_asleep(7, True)
+        got = await asyncio.wait_for(task, 1)
+        assert got["asleep"] is True and got["actions"] == []
+
+    asyncio.run(run())
+
+
+# ------------------------------------------------------------------ ответ часам
+def _conv(monkeypatch, quiet=False):
+    w = _worn_watch()
+    monkeypatch.setattr(watch.Watch, "quiet", property(lambda self: quiet))
+
+    async def mp3(pcm, rate=24000):
+        return b"ID3" + b"x" * 10
+
+    monkeypatch.setattr(watch, "pcm_to_mp3", mp3)
+    return w, watch.Conversation(w, "button")
+
+
+def test_answer_goes_to_watch_as_text_and_mp3(monkeypatch):
+    w, conv = _conv(monkeypatch)
+
+    async def run():
+        await conv.link.send_str(json.dumps({"type": "user", "text": "сколько время"}))
+        await conv.link.send_str(json.dumps({"type": "jarvis", "text": "Сейчас 14:20, сэр."}))
+        await conv.link.send_bytes(b"\1\0" * 2400)
+        await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+
+    asyncio.run(run())
+    events = w.take()
+    assert events[0] == {"t": "heard", "text": "сколько время"}
+    say = events[1]
+    assert say["t"] == "say" and say["text"] == "Сейчас 14:20, сэр." and say["listen"] is True
+    assert base64.b64decode(say["audio"]).startswith(b"ID3")
+
+
+def test_night_or_namaz_answer_is_text_only(monkeypatch):
+    w, conv = _conv(monkeypatch, quiet=True)
+
+    async def run():
+        await conv.link.send_str(json.dumps({"type": "jarvis", "text": "Готово."}))
+        await conv.link.send_bytes(b"\1\0" * 2400)
+        await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+
+    asyncio.run(run())
+    say = w.take()[-1]
+    assert say["text"] == "Готово." and "audio" not in say
+
+
+def test_silent_command_from_watch_goes_to_phone_and_shows_text(monkeypatch):
+    w, conv = _conv(monkeypatch)
+    phone_link._seen[7] = time.monotonic()
+
+    async def run():
+        await conv.link.send_str(json.dumps({"type": "action", "action": {"type": "call", "number": "+99890", "name": "Мама"}}))
+        await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+
+    asyncio.run(run())
+    assert phone_link._actions[7][0]["type"] == "call"
+    say = w.take()[-1]
+    assert say["text"] == "Звоню: Мама" and "audio" not in say
+
+
+def test_phone_offline_is_said_on_the_watch(monkeypatch):
+    w, conv = _conv(monkeypatch)
+
+    async def run():
+        await conv.link.send_str(json.dumps({"type": "action", "action": {"type": "ring_phone"}}))
+        await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+
+    asyncio.run(run())
+    assert "не на связи" in w.take()[-1]["text"]
+
+
+# ------------------------------------------------------------------ «Джес» с микрофона часов
+def _tone(seconds, amp=4000, rate=16000):
+    t = np.arange(int(seconds * rate)) / rate
+    return (np.sin(2 * np.pi * 220 * t) * amp).astype(np.int16).tobytes()
+
+
+def test_watch_hears_its_name_and_opens_a_conversation(monkeypatch):
+    w = _worn_watch()
+    heard = []
+
+    async def judge(uid, wav, **kw):
+        heard.append((kw.get("source"), len(wav)))
+        return {"ok": True, "text": "джес", "after": "", "fast": True}
+
+    started = []
+    monkeypatch.setattr(phone_api, "judge_wake", judge)
+    monkeypatch.setattr(watch.Watch, "start", lambda self, by, heard="", first=None: started.append((by, heard)))
+
+    async def run():
+        await w.feed(b"\0" * 32000, {"f": 1})          # тишина — пол шума
+        await w.feed(_tone(0.6) + b"\0" * 6400, {"f": 2})  # «Джес»
+        await w.feed(b"\0" * 32000, {"f": 3})          # пауза — фраза кончилась
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    assert heard and heard[0][0] == "часы"
+    assert started == [("wake", "джес")]
+
+
+def test_skipped_quiet_chunks_end_the_phrase(monkeypatch):
+    w = _worn_watch()
+    checked = []
+
+    async def judge(uid, wav, **kw):
+        checked.append(len(wav))
+        return {"ok": False, "text": "", "fast": True}
+
+    monkeypatch.setattr(phone_api, "judge_wake", judge)
+
+    async def run():
+        await w.feed(b"\0" * 32000, {"f": 1})
+        await w.feed(_tone(1.0), {"f": 2})
+        await w.feed(_tone(0.2), {"f": 7})   # часы пропустили тихие куски 3–6 — прошлая фраза кончилась
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    assert checked
+
+
+def test_namaz_pause_and_resume(monkeypatch):
+    w = _worn_watch()
+    w._prayers = [{"k": "asr", "n": "Аср", "to": "ДО АСРА", "m": 15 * 60}]
+    w._prayer_day = "fixed"
+    monkeypatch.setattr(watch.Watch, "prayers", lambda self: _async(self._prayers))
+    monkeypatch.setattr(watch.Watch, "_now_min", lambda self: 15 * 60 + 5)
+    asyncio.run(w.tick())
+    assert w.take() == [{"t": "pause", "reason": "namaz"}]
+    monkeypatch.setattr(watch.Watch, "_now_min", lambda self: 15 * 60 + watch.NAMAZ_PAUSE_MIN + 1)
+    asyncio.run(w.tick())
+    assert w.take() == [{"t": "resume"}]
+
+
+async def _async(value):
+    return value
+
+
+# ------------------------------------------------------------------ здоровье
+def test_health_is_stored_and_described():
+    asyncio.run(watch.health(7, {"sid": "s1", "hr": 72, "hr_rest": 58, "steps": 3400, "stress": 35, "spo2": 97, "bat": 64, "wear": 1,
+                                 "sleeping": 0, "sleep": {"score": 78, "total": 370, "deep": 80, "start": 1400, "end": 330}}))
+    line = watch.health_line(7)
+    assert "пульс 72 (покоя 58)" in line and "шагов 3 400" in line and "сон 6 ч 10 мин (оценка 78)" in line and "заряд часов 64%" in line
+    assert watch.sleep_line(7) == "⌚ Сон по часам: 6 ч 10 мин, глубокий 1 ч 20 мин, оценка 78"
+
+
+def test_sleep_event_puts_phone_microphone_to_sleep():
+    asyncio.run(watch.event(7, {"sid": "s1", "kind": "sys", "list": [{"t": 1, "ev": "health.sleep_status", "sleeping": 1}]}))
+    assert phone_link.asleep(7) is True
+    asyncio.run(watch.event(7, {"sid": "s1", "kind": "state", "wear": 1, "bat": 70, "sleeping": 0}))
+    assert phone_link.asleep(7) is False
+
+
+def test_new_watch_screen_resets_old_events():
+    w = _worn_watch()
+    w.push({"t": "say", "text": "старое"})
+    w.touch({"sid": "s2"})
+    assert w.take() == []

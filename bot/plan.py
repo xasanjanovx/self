@@ -209,6 +209,15 @@ async def gather(profile: Profile, *, day: date, place: dict[str, Any] | None = 
             parts.append("Каждый день (ref type=daily, id в квадратных скобках): " + "; ".join(
                 f"[{x['id']}] {x['title']}" + (f" в {x['time']}" if x.get("time") else "") + (f" ({x['progress']})" if x.get("progress") else "")
                 for x in out["habits"]))
+    try:
+        # 04.10: часы Amazfit — спал мало / стресс высокий → план легче (его выбор «сон и здоровье в JES»)
+        from . import watch
+
+        body = watch.health_line(uid, max_age_s=14 * 3600)
+        if body:
+            parts.append(body + " Мало сна (< 6 ч) или высокий стресс — план полегче: меньше пунктов, главное — самое важное.")
+    except Exception:
+        logger.debug("plan: часы", exc_info=True)
     out["text"] = "\n".join(p for p in parts if p)
     return out
 

@@ -25,6 +25,8 @@
   POST /jarvis/v1/tg/logout
   GET  /jarvis/v1/tg/status
   POST /jarvis/v1/tg/quick_send — {"name", "text"}: сбросил звонок в Telegram — «перезвоню» звонившему от его имени
+  POST /jarvis/v1/watch/hello · audio · event · health · log, GET /jarvis/v1/watch/poll — часы Amazfit (bot/watch.py)
+  GET  /jarvis/v1/phone/pull    — телефон ждёт действий с часов и сообщает, в руках ли он (bot/phone_link.py); POST …/phone/state
   POST /jarvis/v1/voice/enroll  — {"wake": [WAV…], "reading": WAV} → отпечаток голоса («только мой голос»)
   GET  /jarvis/v1/voice/status · POST /jarvis/v1/voice/forget
 """
@@ -247,7 +249,7 @@ async def wake_check(request: web.Request) -> web.Response:
     (phone_live.prewarm): подтвердили — телефон подключается к готовой сессии.
     """
     data = await _json(request)
-    from . import phone_live, voiceprint, wakeword
+    from . import phone_live
 
     try:
         if data.get("audio_ulaw"):  # 2.16: μ-law 8 бит, 16 кГц, без тишины перед словом
@@ -264,15 +266,59 @@ async def wake_check(request: web.Request) -> web.Response:
     uid = owner_id()
     if uid is not None:
         phone_live.prewarm(uid)
+    device = data.get("device") if isinstance(data.get("device"), dict) else {}
+    verdict = await judge_wake(uid, audio, confident=bool(data.get("confident")), media=bool(data.get("media")), aec=bool(data.get("aec")))
+    if verdict.get("unchecked"):
+        # проверка не удалась (сеть/лимит) — не мешаем: пусть решает телефон
+        return web.json_response({"ok": True, "unchecked": True})
+    if not verdict["ok"]:
+        if verdict.get("reason") == "voice":
+            return web.json_response({"ok": False, "reason": "voice", "score": verdict.get("score"),
+                                      "cooldown": _cooldown(uid, bool(data.get("confident")))})
+        if verdict.get("fast"):
+            return web.json_response({"ok": False, "text": verdict["text"], "fast": True,
+                                      "cooldown": _cooldown(uid, bool(data.get("confident")))})
+        return web.json_response({"ok": False, "text": verdict["text"], "command": False})
+    if uid is not None:
+        from . import watch
+
+        # 04.10 его выбор «Часы, если надеты»: часы на руке слушают, а телефон заблокирован (в кармане) — отвечают часы
+        if watch.should_answer(uid, phone_locked=bool(device.get("locked"))):
+            watch.take_over(uid, verdict["text"], audio if verdict.get("after") else None)
+            logger.info("wake check: «%s» — отвечают часы (они на руке, телефон заблокирован)", verdict["text"][:60])
+            return web.json_response({"ok": False, "reason": "watch", "text": verdict["text"]})
+    after = verdict.get("after") or ""
+    if not verdict.get("fast"):
+        return web.json_response({"ok": True, "text": verdict["text"], "command": bool(after)})
+    if data.get("act") and after and uid is not None:
+        # 27.09 «моментально и бесплатно»: телефон дождался конца фразы — команду делаем сразу, без разговора с Gemini
+        done = await _instant_command(uid, verdict["text"], after, device)
+        if done is not None:
+            logger.info("wake check: сразу команда «%s» → %s за %.2f с (без Live)", verdict["text"][:60], done["tool"], time.monotonic() - started)
+            return web.json_response({"ok": True, "text": verdict["text"], "fast": True, **done})
+    return web.json_response({"ok": True, "text": verdict["text"], "command": bool(after), "voice": verdict.get("voice"), "fast": True})
+
+
+async def judge_wake(uid: int | None, audio: bytes, *, confident: bool = False, media: bool = False, aec: bool = False,
+                     source: str = "телефон") -> dict[str, Any]:
+    """Прозвучало ли «JES» его голосом (WAV 16 кГц). Общее для телефона (wake_check) и часов (bot/watch.py).
+
+    → {"ok", "text", "after", "voice", "fast"} | {"ok": False, "reason": "voice", "score", "text"} | {"ok": True, "unchecked": True}.
+    Голос (свой отпечаток, ~0.05 с) и слово (локальный распознаватель, ~0.05–0.1 с) — параллельно; Gemini — только
+    если распознаватель недоступен."""
+    from . import voiceprint, wakeword
+
+    started = time.monotonic()
+    where = "" if source == "телефон" else f" [{source}]"
+    tag = "" if source == "телефон" else f"{source}: "
     voice, heard = await asyncio.gather(voiceprint.verify(uid, audio) if uid is not None else _no_voice(), wakeword.check(audio))
     took = time.monotonic() - started
     if not voice.get("ok"):
         # чужой голос и телевизор отсекаем сразу
-        logger.info("wake check: чужой голос (сходство %s, z %s, порог %s, банк %s) за %.2f с «%s»", voice.get("score"), voice.get("z"),
+        logger.info("wake check%s: чужой голос (сходство %s, z %s, порог %s, банк %s) за %.2f с «%s»", where, voice.get("score"), voice.get("z"),
                     voice.get("threshold"), voice.get("bank"), took, (heard or {}).get("text", ""))
-        _reject(uid, f"чужой голос: «{(heard or {}).get('text', '')[:60]}»")
-        return web.json_response({"ok": False, "reason": "voice", "score": voice.get("score"),
-                                  "cooldown": _cooldown(uid, bool(data.get("confident")))})
+        _reject(uid, f"{tag}чужой голос: «{(heard or {}).get('text', '')[:60]}»", source=source)
+        return {"ok": False, "reason": "voice", "score": voice.get("score"), "text": (heard or {}).get("text", "")}
     if heard is not None:
         # 26.09: пустая запись (кашель, стук) при «уверенном» телефоне тоже пропускалась — JES открывался сам по себе.
         # Теперь — только если распознаватель услышал имя
@@ -281,11 +327,9 @@ async def wake_check(request: web.Request) -> web.Response:
         # распознавателя («джой», «джесси», «дж», «с», обрезанное «позвони маме»): 236 отказов за сутки были им самим
         strong = wakeword.strong_voice(heard["text"], voice)
         # media — на телефоне играет видео/музыка (2.11+); aec — телефон слушает с эхоподавлением и сам вычитает этот звук (2.12+)
-        media, aec = bool(data.get("media")), bool(data.get("aec"))
         if not ok:
             # во время видео — только чёткое имя, без поблажек
-            ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=bool(data.get("confident")), uid=uid,
-                                                      media=media)
+            ok, lenient_after, why = wakeword.lenient(heard["text"], strong=strong, confident=confident, uid=uid, media=media)
             if ok:
                 after = lenient_after
             else:
@@ -298,38 +342,30 @@ async def wake_check(request: web.Request) -> web.Response:
             ok, why = False, "играет видео: имя не первым словом или голос не точно его"
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
-            if voice.get("sure") and heard["name"] and not media:
+            if voice.get("sure") and heard["name"] and not media and source == "телефон":
                 # в банк его настоящих записей — только чётко расслышанное имя и без видео на фоне (28.09: в банк попали
-                # записи из видео, и похожие голоса проходили по нему)
+                # записи из видео, и похожие голоса проходили по нему); микрофон часов звучит иначе — в банк не берём
                 voiceprint.bank_add(uid, voice.get("_emb"))
-        logger.info("wake check: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)%s%s", "да" if ok else "нет", took, heard["text"][:60],
-                    voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"],
+        logger.info("wake check%s: %s за %.2f с «%s» (голос %s, z %s, банк %s, слово %s мс)%s%s", where, "да" if ok else "нет", took,
+                    heard["text"][:60], voice.get("score"), voice.get("z"), voice.get("bank"), heard["ms"],
                     (" [видео" + (", эхоподавление]" if aec else "]")) if media else "", f" — {why}" if why else "")
         if not ok:
-            _reject(uid, f"не «Джес»: «{heard['text'][:60]}»")
-            return web.json_response({"ok": False, "text": heard["text"], "fast": True,
-                                      "cooldown": _cooldown(uid, bool(data.get("confident")))})
-        if data.get("act") and after and uid is not None:
-            # 27.09 «моментально и бесплатно»: телефон дождался конца фразы — команду делаем сразу, без разговора с Gemini
-            done = await _instant_command(uid, heard["text"], after, data.get("device") if isinstance(data.get("device"), dict) else {})
-            if done is not None:
-                logger.info("wake check: сразу команда «%s» → %s за %.2f с (без Live)", heard["text"][:60], done["tool"], time.monotonic() - started)
-                return web.json_response({"ok": True, "text": heard["text"], "fast": True, **done})
-        return web.json_response({"ok": True, "text": heard["text"], "command": bool(after), "voice": voice.get("score"), "fast": True})
+            _reject(uid, f"{tag}не «Джес»: «{heard['text'][:60]}»", source=source)
+            return {"ok": False, "text": heard["text"], "fast": True}
+        return {"ok": True, "text": heard["text"], "after": after, "voice": voice.get("score"), "fast": True}
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
                                 model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
         verdict = json.loads(raw) if raw.strip().startswith("{") else {}
     except Exception:
-        logger.warning("wake check failed", exc_info=True)
-        # проверка не удалась (сеть/лимит) — не мешаем: пусть решает телефон
-        return web.json_response({"ok": True, "unchecked": True})
+        logger.warning("wake check%s failed", where, exc_info=True)
+        return {"ok": True, "unchecked": True, "text": "", "after": ""}
     ok = bool(verdict.get("name"))
     after = str(verdict.get("after") or "").strip()
-    logger.info("wake check: %s за %.1f с «%s» (Gemini)", "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
+    logger.info("wake check%s: %s за %.1f с «%s» (Gemini)", where, "да" if ok else "нет", time.monotonic() - started, str(verdict.get("text") or "")[:60])
     if not ok:
-        _reject(uid, "не «Джес» (Gemini)")
-    return web.json_response({"ok": ok, "text": str(verdict.get("text") or ""), "command": bool(after)})
+        _reject(uid, f"{tag}не «Джес» (Gemini)", source=source)
+    return {"ok": ok, "text": str(verdict.get("text") or ""), "after": after}
 
 
 async def wake_plan(request: web.Request) -> web.Response:
@@ -534,12 +570,13 @@ async def _instant_command(uid: int, said: str, after: str, device: dict[str, An
     return {"done": True, "tool": cmd.tool, "actions": turn.actions, "need_contacts": turn.need_contacts}
 
 
-def _reject(uid: int | None, why: str = "") -> None:
+def _reject(uid: int | None, why: str = "", source: str = "телефон") -> None:
     """Не «JES» — заготовленный разговор с Gemini не нужен; в журнал — для ночного отчёта (сколько ложных «Джес»)."""
     if uid is not None:
         from . import journal, phone_live
 
-        phone_live.discard(uid)
+        if source == "телефон":
+            phone_live.discard(uid)   # заготовка — телефонная; часы её не трогают
         journal.miss(uid, "false_wake", why)
 
 
@@ -812,6 +849,77 @@ async def tg_status(request: web.Request) -> web.Response:
     return web.json_response(await tg_user.status())
 
 
+# ------------------------------------------------------------------ часы Amazfit (bot/watch.py) и канал на телефон (bot/phone_link.py)
+def _owner_or_500() -> int:
+    uid = owner_id()
+    if uid is None:
+        raise web.HTTPInternalServerError(text='{"error": "owner is not configured"}', content_type="application/json")
+    return uid
+
+
+async def watch_hello(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(await watch.hello(_owner_or_500(), await _json(request)))
+
+
+async def watch_audio(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(await watch.audio(_owner_or_500(), await _json(request)))
+
+
+async def watch_poll(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(await watch.poll(_owner_or_500(), request.query.get("sid", "")))
+
+
+async def watch_event(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(await watch.event(_owner_or_500(), await _json(request)))
+
+
+async def watch_health(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(await watch.health(_owner_or_500(), await _json(request)))
+
+
+async def watch_log(request: web.Request) -> web.Response:
+    from . import watch
+
+    return web.json_response(watch.note_log(_owner_or_500(), await _json(request)))
+
+
+def _flag(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+async def phone_pull(request: web.Request) -> web.Response:
+    """Телефон ждёт действий для себя (с часов: позвонить, включить музыку, «где телефон?») и сообщает, в руках ли он."""
+    from . import phone_link
+
+    uid = _owner_or_500()
+    phone_link.note_state(uid, screen=_flag(request.query.get("screen")), locked=_flag(request.query.get("locked")))
+    return web.json_response(await phone_link.pull(uid))
+
+
+async def phone_state(request: web.Request) -> web.Response:
+    """Телефон сразу сообщает: экран включён/выключен, разблокирован — без ожидания."""
+    from . import phone_link
+
+    uid = _owner_or_500()
+    data = await _json(request)
+    screen = data.get("screen")
+    locked = data.get("locked")
+    phone_link.note_state(uid, screen=bool(screen) if screen is not None else None, locked=bool(locked) if locked is not None else None)
+    return web.json_response({"ok": True, "asleep": phone_link.asleep(uid)})
+
+
 async def voice_enroll(request: web.Request) -> web.Response:
     """Запись голоса из приложения: 10 раз «JES» + ~40 с чтения → отпечаток и порог «только мой голос»."""
     from . import voiceprint
@@ -897,6 +1005,14 @@ def build_app() -> web.Application:
     app.router.add_post("/jarvis/v1/tg/logout", tg_logout)
     app.router.add_get("/jarvis/v1/tg/status", tg_status)
     app.router.add_post("/jarvis/v1/tg/quick_send", tg_quick_send)
+    app.router.add_post("/jarvis/v1/watch/hello", watch_hello)
+    app.router.add_post("/jarvis/v1/watch/audio", watch_audio)
+    app.router.add_get("/jarvis/v1/watch/poll", watch_poll)
+    app.router.add_post("/jarvis/v1/watch/event", watch_event)
+    app.router.add_post("/jarvis/v1/watch/health", watch_health)
+    app.router.add_post("/jarvis/v1/watch/log", watch_log)
+    app.router.add_get("/jarvis/v1/phone/pull", phone_pull)
+    app.router.add_post("/jarvis/v1/phone/state", phone_state)
     app.router.add_post("/jarvis/v1/voice/enroll", voice_enroll)
     app.router.add_get("/jarvis/v1/voice/status", voice_status)
     app.router.add_post("/jarvis/v1/voice/forget", voice_forget)

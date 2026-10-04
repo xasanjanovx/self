@@ -68,6 +68,15 @@ async def morning_brief(profile: Profile) -> str:
             lines.append(namoz)
     except Exception:
         pass
+    try:
+        # 04.10: сон по часам Amazfit (bot/watch.py)
+        from . import watch
+
+        slept = watch.sleep_line(profile.telegram_id)
+        if slept:
+            lines.append(slept)
+    except Exception:
+        logger.debug("morning: сон с часов не прочитался", exc_info=True)
     extra = await _assistant_lines(profile, today, lang)
     if extra:
         lines.append("")

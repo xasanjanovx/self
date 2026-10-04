@@ -458,6 +458,20 @@ async def _flashlight(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
     return _action(turn, "flashlight", on=bool(a.get("on")))
 
 
+@ptool("find_phone", "«Где мой телефон?», «найди телефон» (обычно с часов): телефон громко звонит ~30 с, даже на беззвучном.", {})
+async def _find_phone(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    return _action(turn, "ring_phone", seconds=30)
+
+
+@ptool("find_watch", "«Где мои часы?», «найди часы»: часы Amazfit вибрируют и показывают «Я здесь!» (если экран JES на них открыт).", {})
+async def _find_watch(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    from . import watch
+
+    if watch.buzz(turn.uid):
+        return {"ok": True, "note": "часы вибрируют"}
+    return {"error": "часы сейчас не на связи (экран JES на них закрыт или Bluetooth выключен)"}
+
+
 @ptool("set_volume", "Громкость медиа: точный уровень в процентах или up / down / mute / unmute.",
        {"percent": P("INTEGER", "0–100 (необязательно)"), "direction": P("STRING", "up | down | mute | unmute", enum=["up", "down", "mute", "unmute"])})
 async def _set_volume(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:

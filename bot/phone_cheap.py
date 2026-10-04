@@ -362,6 +362,7 @@ class PhoneCheap:
         self.runner = phone.make_runner(self.turn)
         self.ctx = agent_tools.ToolContext(profile=profile, text="(телефон)")
         self.result = live_call.LiveResult()
+        self.repeat_guard = live_call.RepeatGuard()   # exec_tool проверяет повтор bot_task/phone_task (без него — AttributeError)
         self.system = system_prompt(profile, persona, memory)
         self.decls = declarations()
         self.contents: list[dict[str, Any]] = []

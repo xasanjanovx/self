@@ -422,6 +422,12 @@ async def _wake_tick(bot: Bot) -> None:
                 await app_alarm.evening_guard(bot, profile)  # вечером: будильник на завтра выключен / не стоит в телефоне — скажем сейчас
             except Exception:
                 logger.warning("alarm guard failed for %s", telegram_id, exc_info=True)
+            try:
+                from . import watch
+
+                await watch.evening_guard(bot, profile)  # часы сняты / почти разряжены — утром не провибрируют
+            except Exception:
+                logger.warning("watch guard failed for %s", telegram_id, exc_info=True)
             s, plan = await wake_runner.plan_for(profile)
             if not plan.active:
                 continue
