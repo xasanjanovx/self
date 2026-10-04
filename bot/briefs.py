@@ -197,7 +197,7 @@ async def evening_brief(profile: Profile) -> str | None:
                 + ("Bir qatorda yuboring — 10 soniya: «tushlik 40000», «osh yedim»." if lang == "uz"
                    else "Скинь одной строкой — это 10 секунд: «обед 40000», «съел плов».")
                 + "\n".join(await goal_evening_lines(profile))
-                + "".join(f"\n{line}" for line in ai_spend_lines(profile) + await owner_ops_lines(profile)))
+                + "".join(f"\n{line}" for line in screen_lines(profile) + ai_spend_lines(profile) + await owner_ops_lines(profile)))
     totals = nutri.totals(logs)
     target = int((nutrition_profile or {}).get("daily_calories") or 0)
     lines = [f"🌙 <b>{'Kun yakuni' if lang == 'uz' else 'Итог дня'}</b>",
@@ -207,9 +207,20 @@ async def evening_brief(profile: Profile) -> str | None:
     if nutrition_profile:
         lines.append(f"{pe.NUTRITION} {int(totals['calories'])}" + (f" / {target}" if target else "") + f" {'kkal' if lang == 'uz' else 'ккал'} · {int(totals['meals'])} {'qabul' if lang == 'uz' else 'приёмов'}")
     lines.extend(await goal_evening_lines(profile))
+    lines.extend(screen_lines(profile))
     lines.extend(ai_spend_lines(profile))
     lines.extend(await owner_ops_lines(profile))
     return "\n".join(lines)
+
+
+def screen_lines(profile: Profile) -> list[str]:
+    """04.10 его выбор: итог экранного времени — строкой в вечерней сводке (данные — с приложения JES, bot/screentime.py)."""
+    try:
+        from . import screentime
+
+        return screentime.brief_lines(profile)
+    except Exception:
+        return []
 
 
 def ai_spend_lines(profile: Profile) -> list[str]:

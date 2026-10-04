@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from . import agent, analytics, assistant, bank, daily, plan, finance, finance_extra, inbox, members, membership, menu, nutrition, settings, vacancy, wake
+from . import agent, analytics, assistant, bank, daily, plan, finance, finance_extra, inbox, members, membership, menu, nutrition, screentime, settings, vacancy, wake
 
 
 def build_router() -> Router:
@@ -23,6 +23,7 @@ def build_router() -> Router:
     root.include_router(bank.router)  # 28.09: «Записать трату из SMS банка?» (до inbox — он последний)
     root.include_router(daily.router)  # 29.09: кнопки «каждый день»
     root.include_router(plan.router)  # 30.09: кнопки плана дня и вечернего разбора
+    root.include_router(screentime.router)  # 04.10: экранное время — лимиты, «я работаю»
     root.include_router(inbox.router)
     return root
 

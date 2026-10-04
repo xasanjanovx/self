@@ -467,7 +467,13 @@ async def wake_worker(bot: Bot) -> None:
 
         owner = phone_api.owner_id()
         if owner is not None:
-            asyncio.create_task(alarm_voice.warm(owner), name="alarm-voice-warm")  # фразы будильника записаны заранее
+            async def warm_voices(uid: int) -> None:
+                from . import nudge_voice
+
+                await alarm_voice.warm(uid)   # фразы будильника записаны заранее
+                await nudge_voice.warm(uid)   # и нейтральные фразы экранного времени — по очереди (у озвучки лимит в минуту)
+
+            asyncio.create_task(warm_voices(owner), name="voices-warm")
     except Exception:
         logger.warning("alarm voice warm-up not started", exc_info=True)
     while True:

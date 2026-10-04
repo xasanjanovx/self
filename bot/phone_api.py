@@ -13,6 +13,10 @@
   GET  /jarvis/v1/alarm_voice   — фразы будильника («Доброе утро, шеф! Пора вставать на фаджр») голосом бота, WAV в base64
   GET  /jarvis/v1/wake_state    — {"awake": bool}: встал ли уже (звонящий будильник замолкает сам)
   POST /jarvis/v1/test_wake     — проверить будильник сейчас: звонок в Telegram как утром (в журнал подъёмов не пишется)
+  GET  /jarvis/v1/screen_rules  — экранное время: лимиты, «подряд», ночь, «занят» (bot/screentime.py)
+  POST /jarvis/v1/screen_usage  — минуты по приложениям за сегодня (+ 7 прошлых дней) → вечерняя сводка, предложение лимитов
+  POST /jarvis/v1/screen_alert  — порог сработал: говорить ли вслух; подробности — в чат бота
+  GET  /jarvis/v1/nudge_voice   — нейтральные фразы («Сэр, у вас есть дела поважнее») голосом JES, WAV в base64
   POST /jarvis/v1/wake_check    — {"audio": WAV, "confident"} → его ли голос и прозвучало ли «JES» (защита от чужих и ТВ)
   POST /jarvis/v1/announce      — {"name": контакт, "app": Telegram…} → «Звонит мама» + WAV голосом бота
   POST /jarvis/v1/call_command  — {"audio": WAV, "caller"} → «ответь» / «сбрось» / «скажи, что перезвоню» во время звонка
@@ -429,6 +433,61 @@ async def test_wake(request: web.Request) -> web.Response:
     return web.json_response({"calling": task is not None, "busy": task is None})
 
 
+async def screen_rules(request: web.Request) -> web.Response:
+    """Экранное время: что считать и когда говорить (bot/screentime.py). Телефон берёт раз в 30 минут, только при включённом экране."""
+    from . import screentime
+    from .handlers.common import profile_by_id
+
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"enabled": False})
+    return web.json_response(await screentime.rules(await profile_by_id(uid)))
+
+
+async def screen_usage(request: web.Request) -> web.Response:
+    """Минуты по приложениям за сегодня (и раз в день — 7 прошлых дней). Первая неделя пришла — предлагаем лимиты в чате."""
+    from . import screentime
+    from .context import bot_instance
+    from .handlers.common import profile_by_id
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"error": "no owner"}, status=400)
+    proposal = screentime.record_usage(uid, data)
+    if proposal:
+        profile = await profile_by_id(uid)
+        try:
+            st = screentime.load(uid)
+            await bot_instance().send_message(uid, screentime.proposal_text(profile, proposal),
+                                              reply_markup=screentime.settings_keyboard(profile, st))
+            logger.info("screentime %s: предложил лимиты %s", uid, proposal["limits"])
+        except Exception:
+            logger.warning("screentime: предложение не отправилось", exc_info=True)
+    return web.json_response({"ok": True, "proposed": bool(proposal)})
+
+
+async def screen_alert(request: web.Request) -> web.Response:
+    """Телефон: «порог — пора сказать». Ответ: говорить ли (занят / лимит в час); подробности сервер шлёт в чат сам."""
+    from . import screentime
+    from .context import bot_instance
+    from .handlers.common import profile_by_id
+
+    data = await _json(request)
+    uid = owner_id()
+    if uid is None:
+        return web.json_response({"speak": False})
+    return web.json_response(await screentime.alert(bot_instance(), await profile_by_id(uid), data))
+
+
+async def nudge_voice(request: web.Request) -> web.Response:
+    """Нейтральные фразы экранного времени («Сэр, у вас есть дела поважнее») голосом JES, WAV в base64 — телефон хранит их у себя."""
+    from . import nudge_voice as nv
+
+    uid = owner_id()
+    return web.json_response(await nv.clips(uid) if uid else {"clips": []})
+
+
 async def alarm_voice(request: web.Request) -> web.Response:
     """Голосовые фразы будильника («Доброе утро, шеф! Пора вставать на фаджр»): телефон хранит их и произносит между звонками мелодии."""
     from . import alarm_voice as av
@@ -816,6 +875,10 @@ def build_app() -> web.Application:
     app.router.add_get("/jarvis/v1/wake_state", wake_state)
     app.router.add_get("/jarvis/v1/alarm_voice", alarm_voice)
     app.router.add_post("/jarvis/v1/test_wake", test_wake)
+    app.router.add_get("/jarvis/v1/screen_rules", screen_rules)
+    app.router.add_post("/jarvis/v1/screen_usage", screen_usage)
+    app.router.add_post("/jarvis/v1/screen_alert", screen_alert)
+    app.router.add_get("/jarvis/v1/nudge_voice", nudge_voice)
     app.router.add_post("/jarvis/v1/log", app_log)
     app.router.add_post("/jarvis/v1/bank", bank_notification)
     app.router.add_post("/jarvis/v1/media", media_progress)
