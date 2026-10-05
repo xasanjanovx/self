@@ -1142,5 +1142,6 @@ from . import agent_tools_screen  # noqa: E402,F401  — экранное вре
 from . import agent_tools_plan  # noqa: E402,F401  — план дня, мечети рядом, намаз в другом городе, мозговой штурм (bot/plan.py)
 from . import agent_tools_home  # noqa: E402,F401  — умный дом: свет, ТВ, кондиционер голосом (bot/smarthome.py)
 from . import agent_tools_watch  # noqa: E402,F401  — часы Amazfit: пульс, сон, шаги, стресс (bot/watch.py)
+from . import agent_tools_research  # noqa: E402,F401  — подробная справка из интернета в чат: фильм, книга, известный человек (research)
 
 __all__ = ["ToolContext", "Tool", "TOOLS", "declarations", "run", "snapshot", "filter_entries", "entry_view", "parse_day"]

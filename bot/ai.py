@@ -563,13 +563,15 @@ class AIService:
             logger.warning("Gemini agent hit MAX_TOKENS for model %s", model)
         return AgentStep(parts=parts, text="\n".join(texts).strip(), calls=calls, finish=finish)
 
-    async def search(self, query: str, *, lang: str = "ru") -> str:
-        """Поиск в интернете через Google Search grounding: модель сама ищет и отвечает по найденному."""
+    async def search(self, query: str, *, lang: str = "ru", context: str = "") -> str:
+        """Поиск в интернете через Google Search grounding: модель сама ищет и отвечает по найденному.
+        context — последние реплики разговора: короткое «а сколько ему лет?» ищется уже с предметом."""
         language = "узбекском (латиница)" if lang == "uz" else "русском"
+        ask = query if not context else f"{context}\n\nЗапрос (если в нём нет предмета — предмет из разговора выше): {query}"
         payload = {
             "systemInstruction": {"parts": [{"text": f"Найди в интернете и ответь по существу на {language} языке, 2–8 строк, без markdown. "
                                                       "Свежие факты, цифры, даты. Если найти не удалось — так и скажи."}]},
-            "contents": [{"role": "user", "parts": [{"text": query}]}],
+            "contents": [{"role": "user", "parts": [{"text": ask}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
         }
@@ -579,6 +581,37 @@ class AIService:
         candidate = self._first_candidate(await self._post(self.text_model, payload))
         texts = [str(p.get("text")) for p in (candidate.get("content") or {}).get("parts") or [] if isinstance(p, dict) and p.get("text") and not p.get("thought")]
         return "\n".join(texts).strip()
+
+    async def research(self, system: str, query: str, *, max_tokens: int = 3500) -> tuple[str, list[tuple[str, str]]]:
+        """Подробная справка с поиском Google (карточка фильма, книги, известного человека…): умная модель, её же системная
+        инструкция. Возвращает (текст, [(название сайта, ссылка)…]) — источники из метаданных поиска, до 4 штук."""
+        from . import billing
+
+        model = smart_model()
+        payload: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": query}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens},
+        }
+        if (tc := thinking_config(model, 512)) is not None:
+            payload["generationConfig"]["thinkingConfig"] = tc
+        billing.count_search()
+        try:
+            data = await self._post(model, payload)
+        except Exception as exc:
+            logger.warning("research: %s не ответила (%s) — основная модель", model, str(exc)[:120])
+            payload["generationConfig"].pop("thinkingConfig", None)
+            data = await self._post(self.text_model, payload)
+        candidate = self._first_candidate(data)
+        texts = [str(p.get("text")) for p in (candidate.get("content") or {}).get("parts") or []
+                 if isinstance(p, dict) and p.get("text") and not p.get("thought")]
+        sources: list[tuple[str, str]] = []
+        for chunk in ((candidate.get("groundingMetadata") or {}).get("groundingChunks") or []):
+            web = chunk.get("web") if isinstance(chunk, dict) else None
+            if isinstance(web, dict) and web.get("uri") and all(web["uri"] != u for _t, u in sources):
+                sources.append((str(web.get("title") or "источник")[:40], str(web["uri"])))
+        return "\n".join(texts).strip(), sources[:4]
 
     async def synthesize(self, text: str, *, voice: str = "Kore") -> bytes | None:
         """Текст → речь (PCM s16le, 24 kHz, mono). None, если TTS-модель недоступна."""

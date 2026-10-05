@@ -97,8 +97,15 @@ def recent_lines(memory: str, n: int = 4, width: int = 160) -> str:
 
 
 def facts_only(memory: str) -> str:
-    """Память о нём без «недавних реплик» прошлых дней — для команд на телефоне они не нужны, а оплачиваются в каждом ответе."""
-    return str(memory or "").split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
+    """Память о нём без «недавних реплик» прошлых дней и без блока текущего разговора (он добавляется отдельно, свежим)."""
+    return str(memory or "").split("\n\nТЕКУЩИЙ РАЗГОВОР")[0].split("\n\nНЕДАВНИЕ РЕПЛИКИ")[0].strip()
+
+
+def current_talk(profile: Profile, n: int = 3) -> str:
+    """Текущий разговор (последние минуты, bot/session_memory.py): чтобы короткое «а сколько ему лет?» после паузы не стало новой темой."""
+    from . import session_memory
+
+    return session_memory.block(profile.telegram_id, n=n)
 
 
 def where_line(profile: Profile) -> str:
@@ -153,7 +160,7 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         from . import billing
 
         lang = PHONE_LANG_MIRROR if p.mirror else lang_rule(p) + "\n"
-        recent = recent_lines(memory, n=3, width=120)
+        recent = current_talk(profile) or recent_lines(memory, n=3, width=120)
         return (f"Ты — JES (читается «Джес»), голосовой помощник {name} на его Android-телефоне. "
                 f"Голос женский — о себе в женском роде. {where}. Валюта — сум.\n{lang}{style_rules(p, spoken=True)}\n"
                 + PHONE_VOICE + PHONE_RULES.replace("{year}", str(now.year)) + (PHONE_ECONOMY if billing.over_limit() else "")
@@ -216,7 +223,9 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
         "Просьбы выполняй сразу, без «точно?» («добавь цель…», «удали вчерашнее такси», «запиши обед сорок тысяч», «напомни завтра в девять»). "
         "После действия одной живой фразой скажи, что сделано. Вопросы по его данным — сначала инструмент, потом ответ цифрами. "
         "Узнал о нём что-то важное и надолго (люди, планы, предпочтения) — сохрани remember_about_me, не говоря об этом. "
-        "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила.\n"
+        "Просит «скинь/отправь мне в чат» (список, рецепт, текст, ссылку, план) — send_to_chat с готовым текстом и скажи, что отправила. "
+        "Подробно про фильм, книгу, известного человека, место, компанию — research (карточка уйдёт в Telegram). "
+        f"{TELEGRAM_RU}\n"
         "ЧЕСТНОСТЬ: не обещай того, чего не сделаешь инструментами. Договорились о фото («пришлю фото челленджа — отмечай», «буду слать чеки») — "
         "СРАЗУ вызови expect_photo с подробной инструкцией и сроком: тогда его фото в чате придут JES с этой инструкцией, а не в подсчёт калорий. "
         "Хочет что-то сложное — ищи способ своими инструментами; по-настоящему невозможное — честно одной фразой и ближайшая замена.\n"
@@ -229,11 +238,15 @@ def system_instruction(profile: Profile, p: Persona, *, mode: str, snapshot: str
     if mode == "assistant":
         # облегчённый звонок (28.09): короткие правила вместо ~4 тыс. знаков, память — только факты (без прошлых реплик)
         facts = facts_only(memory)
+        talk = current_talk(profile)
         return (base + CALL_RULES.replace("{year}", str(now.year)) + opening + engine_line(engine) + where_line(profile)
-                + (f"\n{facts}\n" if facts else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
+                + (f"\n{facts}\n" if facts else "") + (f"\n{talk}\n" if talk else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
     return (base + rules + opening + "\n" + ABOUT_SELF
             + (f"\n{memory}\n" if memory else "") + (f"\nДАННЫЕ:\n{snapshot}" if snapshot else ""))
 
+
+# 05.10: «упоминания Telegram — только на русском»: что бы ни было языком разговора, про чат/Telegram он слышит русское слово
+TELEGRAM_RU = "Про чат и Telegram говори ТОЛЬКО по-русски («отправила вам в Telegram, сэр»), даже если разговор по-узбекски."
 
 # Звонок Telegram (облегчённый, 28.09): те же правила коротко — Live оплачивает их в каждом ответе
 CALL_RULES = (
@@ -242,7 +255,8 @@ CALL_RULES = (
     "ЕГО ДАННЫЕ И ДЕЙСТВИЯ — bot_task, просьбой целиком с числами и датами: трата, еда, задача, напоминание, «сколько потратил», "
     "исправить/удалить, цели, долги, отчёты, будильник, запомнить о нём; про тебя саму — на какой модели сейчас: из «ТВОЙ "
     "РЕЖИМ СЕЙЧАС», расходы подробно, версии, сервисы — тоже bot_task. Выполняй сразу, без «точно?»; после — одной фразой, что сделано. Не обещай того, чего не сделаешь.\n"
-    "Длинное (список, рецепт, план) — send_to_chat и скажи, что отправила. Прощается («всё», «пока», «rahmat», «xayr», "
+    "Длинное (список, рецепт, план) — send_to_chat и скажи, что отправила; подробно про фильм, книгу, известного человека — research "
+    "(карточка уйдёт в Telegram). " + TELEGRAM_RU + " Прощается («всё», «пока», «rahmat», «xayr», "
     "«bo'ldi») — коротко попрощайся и end_call.\n"
 )
 # Телефон: Gemini Live заново оплачивает инструкцию и описания инструментов в КАЖДОМ ответе — поэтому здесь коротко
@@ -254,7 +268,9 @@ PHONE_RULES = (
     "телефон сам покажет карточку. Говори, только если он спросил то, на что нужен ответ, инструмент вернул ошибку или "
     "ask_exactly (произнеси дословно).\n"
     "Ответ — одна короткая фраза, без «что-то ещё?». Длинное (список, рецепт, инструкция, подробности) — send_to_chat и одной "
-    "фразой «отправила в чат». На вопросы отвечай по существу, без «не могу»; свежие факты — web_search; сейчас {year} год.\n"
+    "фразой «отправила в Telegram». Подробно про фильм, книгу, известного человека, место, компанию — research (карточка уйдёт в Telegram, "
+    "ты скажешь суть одной фразой). " + TELEGRAM_RU + " "
+    "На вопросы отвечай по существу, без «не могу»; свежие факты — web_search; сейчас {year} год.\n"
     "ЕГО ДАННЫЕ — bot_task, просьбой целиком: трата, еда, задача, напоминание, «сколько потратил», погода, исправить, удалить, "
     "цели, долги, отчёты, подъём.\n"
     "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком: SMS, «что мне написали», фонарик, громкость, маршрут, такси "
@@ -291,7 +307,7 @@ PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "
 # инструментами): эти 6 описаний были 40% текста, который Live оплачивает в каждой реплике. Команды, которые должны
 # сработать мгновенно (звонок, будильник, приложение, камера), остаются в Live.
 PHONE_LIVE_CORE = {"end_call", "phone_call", "telegram_send", "confirm_send", "cancel_send", "set_alarm", "set_timer", "open_app",
-                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat", "where_am_i", "phone_usage"}
+                   "media", "look", "screen_look", "web_search", "research", "bot_task", "send_to_chat", "where_am_i", "phone_usage"}
 PHONE_DESC_LIMIT = 120   # описание инструмента в голосе телефона (знаков)
 PHONE_PARAM_LIMIT = 50
 _PHONE_TASK = {"name": "phone_task",
@@ -368,7 +384,7 @@ def _control_tools(mode: str) -> list[dict[str, Any]]:
 # (было ~13 тыс. токенов на реплику). Остальное делает «помощник из чата» — дешёвая текстовая модель со всеми инструментами.
 VOICE_CORE = {"add_finance_entries", "get_finance_stats", "add_reminder", "add_task", "complete_tasks", "add_calorie_logs", "add_note",
               "weather", "web_search", "currency_rates", "calculate", "prayer_times", "get_wake", "remember_about_me",
-              "ai_status", "set_ai_balance", "expect_photo", "where_am_i"}
+              "ai_status", "set_ai_balance", "expect_photo", "where_am_i", "research"}
 _DELEGATE = {"name": "bot_task",
              "description": "Помощник из чата со ВСЕМИ инструментами бота: любая работа с его данными, для которой у тебя нет своего инструмента — "
                             "исправить, удалить, найти, перенести записи (операции, задачи, заметки, еда, вес), массовые правки, цели, долги, бюджеты, "
@@ -380,7 +396,7 @@ _DELEGATE_SKIP = {"hand_off", "open_screen", "ask_user", "expect_photo", "call_m
 # 28.09 он выбрал «облегчённый Live» для звонков Telegram: 20 инструментов (8 тыс. знаков) и инструкция (8 тыс.) оплачивались
 # в КАЖДОМ ответе — звонок 2 мин 42 с стоил $0.087. В звонке — только частое, всё с его данными — через bot_task
 # (Flash-Lite платным ключом; 29.09 — без бесплатного, он тормозил), как на телефоне
-CALL_LIVE_CORE = {"end_call", "web_search", "weather", "currency_rates", "bot_task", "send_to_chat", "where_am_i"}
+CALL_LIVE_CORE = {"end_call", "web_search", "research", "weather", "currency_rates", "bot_task", "send_to_chat", "where_am_i"}
 _CALL_DELEGATE_DESC = ("Помощник из чата со ВСЕМИ инструментами бота: трата, еда, задача, напоминание, «сколько потратил», исправить/удалить, "
                        "цели, долги, отчёты, будильник, запомнить о нём, его история («что я делал вчера», «когда звонил Алишеру»); "
                        "и про тебя саму — расходы на ИИ, модели, версии, сервисы. "
@@ -409,7 +425,7 @@ async def delegate(profile: Profile, request: str) -> dict[str, Any]:
 
 
 _SEND_TO_CHAT = {"name": "send_to_chat",
-                 "description": "Отправить ему в Telegram-чат текст (список, рецепт, план, ссылку, адрес, черновик сообщения) — когда просит «скинь/отправь в чат» или это удобнее прочитать, чем слушать.",
+                 "description": "Отправить ему в Telegram-чат текст (список, рецепт, план, ссылку, адрес, черновик сообщения) — когда просит «скинь/отправь в чат» или это удобнее прочитать, чем слушать. Сказать потом: «отправила вам в Telegram» (по-русски).",
                  "parameters": {"type": "OBJECT", "properties": {"text": {"type": "STRING", "description": "готовый текст сообщения, можно с переносами строк"}}, "required": ["text"]}}
 
 
@@ -827,7 +843,7 @@ async def _send_to_chat(uid: int, text: str) -> dict[str, Any]:
 
         sent = await bot_instance().send_message(uid, text[:4000], parse_mode=None)
         screen.track_sent(uid, sent.message_id)
-        return {"ok": True}
+        return {"ok": True, "note": "Скажи по-русски: «Отправила вам в Telegram» (слово Telegram — всегда по-русски, даже если разговор по-узбекски)."}
     except Exception as exc:
         logger.warning("send_to_chat failed", exc_info=True)
         return {"error": str(exc)[:120]}

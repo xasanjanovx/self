@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from . import services
+from . import services, session_memory
 from .agent_tools import ARR, P, ToolContext, _num, _str, tool
 from .context import ai, db
 
@@ -92,7 +92,9 @@ async def _remember(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 
 
 async def remember_exchange(uid: int, user_text: str, reply: str, *, when: str) -> None:
-    """Дайджест реплик за прошлые дни (виден агенту в промпте, переживает перезапуск)."""
+    """Дайджест реплик за прошлые дни (виден агенту в промпте, переживает перезапуск) + память текущего разговора."""
+    if user_text:
+        session_memory.note(uid, user_text, reply)  # до проверки базы: «текущий разговор» живёт в памяти процесса
     if not db.available("user_memory") or not user_text:
         return
     try:
@@ -119,6 +121,8 @@ async def memory_prompt(uid: int) -> str:
     parts = []
     if facts:
         parts.append("ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (факты, которые он сообщал раньше):\n" + "\n".join(f"• {f}" for f in facts))
+    if current := session_memory.block(uid):
+        parts.append(current)
     if recent:
         parts.append("НЕДАВНИЕ РЕПЛИКИ (прошлые дни, для контекста «как вчера», «ему же»):\n" + "\n".join(recent[-12:]))
     try:
@@ -236,18 +240,21 @@ async def _calc(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "web_search",
     "Поиск в интернете по свежим фактам: новости, цены, адреса, расписания, правила, «что такое …», всё, чего нет в данных пользователя. "
-    "Верни пользователю суть в 2–6 строках, без ссылок-простыней.",
-    {"query": P("STRING", "поисковый запрос, конкретный")}, ("query",),
+    "Верни пользователю суть в 2–6 строках, без ссылок-простыней. Запрос — самодостаточный, С ПРЕДМЕТОМ (имя, название): "
+    "«сколько лет Тому Хэнксу», а не «сколько ему лет».",
+    {"query": P("STRING", "поисковый запрос, конкретный, с именем/названием предмета")}, ("query",),
 )
 async def _search(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     query = _str(a.get("query"))
     if not query:
         return {"error": "query required"}
     try:
-        answer = await ai.search(query, lang=ctx.profile.lang)
+        # короткий вопрос-продолжение («а сколько ему лет?») ищем с предметом из текущего разговора
+        answer = await ai.search(query, lang=ctx.profile.lang, context=session_memory.block(ctx.uid, n=2, head=False))
     except Exception as exc:
         logger.exception("web_search failed")
         return {"error": f"search failed: {str(exc)[:120]}"}
+    session_memory.set_topic(ctx.uid, query)
     return {"answer": (answer or "")[:3000], "note": "summarize for the user in their language"}
 
 

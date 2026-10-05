@@ -171,7 +171,7 @@ class OwnerGate:
 
 
 _TOOL_STATUS = {
-    "web_search": "Ищу в интернете…", "weather": "Смотрю погоду…", "currency_rates": "Смотрю курс…",
+    "web_search": "Ищу в интернете…", "research": "Собираю подробности…", "weather": "Смотрю погоду…", "currency_rates": "Смотрю курс…",
     "telegram_read": "Читаю Telegram…", "telegram_send": "Готовлю сообщение…", "deep_analysis": "Анализирую…",
     "list_finance_entries": "Смотрю операции…", "get_finance_stats": "Считаю…",
 }

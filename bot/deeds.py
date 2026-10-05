@@ -41,7 +41,7 @@ _LABELS = {
     "confirm_send": "отправила сообщение", "whatsapp_send": "WhatsApp", "set_alarm": "будильник", "set_timer": "таймер",
     "open_app": "открыла приложение", "open_link": "открыла ссылку", "navigate": "маршрут", "play_media": "включила",
     "resume_video": "продолжила видео", "taxi": "такси", "calendar_add": "в календарь", "save_place_here": "запомнила место",
-    "web_search": "искала", "add_finance_entries": "записала", "add_calorie_logs": "еда", "call_me": "позвонила вам в Telegram",
+    "web_search": "искала", "research": "искала подробно", "add_finance_entries": "записала", "add_calorie_logs": "еда", "call_me": "позвонила вам в Telegram",
     "incoming_call": "вам звонил(а)", "awake": "подъём", "lesson": "урок", "add_daily": "каждый день", "daily_done": "сделано",
     "call_forwarding": "переадресация", "do_not_disturb": "«Не беспокоить»", "ringer_mode": "режим звонка",
 }

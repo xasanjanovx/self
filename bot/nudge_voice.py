@@ -18,7 +18,7 @@ from .alarm_voice import _record
 
 logger = logging.getLogger(__name__)
 
-VERSION = 1
+VERSION = 2   # 05.10: только русские фразы — телефон скачает набор заново (старые узбекские клипы заменятся)
 SPEAK_BUDGET_S = 40.0
 
 PHRASES: dict[str, dict[str, list[str]]] = {
@@ -35,13 +35,12 @@ PHRASES: dict[str, dict[str, list[str]]] = {
 
 
 def texts(persona) -> list[tuple[str, str, str]]:  # noqa: ANN001
-    """[(вид, текст, язык)]: основной язык и, если он говорит на двух, узбекский тоже — по кругу «сэр, сэр, шеф»."""
+    """[(вид, текст, язык)] — ТОЛЬКО по-русски (05.10: «упоминания про Telegram должны быть только на русском»), по кругу «сэр, сэр, шеф»."""
     from .phone_live import _HON
 
     hons = _HON.get(persona.honorific) or _HON["mix"]
     cycle = [hons[0], hons[0], *hons[1:]] if len(hons) > 1 else hons
-    first = persona.lang if persona.lang in ("ru", "uz") else "ru"
-    langs = [first] + ([l for l in ("ru", "uz") if l != first] if persona.mirror else [])
+    langs = ["ru"]
     out: list[tuple[str, str, str]] = []
     for kind, by_lang in PHRASES.items():
         for lang in langs:

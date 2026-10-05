@@ -363,7 +363,7 @@ async def alert(bot, profile, data: dict[str, Any]) -> dict[str, Any]:  # noqa: 
     if len(recent) >= MAX_PER_HOUR:
         return {"speak": False, "reason": "hour_cap"}
     st["alerts"] = recent + [now.isoformat()]
-    uz = profile.lang == "uz"
+    uz = False  # 05.10: оповещения экранного времени — только по-русски (вслух и в чате)
     kind = str(data.get("kind") or "limit")
     cat = str(data.get("category") or category(str(data.get("pkg") or "")))
     app = re.sub(r"[<>&]", "", pretty(str(data.get("pkg") or ""), str(data.get("label") or "")))[:40]

@@ -124,7 +124,9 @@ def test_evening_line(monkeypatch, tmp_path):
 def test_spoken_phrases_are_neutral_and_cover_every_level():
     items = nudge_voice.texts(Persona(lang="ru", honorific="mix", mirror=True))
     kinds = {k for k, _, _ in items}
-    assert kinds == {"l1", "l2", "l3", "night"} and {lang for _, _, lang in items} == {"ru", "uz"}
+    assert kinds == {"l1", "l2", "l3", "night"} and {lang for _, _, lang in items} == {"ru"}
+    # 05.10: упоминания Telegram и всё остальное — только по-русски, даже если язык персоны узбекский
+    assert {lang for _, _, lang in nudge_voice.texts(Persona(lang="uz", honorific="mix", mirror=True))} == {"ru"}
     for _, text, _ in items:
         low = text.lower()
         # на улице и в транспорте рядом не должны услышать личного: ни названий приложений, ни молитвы
