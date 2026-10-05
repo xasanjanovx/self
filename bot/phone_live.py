@@ -923,7 +923,10 @@ async def _run_live(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, A
     journal.check_session(uid, sess.user_lines, sess.jarvis_lines)
     if said:
         phone._later(services.log_agent(uid, text=said, kind="phone_live", tools=",".join(sess.result.actions), reply=answered, ok=True))
-        phone._later(extra.remember_exchange(uid, "📱 " + said, answered, when=profile.now.strftime("%d.%m %H:%M")))
+        from . import session_memory
+
+        session_memory.note_turns(uid, sess.user_lines, sess.jarvis_lines)   # следующая фраза после паузы — продолжение этой темы
+        phone._later(extra.remember_exchange(uid, "📱 " + said, answered, when=profile.now.strftime("%d.%m %H:%M"), session=False))
 
 
 # ------------------------------------------------------------------ «Да, слушаю» голосом бота — мгновенно, без ожидания Gemini

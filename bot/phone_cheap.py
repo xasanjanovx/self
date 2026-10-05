@@ -734,7 +734,10 @@ async def run(uid: int, phone_ws, hello: dict[str, Any], info: dict[str, Any]) -
                 sess.result.actions, f", чужой голос {sess.dropped} раз" if sess.dropped else "", said[:80], answered[:80])
     if said:
         phone._later(services.log_agent(uid, text=said, kind="phone_cheap", tools=",".join(sess.result.actions), reply=answered, ok=True))
-        phone._later(extra.remember_exchange(uid, said, answered, when=profile.now.strftime("%d.%m %H:%M")))
+        from . import session_memory
+
+        session_memory.note_turns(uid, sess.user_lines, sess.jarvis_lines)   # текущий разговор: последние обмены по отдельности
+        phone._later(extra.remember_exchange(uid, said, answered, when=profile.now.strftime("%d.%m %H:%M"), session=False))
     return upgrade
 
 

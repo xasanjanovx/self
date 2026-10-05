@@ -12,12 +12,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
 from typing import Any
 
-from . import session_memory
+from . import deeds, session_memory
 from .agent_tools import P, ToolContext, _str, tool
 from .context import ai
 
@@ -175,8 +176,48 @@ async def _research(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         return {"error": "refused",
                 "note": "Это не справка о публичной личности, а поиск личных данных (адрес, телефон, документы, местоположение) — такого не ищу. "
                         "Скажи ему это одной фразой, без нравоучений, и предложи рассказать о человеке публичные факты: биографию, карьеру, интересные факты."}
-    context = session_memory.block(ctx.uid, n=2, head=False)
     language = _str(a.get("language")) or "русский"
+    if deeds.source.get() in {"телефон", "звонок"}:
+        # голосом поиск и карточка занимают 10–20 с: не держим разговор — собираем в фоне, карточка придёт в Telegram сама
+        _spawn(_background_card(ctx, kind, query, custom, language))
+        return {"ok": True, "started": True,
+                "note": f"Карточка готовится и придёт в Telegram секунд через 20 — не жди её. Скажи ПО-РУССКИ одной короткой фразой, что собираешь всё про "
+                        f"«{query}» и пришлёшь в Telegram. Слова про Telegram и чат — всегда по-русски, даже если вы говорите по-узбекски."}
+    return await _build(ctx, kind, query, custom, language)
+
+
+_background: set[asyncio.Task[Any]] = set()
+
+
+def _spawn(coro) -> None:  # noqa: ANN001
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _background_card(ctx: ToolContext, kind: str, query: str, custom: str, language: str) -> None:
+    """Голосовая просьба: карточка собирается после ответа; не вышло — коротко пишем в чат, почему."""
+    from .context import bot_instance
+
+    try:
+        res = await _build(ctx, kind, query, custom, language)
+    except Exception:
+        logger.warning("research (фон) упал", exc_info=True)
+        res = {"error": "сбой поиска"}
+    why = ""
+    if res.get("public") is False and not res.get("ok"):
+        why = f"🙅 «{html.escape(query, quote=False)}»: публичной информации нет — это не публичная личность, а досье на частных людей я не собираю."
+    elif res.get("error"):
+        why = f"⚠️ Не получилось собрать справку про «{html.escape(query, quote=False)}»: {html.escape(str(res['error'])[:100], quote=False)}. Попробуйте переформулировать."
+    if why:
+        try:
+            await bot_instance().send_message(ctx.uid, why, parse_mode="HTML")
+        except Exception:
+            logger.warning("research: причина не ушла в чат", exc_info=True)
+
+
+async def _build(ctx: ToolContext, kind: str, query: str, custom: str, language: str) -> dict[str, Any]:
+    context = session_memory.block(ctx.uid, n=2, head=False)
     system = COMMON.format(language=language, year=ctx.profile.now.year) + "\n" + PROMPTS[kind]
     if custom:
         system += f"\nФОРМАТ ЗАДАЛ ОН САМ — следуй ему вместо разделов выше (первая строка «КРАТКО:» остаётся): «{custom}»."

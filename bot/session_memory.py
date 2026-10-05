@@ -47,6 +47,19 @@ def _clip(text: str, width: int) -> str:
     return (cut[:space] if space > width * 0.6 else cut).rstrip(" ,.;:—-") + "…"
 
 
+def _clip_tail(text: str, width: int) -> str:
+    """Склеенные «реплика / реплика / реплика» (сессия целиком): при нехватке места теряем начало — последний обмен важнее."""
+    s = " ".join(str(text or "").split())
+    if len(s) <= width or " / " not in s:
+        return _clip(s, width)
+    kept: list[str] = []
+    for part in reversed(s.split(" / ")):
+        if kept and sum(len(p) + 3 for p in kept) + len(part) > width:
+            break
+        kept.append(part)
+    return _clip(" / ".join(reversed(kept)), width)
+
+
 def _mask(text: str) -> str:
     try:
         from .secrets_guard import mask
@@ -58,11 +71,21 @@ def _mask(text: str) -> str:
 
 def note(uid: int, said: str, answer: str = "") -> None:
     """Один обмен: что он сказал и что ответили (или «сделано: …»). Пустая реплика не пишется."""
-    said = _clip(_mask(said), SAID_W)
+    said = _clip_tail(_mask(said), SAID_W)
     if not said:
         return
     st = _state.setdefault(uid, _State())
-    st.turns.append((time.monotonic(), said, _clip(_mask(answer), ANSWER_W)))
+    st.turns.append((time.monotonic(), said, _clip_tail(_mask(answer), ANSWER_W)))
+
+
+def note_turns(uid: int, user_lines: list[str], jarvis_lines: list[str], n: int = 3) -> None:
+    """Сессия телефона/часов закончилась: последние n обменов по отдельности. Строки сверяются с конца — у команд, выполненных
+    молча, ответа нет, и сдвиг считается от последнего обмена, самого важного для «а теперь…»."""
+    users = [u for u in user_lines if str(u or "").strip()]
+    answers = [a for a in jarvis_lines if str(a or "").strip()]
+    pairs = [(users[-1 - i], answers[-1 - i] if i < len(answers) else "") for i in range(min(n, len(users)))]
+    for said, answer in reversed(pairs):
+        note(uid, said, answer)
 
 
 def set_topic(uid: int, topic: str) -> None:
@@ -114,4 +137,4 @@ def forget(uid: int) -> None:
     _state.pop(uid, None)
 
 
-__all__ = ["note", "set_topic", "topic", "block", "last_exchange", "forget", "BLOCK_HEAD"]
+__all__ = ["note", "note_turns", "set_topic", "topic", "block", "last_exchange", "forget", "BLOCK_HEAD"]

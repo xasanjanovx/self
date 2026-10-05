@@ -91,9 +91,10 @@ async def _remember(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     return {"facts_total": len(facts), "added": add, "forgotten": forget}
 
 
-async def remember_exchange(uid: int, user_text: str, reply: str, *, when: str) -> None:
-    """Дайджест реплик за прошлые дни (виден агенту в промпте, переживает перезапуск) + память текущего разговора."""
-    if user_text:
+async def remember_exchange(uid: int, user_text: str, reply: str, *, when: str, session: bool = True) -> None:
+    """Дайджест реплик за прошлые дни (виден агенту в промпте, переживает перезапуск) + память текущего разговора.
+    session=False — вызывающий уже записал обмены в текущий разговор сам (session_memory.note_turns)."""
+    if user_text and session:
         session_memory.note(uid, user_text, reply)  # до проверки базы: «текущий разговор» живёт в памяти процесса
     if not db.available("user_memory") or not user_text:
         return

@@ -528,7 +528,10 @@ class Conversation:
                         sess.result.actions, said[:80], answered[:80])
             if said:
                 phone._later(services.log_agent(uid, text=said, kind="watch", tools=",".join(sess.result.actions), reply=answered, ok=True))
-                phone._later(extra.remember_exchange(uid, "⌚ " + said, answered, when=profile.now.strftime("%d.%m %H:%M")))
+                from . import session_memory
+
+                session_memory.note_turns(uid, sess.user_lines, sess.jarvis_lines)
+                phone._later(extra.remember_exchange(uid, "⌚ " + said, answered, when=profile.now.strftime("%d.%m %H:%M"), session=False))
         except asyncio.CancelledError:
             raise
         except Exception:

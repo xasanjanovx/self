@@ -64,6 +64,29 @@ def test_remember_exchange_feeds_current_talk_even_without_database():
     assert session_memory.block(7).count("• ") == 1
 
 
+def test_session_end_keeps_the_last_exchanges_separately_and_aligned_from_the_end():
+    # три обмена; на второй команда выполнена молча (ответа нет): сдвиг считается от последнего
+    users = ["кто такой Нолан", "включи фонарик", "а какой у него лучший фильм"]
+    answers = ["режиссёр", "Начало, Интерстеллар и Помни"]
+    session_memory.note_turns(3, users, answers, n=3)
+    block = session_memory.block(3)
+    assert block.count("• ") == 3
+    assert "он: а какой у него лучший фильм → ты: Начало, Интерстеллар и Помни" in block
+    assert block.index("кто такой Нолан") < block.index("а какой у него лучший фильм")        # хронология сохранена
+
+
+def test_joined_session_text_loses_its_beginning_not_its_end():
+    joined = " / ".join(f"реплика {i} " + "слово " * 10 for i in range(12))
+    session_memory.note(4, joined, "")
+    block = session_memory.block(4)
+    assert "реплика 11" in block and "реплика 0 " not in block
+
+
+def test_session_end_hooks_do_not_double_count_exchanges(monkeypatch):
+    asyncio.run(extra.remember_exchange(8, "📱 один", "ответ", when="05.10 12:00", session=False))
+    assert session_memory.block(8) == ""                     # вызывающий пишет обмены сам (note_turns)
+
+
 def test_voice_prompt_carries_current_talk_but_facts_only_does_not_double_it():
     memory = "ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n• брат — Сирожбек\n\n" + session_memory.BLOCK_HEAD + "\n• 1 мин назад — он: x → ты: y\n\nНЕДАВНИЕ РЕПЛИКИ (прошлые дни):\n1"
     assert live_call.facts_only(memory) == "ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n• брат — Сирожбек"
@@ -161,6 +184,64 @@ def test_chat_failure_is_reported_honestly(monkeypatch):
     monkeypatch.setattr(research, "_deliver", fail)
     res = asyncio.run(research._research(_ctx(), {"kind": "movie", "query": "Интерстеллар"}))
     assert res["sent_to_chat"] is False and "не получилось" in res["note"]
+
+
+def test_voice_request_answers_at_once_and_builds_the_card_in_background(monkeypatch):
+    from bot import deeds
+
+    order: list[str] = []
+
+    async def fake_research(system, query, **kw):  # noqa: ANN001, ANN003
+        await asyncio.sleep(0.05)
+        order.append("search")
+        return "КРАТКО: Фильм Нолана.\n\n🎬 Интерстеллар", []
+
+    async def fake_deliver(uid, card_html, extra_line):  # noqa: ANN001
+        order.append("card")
+        return True
+
+    monkeypatch.setattr(research.ai, "research", fake_research)
+    monkeypatch.setattr(research, "_deliver", fake_deliver)
+
+    async def scenario():
+        token = deeds.source.set("телефон")
+        try:
+            res = await research._research(_ctx(), {"kind": "movie", "query": "Интерстеллар"})
+            order.append("answer")
+        finally:
+            deeds.source.reset(token)
+        assert res["started"] is True and "по-русски" in res["note"].lower() and "Интерстеллар" in res["note"]
+        await asyncio.gather(*research._background)
+
+    asyncio.run(scenario())
+    assert order == ["answer", "search", "card"]                     # голос не ждёт поиск
+
+
+def test_voice_failure_is_explained_in_chat(monkeypatch):
+    from bot import context, deeds
+
+    messages: list[str] = []
+
+    class FakeBot:
+        async def send_message(self, uid, text, **kw):  # noqa: ANN001, ANN003
+            messages.append(text)
+
+    async def fake_research(system, query, **kw):  # noqa: ANN001, ANN003
+        return "НЕ ПУБЛИЧНЫЙ: публичной информации об этом человеке нет", []
+
+    monkeypatch.setattr(research.ai, "research", fake_research)
+    monkeypatch.setattr(context, "_bot", FakeBot())
+
+    async def scenario():
+        token = deeds.source.set("звонок")
+        try:
+            await research._research(_ctx(), {"kind": "person", "query": "Азиз <b>"})
+        finally:
+            deeds.source.reset(token)
+        await asyncio.gather(*research._background)
+
+    asyncio.run(scenario())
+    assert len(messages) == 1 and "не публичная личность" in messages[0] and "<b>" not in messages[0].replace("&lt;b&gt;", "")
 
 
 # ------------------------------------------------------------------ только русский про Telegram
