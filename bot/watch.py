@@ -326,12 +326,38 @@ def _dump_utterance(uid: int, pcm: bytes, rate: int = RATE) -> None:
         logger.debug("watch: не записал фразу", exc_info=True)
 
 
+# 05.10 его слова: «показывает вообще другие запросы на узбекском». Общий промт телефона просит «русский или узбекский», и на шумной записи
+# Gemini достраивал узбекские фразы. Для часов: русский по умолчанию, из шума ничего не выдумывать.
+WATCH_STT_PROMPT = (
+    "Это голосовая команда личному ассистенту «JES» через микрофон часов. Расшифруй речь дословно. "
+    "Язык по умолчанию — РУССКИЙ. Узбекский (пиши латиницей) или английский — только если слова явно оттуда. "
+    "Запись может быть тихой и с шумом: НЕ выдумывай и не достраивай фразы; если слов не разобрать — верни ровно: <пусто>. "
+    "Имена и названия пиши как слышишь. Верни только текст."
+)
+
+
 class WatchCheap(phone_cheap.PhoneCheap):
     def __init__(self, profile, persona, link, device, memory, *, watch: "Watch") -> None:  # noqa: ANN001
         super().__init__(profile, persona, link, device, memory)
         self.watch = watch
         self.speaker = _Speaker(profile, persona, self.to_phone, quiet=lambda: watch.quiet)
         self.seg = phone_cheap.Segmenter(rate=RATE, silence_ms=CONV_SILENCE_MS)
+
+    async def _transcribe(self, wav: bytes) -> str:
+        from .context import ai
+        from .phone_api import clean_transcript
+
+        try:
+            text = clean_transcript(await ai.transcribe_audio(wav, "audio/wav", prompt=WATCH_STT_PROMPT))
+        except Exception as exc:
+            logger.warning("watch: расшифровка не удалась: %s", str(exc)[:160])
+            return ""
+        if text:
+            logger.info("watch: расшифровка «%s»", text[:80])
+            await self.to_phone({"type": "user", "text": text, "final": True})
+            self.user_lines.append(text)
+            self.log.append(("Он", text))
+        return text
 
     async def _on_audio(self, pcm: bytes) -> None:
         self.watch.t_phrase = time.monotonic()

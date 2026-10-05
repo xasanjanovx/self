@@ -379,3 +379,27 @@ def test_agc_raises_a_quiet_stream_so_speech_is_still_found(monkeypatch):
     quiet = _tone_pcm(0.6, 1200)
     out = w._agc(quiet)
     assert watch.pcm_levels(out)[1] > watch.pcm_levels(quiet)[1] * 3
+
+
+def test_watch_transcription_prefers_russian_and_does_not_invent(monkeypatch):
+    seen = {}
+
+    async def fake(audio, mime, prompt=None):
+        seen["prompt"] = prompt
+        return "позвони маме"
+
+    from bot import context
+
+    monkeypatch.setattr(context.ai, "transcribe_audio", fake)
+
+    class Sess:
+        user_lines: list = []
+        log: list = []
+
+        async def to_phone(self, payload):
+            seen["sent"] = payload
+
+    sess = Sess()
+    out = asyncio.run(watch.WatchCheap._transcribe(sess, b"RIFF"))
+    assert out == "позвони маме" and "РУССКИЙ" in seen["prompt"] and "НЕ выдумывай" in seen["prompt"]
+    assert seen["sent"]["text"] == "позвони маме"
