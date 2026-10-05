@@ -291,7 +291,7 @@ PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "
 # инструментами): эти 6 описаний были 40% текста, который Live оплачивает в каждой реплике. Команды, которые должны
 # сработать мгновенно (звонок, будильник, приложение, камера), остаются в Live.
 PHONE_LIVE_CORE = {"end_call", "phone_call", "telegram_send", "confirm_send", "cancel_send", "set_alarm", "set_timer", "open_app",
-                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat", "where_am_i"}
+                   "media", "look", "screen_look", "web_search", "bot_task", "send_to_chat", "where_am_i", "phone_usage"}
 PHONE_DESC_LIMIT = 120   # описание инструмента в голосе телефона (знаков)
 PHONE_PARAM_LIMIT = 50
 _PHONE_TASK = {"name": "phone_task",

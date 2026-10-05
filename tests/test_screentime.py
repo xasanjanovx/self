@@ -139,8 +139,45 @@ def test_busy_tool_until_time(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     p = _profile()
     ctx = ToolContext(profile=p, text="я работаю до 18:00")
-    res = asyncio.run(agent_tools.TOOLS["screen_busy"].handler(ctx, {"until": "18:00"}))
-    assert res["ok"] and res["busy_until"] == "18:00"
+    soon = (p.now + timedelta(hours=2)).strftime("%H:%M")
+    res = asyncio.run(agent_tools.TOOLS["screen_busy"].handler(ctx, {"until": soon}))
+    assert res["ok"] and res["busy_until"] == soon
     assert screentime.busy_until(screentime.load(1)) is not None
     res = asyncio.run(agent_tools.TOOLS["screen_busy"].handler(ctx, {"off": True}))
     assert res == {"ok": True, "busy": False} and screentime.busy_until(screentime.load(1)) is None
+
+
+def test_screen_question_is_answered_from_the_phone_without_a_model():
+    """04.10: «сколько я пользовался телефоном?» — JES открывал настройки. Теперь ответ из device["screen"], без Gemini."""
+    from bot import instant
+
+    for q in ("Сколько я сегодня пользовался телефоном?", "сколько я сидел в телефоне", "Сколько времени я провёл в телефоне сегодня",
+              "какое у меня экранное время"):
+        assert instant.quick(q) == "screen", q
+    assert instant.quick("сколько я потратил сегодня") == "ask"            # деньги — по-прежнему агент бота
+    screen = {"total_min": 290, "pickups": 81, "top": [{"app": "AyuGram", "min": 76}, {"app": "Chrome", "min": 46}, {"app": "Instagram", "min": 37}]}
+    text = instant.local_answer("screen", datetime.now(), {"screen": screen})
+    assert text == ("Сегодня в телефоне 4 часа 50 минут. Больше всего — AyuGram 1 час 16 минут, Chrome 46 минут, Instagram 37 минут. "
+                    "Брали телефон 81 раз.")
+    assert "История использования" in instant.local_answer("screen", datetime.now(), {"screen": {"allowed": False}})
+    assert instant.local_answer("screen", datetime.now(), {}) is None      # старое приложение — ответит модель
+
+
+def test_phone_tool_screen_time_reads_the_phone_snapshot():
+    from bot import live_call, phone
+    from bot.agent_tools import ToolContext
+
+    assert "phone_usage" in live_call.PHONE_LIVE_CORE                       # в голосе — сразу, без phone_task и настроек
+    turn = phone.PhoneTurn(uid=1, device={"screen": {"total_min": 120, "top": []}})
+    ctx = ToolContext(profile=_profile(), text="")
+    assert asyncio.run(phone.PHONE_TOOLS["phone_usage"].handler(turn, ctx, {}))["total_min"] == 120
+    assert "error" in asyncio.run(phone.PHONE_TOOLS["phone_usage"].handler(phone.PhoneTurn(uid=1), ctx, {}))
+
+
+def test_app_names_are_human():
+    assert screentime.pretty("com.instagram.android", "com.instagram.android") == "Instagram"
+    assert screentime.pretty("com.radolyn.ayugram", "AyuGram") == "AyuGram"
+    assert screentime.pretty("com.readygo.barrel.gp", "com.readygo.barrel.gp") == "Readygo Barrel"
+    for pkg in ("com.xiaomi.subscreencenter", "com.android.incallui", "com.xiaomi.aiasst.service", "com.huami.watch.hmwatchmanager",
+                "uz.ucell.ucellmobile", "com.miui.securitycore"):
+        assert screentime.category(pkg) == "work", pkg

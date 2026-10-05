@@ -245,6 +245,10 @@ _Q_TIME = re.compile(r"^(?:сколько|который)\s+(?:сейчас\s+)?
 _Q_DATE = re.compile(r"^(?:какое|какой)\s+(?:сегодня\s+)?(?:число|день\s+недели|день|дата)(?:\s+сегодня)?$|^какой\s+сегодня\s+день")
 _Q_BATTERY = re.compile(r"^(?:сколько|какой)\s+(?:у\s+меня\s+)?(?:заряд|зарядки|заряда|батареи)|^заряд\s+батареи")
 _Q_ALARM = re.compile(r"^(?:на\s+сколько|во\s+сколько|когда)\s+(?:у\s+меня\s+)?(?:стоит\s+)?будильник|^(?:какой|когда)\s+(?:завтра\s+)?будильник")
+# 04.10: «сколько я сегодня пользовался телефоном?» — с самого телефона (device["screen"], JES 2.22), без модели и токенов
+_Q_SCREEN = re.compile(r"^сколько\s+(?:времени\s+)?(?:я\s+)?(?:сегодня\s+)?(?:сидел|сижу|пользовал\w*|провел\w*|провёл\w*|был|нахожусь|потратил\s+времени)"
+                       r"(?:\s+\w+){0,3}\s*(?:в\s+телефоне|телефоном|за\s+телефоном|с\s+телефоном|в\s+телефон\w*)|"
+                       r"^(?:сколько|какое)\s+(?:у\s+меня\s+)?экранн\w+\s+врем|^экранное\s+время")
 _Q_BOT = re.compile(r"^(?:какая|какой)\s+(?:сейчас\s+|сегодня\s+|завтра\s+)?погода|^погода(?:\s+(?:сегодня|завтра))?$|"
                     r"^сколько\s+(?:я\s+)?(?:потратил|заработал|съел|калорий|осталось)|^какой\s+(?:у\s+меня\s+)?(?:баланс|курс)|"
                     r"^(?:какие|что)\s+(?:у\s+меня\s+)?(?:задачи|дела|планы|встречи)|"
@@ -254,11 +258,12 @@ _C_BOT = re.compile(r"^(?:запиши|добавь|внеси|напомни|о
 
 
 def quick(text: str) -> str | None:
-    """Вид простой фразы: time | date | battery | alarm (отвечаем сами), ask (агент бота + голос), do (агент бота молча)."""
+    """Вид простой фразы: time | date | battery | alarm | screen (отвечаем сами), ask (агент бота + голос), do (агент бота молча)."""
     t = _clean(text)
     if not t or len(t.split()) > 14:
         return None
-    for rx, kind in ((_Q_TIME, "time"), (_Q_DATE, "date"), (_Q_BATTERY, "battery"), (_Q_ALARM, "alarm"), (_Q_BOT, "ask"), (_C_BOT, "do")):
+    for rx, kind in ((_Q_SCREEN, "screen"), (_Q_TIME, "time"), (_Q_DATE, "date"), (_Q_BATTERY, "battery"), (_Q_ALARM, "alarm"),
+                     (_Q_BOT, "ask"), (_C_BOT, "do")):
         if rx.search(t):
             return kind
     return None
@@ -284,7 +289,45 @@ def local_answer(kind: str, now: Any, device: dict[str, Any], alarm: dict[str, A
             return "Будильник выключен."
         when = "завтра" if alarm.get("day") != now.date().isoformat() else "сегодня"
         return f"Будильник {when} в {alarm.get('wake_at')}" + (f", такбир в {alarm['takbir']}." if alarm.get("takbir") else ".")
+    if kind == "screen":
+        return screen_answer(device.get("screen"))
     return None
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n100, n10 = n % 100, n % 10
+    return one if n10 == 1 and n100 != 11 else few if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else many
+
+
+def spoken_minutes(m: float) -> str:
+    """107 → «1 час 47 минут» (для голоса)."""
+    m = int(round(m))
+    h, mm = divmod(m, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} {_plural(h, 'час', 'часа', 'часов')}")
+    if mm or not h:
+        parts.append(f"{mm} {_plural(mm, 'минута', 'минуты', 'минут')}")
+    return " ".join(parts)
+
+
+def screen_answer(s: Any) -> str | None:
+    """«Сколько я сидел в телефоне?» по данным с телефона (device["screen"]); данных нет — None (ответит модель через phone_usage)."""
+    if not isinstance(s, dict):
+        return None
+    if s.get("allowed") is False:
+        return "Нет доступа к истории использования: откройте JES, Настройки, Разрешения, «История использования»."
+    total = s.get("total_min")
+    if total is None:
+        return None
+    text = f"Сегодня в телефоне {spoken_minutes(float(total))}"
+    top = [t for t in s.get("top") or [] if isinstance(t, dict) and t.get("app")][:3]
+    if top:
+        text += ". Больше всего — " + ", ".join(f"{t['app']} {spoken_minutes(float(t.get('min') or 0))}" for t in top)
+    pickups = int(s.get("pickups") or 0)
+    if pickups:
+        text += f". Брали телефон {pickups} {_plural(pickups, 'раз', 'раза', 'раз')}"
+    return text + "."
 
 
 def succeeded(result: Any) -> bool:

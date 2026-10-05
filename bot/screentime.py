@@ -62,7 +62,28 @@ WORK_HINTS = ("dialer", "incallui", "contacts", "telecom", "phone", "mms", "mess
               "inputmethod", "keyboard", "clock", "deskclock", "calculator", "calendar", "maps", "navi", "taxi", "yandex.go", "uber",
               "mytaxi", "bank", "pay", "click", "payme", "wallet", "miui.home", "globallauncher", "security", "packageinstaller", "permissioncontroller",
               "uz.flow.jes", "uz.flow.jarvis", "gallery", "files", "filemanager", "fileexplorer", "notes", "weather", "health",
-              "fitness", "translate", "scanner", "authenticator")
+              "fitness", "translate", "scanner", "authenticator", "incallui", "subscreen", "aiasst", "screenrecorder", "remotecontrol",
+              "watch", "anydesk", "ucell", "beeline", "mobiuz", "uzmobile", "moliya", "fintech", "miui.notification", "securitycore")
+
+# 04.10: у части приложений телефон не видит названия (Android прячет) — показываем по-человечески
+PRETTY = {"com.instagram.android": "Instagram", "com.instagram.lite": "Instagram Lite", "com.zhiliaoapp.musically": "TikTok",
+          "com.ss.android.ugc.trill": "TikTok", "com.google.android.youtube": "YouTube", "com.facebook.katana": "Facebook",
+          "com.twitter.android": "X (Twitter)", "com.snapchat.android": "Snapchat", "video.like": "Likee", "com.radolyn.ayugram": "AyuGram",
+          "org.telegram.messenger": "Telegram", "com.android.chrome": "Chrome", "com.openai.chatgpt": "ChatGPT", "com.netflix.mediaclient": "Netflix"}
+_PKG_NOISE = {"com", "org", "net", "uz", "ru", "android", "app", "apps", "gp", "mobile", "lite", "free", "google", "www", "io", "co", "pro"}
+
+
+def pretty(pkg: str, label: str | None = None) -> str:
+    """Название приложения для человека: своё имя с телефона, известное или из имени пакета («com.readygo.barrel.gp» → «Readygo Barrel»)."""
+    pkg = str(pkg or "")
+    if label and label != pkg and "." not in label.strip():
+        return label.strip()[:40]
+    if pkg in PRETTY:
+        return PRETTY[pkg]
+    if label and label != pkg:
+        return label.strip()[:40]
+    parts = [p for p in pkg.split(".") if p and p.lower() not in _PKG_NOISE]
+    return " ".join(p.capitalize() for p in parts[:2])[:40] or pkg
 
 
 def category(pkg: str) -> str:
@@ -219,14 +240,14 @@ def record_usage(uid: int, data: dict[str, Any]) -> dict[str, Any] | None:
     days = st.get("days") or {}
     day = str(data.get("day") or "")[:10]
     if day:
-        days[day] = {"apps": [{"pkg": str(a.get("pkg") or "")[:120], "label": str(a.get("label") or "")[:60], "min": round(float(a.get("min") or 0), 1)}
+        days[day] = {"apps": [{"pkg": str(a.get("pkg") or "")[:120], "label": pretty(str(a.get("pkg") or ""), str(a.get("label") or "")), "min": round(float(a.get("min") or 0), 1)}
                               for a in (data.get("apps") or [])[:40] if isinstance(a, dict)],
                      "pickups": int(data.get("pickups") or 0), "screen_min": round(float(data.get("screen_min") or 0), 1),
                      "at": datetime.now(timezone.utc).isoformat()}
     for h in data.get("history") or []:
         d = str((h or {}).get("day") or "")[:10]
         if d and d != day and d not in days:
-            days[d] = {"apps": [{"pkg": str(a.get("pkg") or "")[:120], "label": str(a.get("label") or "")[:60], "min": round(float(a.get("min") or 0), 1)}
+            days[d] = {"apps": [{"pkg": str(a.get("pkg") or "")[:120], "label": pretty(str(a.get("pkg") or ""), str(a.get("label") or "")), "min": round(float(a.get("min") or 0), 1)}
                                 for a in (h.get("apps") or [])[:40] if isinstance(a, dict)], "history": True}
     keep = sorted(days)[-30:]
     st["days"] = {d: days[d] for d in keep}
@@ -345,7 +366,7 @@ async def alert(bot, profile, data: dict[str, Any]) -> dict[str, Any]:  # noqa: 
     uz = profile.lang == "uz"
     kind = str(data.get("kind") or "limit")
     cat = str(data.get("category") or category(str(data.get("pkg") or "")))
-    app = re.sub(r"[<>&]", "", str(data.get("label") or data.get("pkg") or ""))[:40]
+    app = re.sub(r"[<>&]", "", pretty(str(data.get("pkg") or ""), str(data.get("label") or "")))[:40]
     today_min = float(data.get("today_min") or 0)
     streak_min = float(data.get("streak_min") or 0)
     limit_min = float(data.get("limit_min") or 0)
@@ -397,7 +418,7 @@ def brief_lines(profile) -> list[str]:  # noqa: ANN001
     total = sum(float(a.get("min") or 0) for a in counted)
     top = sorted(counted, key=lambda a: -float(a.get("min") or 0))[:3]
     line = (f"📱 {'Telefonda' if uz else 'В телефоне'}: <b>{fmt_min(total, uz)}</b>"
-            + (" · " + ", ".join(f"{re.sub(r'[<>&]', '', str(a.get('label') or a.get('pkg')))[:20]} {fmt_min(float(a.get('min') or 0), uz)}" for a in top) if top else ""))
+            + (" · " + ", ".join(f"{re.sub(r'[<>&]', '', pretty(str(a.get('pkg')), a.get('label')))[:20]} {fmt_min(float(a.get('min') or 0), uz)}" for a in top) if top else ""))
     if today.get("pickups"):
         line += f" · {'oldingiz' if uz else 'брали'} {int(today['pickups'])} {'marta' if uz else 'раз'}"
     yday = days.get((profile.today - timedelta(days=1)).isoformat())

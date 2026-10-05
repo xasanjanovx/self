@@ -18,7 +18,7 @@ def _minutes_until(ctx: ToolContext, until: str) -> int | None:
     at = now.replace(hour=int(m.group(1)) % 24, minute=int(m.group(2)), second=0, microsecond=0)
     if at <= now:
         at += timedelta(days=1)
-    return int((at - now).total_seconds() // 60) or 1
+    return max(1, int(-(-(at - now).total_seconds() // 60)))   # вверх: «до 18:00» — не 17:59
 
 
 @tool("screen_busy",
@@ -36,7 +36,7 @@ async def _screen_busy(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             minutes = int(a.get("minutes") or screentime.DEFAULT_BUSY_MIN)
         except (TypeError, ValueError):
             minutes = screentime.DEFAULT_BUSY_MIN
-    minutes = max(5, min(16 * 60, minutes))
+    minutes = max(5, min(24 * 60, minutes))
     until = screentime.set_busy(ctx.uid, minutes)
     ctx.mutated = True
     return {"ok": True, "busy_until": until.astimezone(ctx.profile.tz).strftime("%H:%M") if until else None}
@@ -54,7 +54,7 @@ async def _screen_time(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     top = sorted((x for x in today.get("apps") or [] if screentime.category(str(x.get("pkg"))) != "work"),
                  key=lambda x: -float(x.get("min") or 0))[:5]
     return {"minutes": {k: int(round(v)) for k, v in by.items()}, "limits": screentime.limits(st), "pickups": today.get("pickups"),
-            "top": [{"app": x.get("label") or x.get("pkg"), "min": int(round(float(x.get("min") or 0)))} for x in top],
+            "top": [{"app": screentime.pretty(str(x.get("pkg")), x.get("label")), "min": int(round(float(x.get("min") or 0)))} for x in top],
             "updated": today.get("at")}
 
 

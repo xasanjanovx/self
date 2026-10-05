@@ -36,7 +36,8 @@ HISTORY_TTL = 2 * 3600.0
 HISTORY_MAX_MESSAGES = 24
 PENDING_TTL = 180.0
 # инструменты бота, которым нужен экран Telegram — на телефоне их нет
-EXCLUDED_BOT_TOOLS = {"hand_off", "open_screen", "expect_photo", "call_me"}
+EXCLUDED_BOT_TOOLS = {"hand_off", "open_screen", "expect_photo", "call_me",
+                      "screen_time"}  # 04.10: на телефоне вместо него phone_usage — данные прямо с телефона (свежие)
 
 
 @dataclass
@@ -602,6 +603,18 @@ async def _phone_status(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) ->
     d = turn.device or {}
     keys = ("battery", "charging", "volume", "ringer", "dnd", "wifi", "bluetooth", "brightness", "model", "app_version", "locked")
     return {k: d.get(k) for k in keys if d.get(k) is not None} or {"error": "телефон не прислал состояние"}
+
+
+@ptool("phone_usage", "Экранное время: сколько он СЕГОДНЯ в телефоне — данные с самого телефона, точные и на сейчас: всего, по группам (соцсети и видео, "
+       "Telegram, браузер), топ приложений, сколько раз брал телефон, его лимиты. «сколько я сидел в телефоне?», «какие приложения больше всего?», "
+       "«сколько в Telegram?». Для этого НЕ открывай настройки и не говори, что информации нет.")
+async def _screen_time(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    s = (turn.device or {}).get("screen")
+    if not isinstance(s, dict):
+        return {"error": "телефон не прислал экранное время — нужна версия JES 2.22 и доступ «История использования»"}
+    if s.get("allowed") is False:
+        return {"error": "нет доступа «История использования»: JES → Настройки → Разрешения → «История использования» → разрешить"}
+    return s
 
 
 @ptool("brightness", "Яркость экрана: уровень в процентах, ярче/темнее или авто.",
