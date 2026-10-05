@@ -18,11 +18,14 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.aladhan.com/v1/timings"
 ANDIJAN = (40.7821, 72.3442)
+# 05.10.2026 его выбор («на боте и на часах»): Аср по ханафитскому мазхабу (школа Aladhan = 1; тень = 2 длины предмета) — как делают в Узбекистане.
+# Часы (jes-face/shared/prayer.js) считают так же без сети. Меняется одной константой.
+ASR_SCHOOL = 1
 NAMES_RU = {"Fajr": "Бомдод", "Sunrise": "Восход", "Dhuhr": "Пешин", "Asr": "Аср", "Maghrib": "Шом", "Isha": "Хуфтон"}
 NAMES_UZ = {"Fajr": "Bomdod", "Sunrise": "Quyosh", "Dhuhr": "Peshin", "Asr": "Asr", "Maghrib": "Shom", "Isha": "Xufton"}
 ORDER = ("Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha")
 
-_cache: dict[tuple[str, float, float, int], dict[str, str]] = {}
+_cache: dict[tuple[str, float, float, int, int], dict[str, str]] = {}
 _lock = asyncio.Lock()
 
 
@@ -36,14 +39,14 @@ def parse_hhmm(value: str | None) -> time | None:
 
 async def timings(day: date, *, latitude: float = ANDIJAN[0], longitude: float = ANDIJAN[1], method: int = 3) -> dict[str, str]:
     """{'Fajr': '04:27', …} на указанный день. Пустой словарь — если не смогли получить."""
-    key = (day.isoformat(), round(latitude, 4), round(longitude, 4), int(method))
+    key = (day.isoformat(), round(latitude, 4), round(longitude, 4), int(method), ASR_SCHOOL)
     if key in _cache:
         return _cache[key]
     async with _lock:
         if key in _cache:
             return _cache[key]
         url = f"{API}/{day:%d-%m-%Y}"
-        params = {"latitude": latitude, "longitude": longitude, "method": method, "school": 0}
+        params = {"latitude": latitude, "longitude": longitude, "method": method, "school": ASR_SCHOOL}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 res = await client.get(url, params=params)
