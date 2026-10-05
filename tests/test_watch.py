@@ -130,21 +130,44 @@ def _conv(monkeypatch, quiet=False):
     return w, watch.Conversation(w, "button")
 
 
-def test_answer_goes_to_watch_as_text_and_mp3(monkeypatch):
+def test_answer_text_comes_first_then_voice_in_parts(monkeypatch):
     w, conv = _conv(monkeypatch)
 
     async def run():
         await conv.link.send_str(json.dumps({"type": "user", "text": "сколько время"}))
         await conv.link.send_str(json.dumps({"type": "jarvis", "text": "Сейчас 14:20, сэр."}))
+        events_before_voice = w.take()
         await conv.link.send_bytes(b"\1\0" * 2400)
         await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+        return events_before_voice
 
-    asyncio.run(run())
-    events = w.take()
-    assert events[0] == {"t": "heard", "text": "сколько время"}
-    say = events[1]
-    assert say["t"] == "say" and say["text"] == "Сейчас 14:20, сэр." and say["listen"] is True
-    assert base64.b64decode(say["audio"]).startswith(b"ID3")
+    first = asyncio.run(run())
+    assert first[0] == {"t": "heard", "text": "сколько время"}
+    say = first[1]
+    assert say["t"] == "say" and say["text"] == "Сейчас 14:20, сэр." and say["listen"] is True and say["audio"] == "expect"
+    rest = w.take()
+    assert [e["t"] for e in rest] == ["audio", "audio_end"]
+    assert base64.b64decode(rest[0]["b"]).startswith(b"ID3") and rest[0]["i"] == 1
+
+
+def test_long_voice_is_cut_into_parts_at_pauses(monkeypatch):
+    w, conv = _conv(monkeypatch)
+    speech = (np.sin(2 * np.pi * 200 * np.arange(int(24000 * 1.8)) / 24000) * 6000).astype(np.int16).tobytes()
+    pause = b"\0\0" * 5000   # ~0,2 с тишины
+
+    async def run():
+        await conv.link.send_str(json.dumps({"type": "jarvis", "text": "Длинный ответ."}))
+        await conv.link.send_bytes(speech)
+        await conv.link.send_bytes(pause)       # накопилось >1,6 с и тишина — первый кусок уходит сразу
+        parts_now = [e for e in w.take() if e["t"] == "audio"]
+        await conv.link.send_bytes(speech)
+        await conv.link.send_str(json.dumps({"type": "turn_complete"}))
+        return parts_now
+
+    now = asyncio.run(run())
+    assert len(now) == 1
+    tail = w.take()
+    assert [e["t"] for e in tail] == ["audio", "audio_end"] and tail[0]["i"] == 2
 
 
 def test_night_or_namaz_answer_is_text_only(monkeypatch):
@@ -156,8 +179,9 @@ def test_night_or_namaz_answer_is_text_only(monkeypatch):
         await conv.link.send_str(json.dumps({"type": "turn_complete"}))
 
     asyncio.run(run())
-    say = w.take()[-1]
-    assert say["text"] == "Готово." and "audio" not in say
+    events = w.take()
+    assert events[0]["text"] == "Готово." and events[0]["audio"] == "none"
+    assert [e["t"] for e in events] == ["say", "audio_end"]
 
 
 def test_silent_command_from_watch_goes_to_phone_and_shows_text(monkeypatch):
@@ -170,8 +194,8 @@ def test_silent_command_from_watch_goes_to_phone_and_shows_text(monkeypatch):
 
     asyncio.run(run())
     assert phone_link._actions[7][0]["type"] == "call"
-    say = w.take()[-1]
-    assert say["text"] == "Звоню: Мама" and "audio" not in say
+    events = w.take()
+    assert events[0]["text"] == "Звоню: Мама" and events[0]["audio"] == "none" and events[-1]["t"] == "audio_end"
 
 
 def test_phone_offline_is_said_on_the_watch(monkeypatch):
@@ -182,7 +206,38 @@ def test_phone_offline_is_said_on_the_watch(monkeypatch):
         await conv.link.send_str(json.dumps({"type": "turn_complete"}))
 
     asyncio.run(run())
-    assert "не на связи" in w.take()[-1]["text"]
+    assert "не на связи" in w.take()[0]["text"]
+
+
+def test_silent_turn_sends_nothing(monkeypatch):
+    w, conv = _conv(monkeypatch)
+    asyncio.run(conv.link.send_str(json.dumps({"type": "turn_complete"})))
+    assert w.take() == []
+
+
+def test_one_recording_is_decoded_by_one_decoder(monkeypatch):
+    """Непрерывная запись часов: декодер живёт между кусками; новый файл (new) — новый декодер (без щелчков на стыках)."""
+    created = []
+
+    class Fake:
+        def __init__(self):
+            created.append(self)
+            self.closed = False
+
+        def decode(self, packets):
+            return b"\1\0" * 320 * len(packets)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(watch, "OpusStream", Fake)
+    w = _worn_watch()
+    chunk = _framed(*[bytes([0x48]) + bytes(20)] * 3)
+    assert len(asyncio.run(w.decode_chunk(chunk, True))) == 3 * 640
+    asyncio.run(w.decode_chunk(chunk, False))
+    assert len(created) == 1                      # продолжение той же записи
+    asyncio.run(w.decode_chunk(chunk, True))
+    assert len(created) == 2 and created[0].closed  # новый файл — новый декодер
 
 
 # ------------------------------------------------------------------ «Джес» с микрофона часов

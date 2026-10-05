@@ -36,8 +36,11 @@ logger = logging.getLogger(__name__)
 RATE = 16000                  # микрофон часов → PCM 16 кГц моно (как у телефона)
 FRAME_BYTES = RATE // 10 * 2  # 0.1 с — так Segmenter различает речь и паузы внутри секундного куска
 WAKE_SILENCE_MS = 600         # в ожидании «Джес» фраза кончается быстрее, чем в разговоре
+CONV_SILENCE_MS = 650         # в разговоре с часами: пауза, после которой фраза кончилась (у телефона 1000 — для часов это лишняя задержка)
+VOICE_RATE = 24000            # голос ответа (PCM) приходит с такой частотой
+MIN_PART_S, MAX_PART_S = 1.6, 4.5   # голос уходит на часы кусками: не короче/не длиннее (первый кусок звучит раньше, чем ответ дочитан)
 FRESH_S = 45.0                # часы «слушают», если выходили на связь недавно (опрос сервера — каждые ≤25 с)
-NAMAZ_PAUSE_MIN = 25          # после азана столько минут JES на часах не слушает (он молится)
+NAMAZ_PAUSE_MIN = 12          # после азана столько минут ответы только текстом (он молится); было 25 — он тестировал в это окно и «голоса нет»
 NIGHT_FROM, NIGHT_TO = 23, 5  # ночью — ответы только текстом и вибрацией
 MAX_MP3_BYTES = 160_000       # длиннее — только текст (по Bluetooth слишком долго)
 HEALTH_FRESH_S = 3 * 3600
@@ -101,28 +104,50 @@ def _load_opus():  # noqa: ANN202
     return lib
 
 
-def decode_packets(packets: list[bytes]) -> bytes:
-    """Пакеты Opus → PCM s16le 16 кГц моно (libopus через ctypes)."""
-    import ctypes
+class OpusStream:
+    """Декодер libopus, который живёт между кусками ОДНОЙ записи часов (05.10: часы пишут непрерывно, файл читаем по мере роста —
+    состояние декодера сохраняется, поэтому на стыках кусков нет щелчков)."""
 
-    global _opus
-    if _opus is None:
-        _opus = _load_opus()
-    err = ctypes.c_int(0)
-    dec = _opus.opus_decoder_create(RATE, 1, ctypes.byref(err))
-    if not dec or err.value != 0:
-        raise DecodeError(f"opus_decoder_create: {err.value}")
-    try:
+    def __init__(self) -> None:
+        import ctypes
+
+        global _opus
+        if _opus is None:
+            _opus = _load_opus()
+        err = ctypes.c_int(0)
+        self.dec = _opus.opus_decoder_create(RATE, 1, ctypes.byref(err))
+        if not self.dec or err.value != 0:
+            raise DecodeError(f"opus_decoder_create: {err.value}")
+        self.buf = (ctypes.c_int16 * 960)()   # до 60 мс на пакет
+
+    def decode(self, packets: list[bytes]) -> bytes:
         pcm = bytearray()
-        buf = (ctypes.c_int16 * 960)()   # до 60 мс на пакет
         for packet in packets:
-            got = _opus.opus_decode(dec, packet or None, len(packet), buf, 960, 0)
+            got = _opus.opus_decode(self.dec, packet or None, len(packet), self.buf, 960, 0)
             if got < 0:
                 continue   # битый пакет — пропускаем, остальные декодируются
-            pcm += bytes(memoryview(buf).cast("B")[: got * 2])
+            pcm += bytes(memoryview(self.buf).cast("B")[: got * 2])
         return bytes(pcm)
+
+    def close(self) -> None:
+        if self.dec:
+            _opus.opus_decoder_destroy(self.dec)
+            self.dec = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def decode_packets(packets: list[bytes]) -> bytes:
+    """Пакеты Opus → PCM s16le 16 кГц моно (новый декодер на один вызов)."""
+    stream = OpusStream()
+    try:
+        return stream.decode(packets)
     finally:
-        _opus.opus_decoder_destroy(dec)
+        stream.close()
 
 
 async def opus_to_pcm(data: bytes) -> bytes:
@@ -141,7 +166,7 @@ async def opus_to_pcm(data: bytes) -> bytes:
 async def pcm_to_mp3(pcm: bytes, rate: int = 24000) -> bytes:
     """Голос ответа (PCM 24 кГц) → MP3 для динамика часов: моно 22 кГц 32 кбит/с, чуть громче (динамик маленький)."""
     return await _ffmpeg(["-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0", "-af", "volume=1.6,alimiter=limit=0.95",
-                          "-codec:a", "libmp3lame", "-b:a", "32k", "-ar", "22050", "-ac", "1", "-f", "mp3", "pipe:1"], pcm, timeout=15)
+                          "-codec:a", "libmp3lame", "-b:a", "24k", "-ar", "22050", "-ac", "1", "-f", "mp3", "pipe:1"], pcm, timeout=15)
 
 
 # ------------------------------------------------------------------ хранилище
@@ -221,7 +246,7 @@ class _Link:
             self.q.put_nowait(None)
 
     async def send_bytes(self, data: bytes) -> None:
-        self.conv.audio.extend(data)
+        await self.conv.on_audio(data)
 
     async def send_str(self, text: str) -> None:
         try:
@@ -242,6 +267,17 @@ class _Speaker(phone_cheap.Speaker):
         if self.quiet():
             return False
         return await super().say(text)
+
+
+def _ends_with_pause(pcm: bytearray, rate: int = VOICE_RATE, ms: int = 160, level: float = 350.0) -> bool:
+    """Последние ms миллисекунд голоса тихие — естественная пауза между фразами, здесь можно разрезать."""
+    import numpy as np
+
+    n = rate * ms // 1000 * 2
+    if len(pcm) < n:
+        return False
+    x = np.frombuffer(bytes(pcm[-n:]), dtype=np.int16).astype(np.float32)
+    return float(np.sqrt(np.mean(x * x))) < level
 
 
 def pcm_levels(pcm: bytes) -> tuple[float, int]:
@@ -295,8 +331,10 @@ class WatchCheap(phone_cheap.PhoneCheap):
         super().__init__(profile, persona, link, device, memory)
         self.watch = watch
         self.speaker = _Speaker(profile, persona, self.to_phone, quiet=lambda: watch.quiet)
+        self.seg = phone_cheap.Segmenter(rate=RATE, silence_ms=CONV_SILENCE_MS)
 
     async def _on_audio(self, pcm: bytes) -> None:
+        self.watch.t_phrase = time.monotonic()
         rms, peak = pcm_levels(pcm)
         logger.info("watch: фраза %.1f с, громкость RMS %.0f, пик %s", len(pcm) / 2 / RATE, rms, peak)
         _dump_utterance(self.uid, pcm)
@@ -344,6 +382,8 @@ class Conversation:
         self.first: bytes | None = None
         self.task: asyncio.Task | None = None
         self.started = time.monotonic()
+        self.pushed = False   # текст ответа уже отправлен на часы
+        self.parts = 0
 
     @property
     def alive(self) -> bool:
@@ -359,6 +399,8 @@ class Conversation:
             w.push({"t": "heard", "text": str(m["text"])[:200]})
         elif kind == "jarvis" and m.get("text"):
             self.said.append(str(m["text"]))
+            if not self.pushed:
+                self._say(str(m["text"]), voice=not w.quiet)   # текст появляется на часах сразу, голос догонит
         elif kind == "status" and m.get("text"):
             w.push({"t": "status", "text": str(m["text"])[:60]})
         elif kind == "card" and isinstance(m.get("card"), dict):
@@ -379,26 +421,53 @@ class Conversation:
             await self._flush()
             self.link.close()
 
-    async def _flush(self) -> None:
-        text = " ".join(self.said).strip()
-        pcm = bytes(self.audio)
-        cards, actions = self.cards, self.actions
-        self.said, self.audio, self.cards, self.actions = [], bytearray(), [], []
-        if not text:
-            text = " · ".join(x for x in (cards + actions) if x)
-        if not text and not pcm:
+    def _say(self, text: str, *, voice: bool) -> None:
+        self.pushed = True
+        w = self.watch
+        if w.t_phrase:
+            logger.info("watch: текст ответа на часах через %.1f с после конца фразы", time.monotonic() - w.t_phrase)
+        w.push({"t": "say", "text": text[:300], "listen": True, "audio": "expect" if voice else "none"})
+
+    async def on_audio(self, data: bytes) -> None:
+        """Голос ответа (PCM 24 кГц) копим и отправляем часам кусками по 1,6–4,5 с: в паузе речи или когда накопилось много."""
+        if self.watch.quiet:
             return
-        ev: dict[str, Any] = {"t": "say", "text": text, "listen": True}
-        if pcm and not self.watch.quiet:
-            try:
-                mp3 = await pcm_to_mp3(pcm)
-                if len(mp3) <= MAX_MP3_BYTES:
-                    ev["audio"] = base64.b64encode(mp3).decode()
-                else:
-                    logger.info("watch: ответ длинный (%s КБ MP3) — на часы только текст", len(mp3) // 1024)
-            except DecodeError as exc:
-                logger.warning("watch: MP3 не собрался: %s", exc)
-        self.watch.push(ev)
+        self.audio.extend(data)
+        sec = len(self.audio) / 2 / VOICE_RATE
+        if sec >= MAX_PART_S or (sec >= MIN_PART_S and _ends_with_pause(self.audio)):
+            await self._send_part()
+
+    async def _send_part(self) -> None:
+        pcm = bytes(self.audio)
+        self.audio = bytearray()
+        if not pcm:
+            return
+        try:
+            mp3 = await pcm_to_mp3(pcm, VOICE_RATE)
+        except DecodeError as exc:
+            logger.warning("watch: MP3 не собрался: %s", exc)
+            return
+        self.parts += 1
+        w = self.watch
+        if self.parts == 1 and w.t_phrase:
+            logger.info("watch: первый кусок голоса (%.1f с звука, %s КБ MP3) через %.1f с после конца фразы", len(pcm) / 2 / VOICE_RATE,
+                        round(len(mp3) / 1024, 1), time.monotonic() - w.t_phrase)
+        w.push({"t": "audio", "i": self.parts, "b": base64.b64encode(mp3).decode()})
+
+    async def _flush(self) -> None:
+        """Ход закончен: остаток голоса и сигнал «всё»; если ответа не было (только действие) — коротко написать, что сделано."""
+        text = " ".join(self.said).strip()
+        cards, actions = self.cards, self.actions
+        self.said, self.cards, self.actions = [], [], []
+        if not self.pushed:
+            text = text or " · ".join(x for x in (cards + actions) if x)
+            if text:
+                self._say(text, voice=False)
+        await self._send_part()
+        if self.pushed:
+            self.watch.push({"t": "audio_end"})
+        self.pushed = False
+        self.parts = 0
 
     async def run(self) -> None:
         from . import agent_tools_extra as extra
@@ -471,6 +540,9 @@ class Watch:
         self.chunks = 0
         self.rms_max = 0.0
         self.peak_ema = 0.0
+        self.opus: OpusStream | None = None
+        self._opus_lock: asyncio.Lock | None = None
+        self.t_phrase = 0.0   # когда закончилась последняя фраза (для замера задержки ответа)
 
     # --- события для часов
     @property
@@ -583,6 +655,25 @@ class Watch:
             self.push({"t": "resume"})
 
     # --- звук
+    async def decode_chunk(self, raw: bytes, fresh: bool) -> bytes:
+        """Кусок записи часов → PCM. Один файл записи = один декодер (fresh — начался новый файл)."""
+        if raw[:4] == b"OggS":
+            return await opus_to_pcm(raw)
+        frames = parse_frames(raw)
+        if not frames:
+            raise DecodeError("в записи нет пакетов Opus")
+        if self._opus_lock is None:
+            self._opus_lock = asyncio.Lock()
+        async with self._opus_lock:
+            if fresh or self.opus is None:
+                if self.opus is not None:
+                    self.opus.close()
+                self.opus = OpusStream()
+            try:
+                return await asyncio.get_running_loop().run_in_executor(None, self.opus.decode, frames)
+            except (OSError, AttributeError) as exc:   # нет libopus
+                raise DecodeError(f"libopus: {exc}")
+
     async def feed(self, pcm: bytes, data: dict[str, Any]) -> None:
         self.chunks += 1
         pcm = self._agc(pcm)
@@ -736,7 +827,7 @@ async def audio(uid: int, data: dict[str, Any]) -> dict[str, Any]:
         raw = b""
     if raw:
         try:
-            pcm = await opus_to_pcm(raw)
+            pcm = await w.decode_chunk(raw, bool(data.get("new")))
         except DecodeError as exc:
             w.decode_fail += 1
             pcm = b""
