@@ -244,11 +244,63 @@ class _Speaker(phone_cheap.Speaker):
         return await super().say(text)
 
 
+def pcm_levels(pcm: bytes) -> tuple[float, int]:
+    """(RMS, пик) куска PCM s16le."""
+    import numpy as np
+
+    x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
+    if not len(x):
+        return 0.0, 0
+    return float(np.sqrt(np.mean(x * x))), int(np.max(np.abs(x)))
+
+
+def boost(pcm: bytes, target_peak: int = 20000, max_gain: float = 12.0) -> bytes:
+    """Подтянуть тихую запись (микрофон часов слабее телефонного): только усиливаем, не больше max_gain, без клиппинга."""
+    import numpy as np
+
+    x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16)
+    if not len(x):
+        return pcm
+    peak = int(np.max(np.abs(x.astype(np.int32))))
+    if peak <= 0:
+        return pcm
+    gain = min(max_gain, target_peak / peak)
+    if gain < 1.2:
+        return pcm
+    return np.clip(x.astype(np.float32) * gain, -32768, 32767).astype(np.int16).tobytes()
+
+
+UTT_KEEP = 8
+
+
+def _dump_utterance(uid: int, pcm: bytes, rate: int = RATE) -> None:
+    """Последние фразы с микрофона часов — в wav (разобрать на слух/по спектру, если не понимает)."""
+    import wave
+
+    try:
+        d = _dir()
+        for old in sorted(d.glob(f"utt_{uid}_*.wav"))[:-UTT_KEEP + 1]:
+            old.unlink(missing_ok=True)
+        with wave.open(str(d / f"utt_{uid}_{int(time.time())}.wav"), "wb") as fh:
+            fh.setnchannels(1)
+            fh.setsampwidth(2)
+            fh.setframerate(rate)
+            fh.writeframes(pcm)
+    except OSError:
+        logger.debug("watch: не записал фразу", exc_info=True)
+
+
 class WatchCheap(phone_cheap.PhoneCheap):
     def __init__(self, profile, persona, link, device, memory, *, watch: "Watch") -> None:  # noqa: ANN001
         super().__init__(profile, persona, link, device, memory)
         self.watch = watch
         self.speaker = _Speaker(profile, persona, self.to_phone, quiet=lambda: watch.quiet)
+
+    async def _on_audio(self, pcm: bytes) -> None:
+        rms, peak = pcm_levels(pcm)
+        logger.info("watch: фраза %.1f с, громкость RMS %.0f, пик %s", len(pcm) / 2 / RATE, rms, peak)
+        _dump_utterance(self.uid, pcm)
+        await super()._on_audio(boost(pcm))
 
     def _stamp(self) -> str:
         first = self._first
@@ -418,6 +470,7 @@ class Watch:
         self._prayers: list[dict[str, Any]] = []
         self.chunks = 0
         self.rms_max = 0.0
+        self.peak_ema = 0.0
 
     # --- события для часов
     @property
@@ -532,6 +585,7 @@ class Watch:
     # --- звук
     async def feed(self, pcm: bytes, data: dict[str, Any]) -> None:
         self.chunks += 1
+        pcm = self._agc(pcm)
         if self.conv is not None and self.conv.alive:
             self.conv.link.feed(pcm)
             return
@@ -540,6 +594,18 @@ class Watch:
             self._seg(b"\0" * int(RATE * 0.8) * 2)   # часы пропустили тихие куски — фраза кончилась
         self.last_f = f
         self._seg(pcm)
+
+    def _agc(self, pcm: bytes) -> bytes:
+        """Микрофон часов тихий: усиление по медленному «пику» потока (растёт быстро на громком, спадает медленно), от ×1 до ×8."""
+        _, peak = pcm_levels(pcm)
+        self.peak_ema = max(float(peak), self.peak_ema * 0.97) if peak else self.peak_ema * 0.97
+        gain = max(1.0, min(8.0, 9000.0 / max(self.peak_ema, 1.0)))
+        if gain < 1.15:
+            return pcm
+        import numpy as np
+
+        x = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16).astype(np.float32)
+        return np.clip(x * gain, -32768, 32767).astype(np.int16).tobytes()
 
     def _seg(self, pcm: bytes) -> None:
         import numpy as np

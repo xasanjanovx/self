@@ -302,3 +302,25 @@ def test_audio_decodes_raw_opus_chunks(monkeypatch):
     assert got["n"] == 5 and len(pcm) == 5 * 640
     with pytest.raises(watch.DecodeError):
         asyncio.run(watch.opus_to_pcm(b"garbage-not-opus"))
+
+
+def _tone_pcm(seconds, amp):
+    t = np.arange(int(seconds * 16000)) / 16000
+    return (np.sin(2 * np.pi * 220 * t) * amp).astype(np.int16).tobytes()
+
+
+def test_boost_lifts_quiet_speech_but_leaves_loud_alone():
+    quiet = _tone_pcm(0.5, 2000)
+    _, peak_q = watch.pcm_levels(watch.boost(quiet))
+    assert 19000 < peak_q <= 20500                       # до пика 20000
+    _, peak_vq = watch.pcm_levels(watch.boost(_tone_pcm(0.5, 600)))
+    assert 7000 < peak_vq < 7400                         # очень тихо — не больше ×12
+    loud = _tone_pcm(0.5, 18000)
+    assert watch.boost(loud) == loud                      # уже громко — как есть
+
+
+def test_agc_raises_a_quiet_stream_so_speech_is_still_found(monkeypatch):
+    w = _worn_watch()
+    quiet = _tone_pcm(0.6, 1200)
+    out = w._agc(quiet)
+    assert watch.pcm_levels(out)[1] > watch.pcm_levels(quiet)[1] * 3
