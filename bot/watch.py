@@ -68,9 +68,74 @@ async def _ffmpeg(args: list[str], data: bytes, timeout: float = 8.0) -> bytes:
     return out
 
 
+# 05.10: запись часов Zepp OS — НЕ Ogg: это «сырые» пакеты Opus в формате утилиты opus_demo — [длина u32 BE][контрольное число u32 BE]
+# [пакет Opus]… (16 кГц, моно, SILK WB, кадры по 20 мс). ffmpeg такое не читает («Invalid data»), поэтому декодируем libopus напрямую.
+MAX_OPUS_PACKET = 1275
+_opus = None
+
+
+def parse_frames(data: bytes) -> list[bytes]:
+    """Пакеты Opus из записи часов. Пустой пакет (длина 0) — потерянный кадр. Обрыв посередине — берём то, что целое."""
+    out: list[bytes] = []
+    i = 0
+    n = len(data)
+    while i + 8 <= n:
+        size = int.from_bytes(data[i: i + 4], "big")
+        if size > MAX_OPUS_PACKET or i + 8 + size > n:
+            break
+        out.append(data[i + 8: i + 8 + size])
+        i += 8 + size
+    return out
+
+
+def _load_opus():  # noqa: ANN202
+    import ctypes
+    import ctypes.util
+
+    lib = ctypes.CDLL(ctypes.util.find_library("opus") or "libopus.so.0")
+    lib.opus_decoder_create.restype = ctypes.c_void_p
+    lib.opus_decoder_create.argtypes = [ctypes.c_int32, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    lib.opus_decode.restype = ctypes.c_int
+    lib.opus_decode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_int16), ctypes.c_int, ctypes.c_int]
+    lib.opus_decoder_destroy.argtypes = [ctypes.c_void_p]
+    return lib
+
+
+def decode_packets(packets: list[bytes]) -> bytes:
+    """Пакеты Opus → PCM s16le 16 кГц моно (libopus через ctypes)."""
+    import ctypes
+
+    global _opus
+    if _opus is None:
+        _opus = _load_opus()
+    err = ctypes.c_int(0)
+    dec = _opus.opus_decoder_create(RATE, 1, ctypes.byref(err))
+    if not dec or err.value != 0:
+        raise DecodeError(f"opus_decoder_create: {err.value}")
+    try:
+        pcm = bytearray()
+        buf = (ctypes.c_int16 * 960)()   # до 60 мс на пакет
+        for packet in packets:
+            got = _opus.opus_decode(dec, packet or None, len(packet), buf, 960, 0)
+            if got < 0:
+                continue   # битый пакет — пропускаем, остальные декодируются
+            pcm += bytes(memoryview(buf).cast("B")[: got * 2])
+        return bytes(pcm)
+    finally:
+        _opus.opus_decoder_destroy(dec)
+
+
 async def opus_to_pcm(data: bytes) -> bytes:
-    """Файл записи часов (Opus) → PCM s16le 16 кГц моно."""
-    return await _ffmpeg(["-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(RATE), "pipe:1"], data)
+    """Запись часов → PCM s16le 16 кГц моно. Ogg Opus (на случай другой прошивки) — через ffmpeg, «сырые» пакеты — libopus."""
+    if data[:4] == b"OggS":
+        return await _ffmpeg(["-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(RATE), "pipe:1"], data)
+    packets = parse_frames(data)
+    if not packets:
+        raise DecodeError("в записи нет пакетов Opus")
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, decode_packets, packets)
+    except (OSError, AttributeError) as exc:   # нет libopus
+        raise DecodeError(f"libopus: {exc}")
 
 
 async def pcm_to_mp3(pcm: bytes, rate: int = 24000) -> bytes:
@@ -611,13 +676,28 @@ async def audio(uid: int, data: dict[str, Any]) -> dict[str, Any]:
             pcm = b""
             if w.decode_fail <= 3 or w.decode_fail % 100 == 0:
                 logger.warning("watch: кусок не раскодировался (%s байт, начало %s): %s", len(raw), raw[:16].hex(), exc)
+                _dump_raw(uid, raw, w.decode_fail)
         if pcm:
             await w.feed(pcm, data)
     await w.tick()
     return w.reply()
 
 
-async def poll(uid: int, sid: str, wait: float = 20.0) -> dict[str, Any]:
+def _dump_raw(uid: int, raw: bytes, n: int) -> None:
+    """Первые не раскодированные куски — в файл: разобрать формат вручную."""
+    if n > 3:
+        return
+    try:
+        (_dir() / f"raw_{uid}_{n}.bin").write_bytes(raw)
+    except OSError:
+        pass
+
+
+# Zepp обрывает запрос к серверу примерно через 10 с (в логах nginx 499) — держим опрос заметно короче
+POLL_WAIT_S = 8.0
+
+
+async def poll(uid: int, sid: str, wait: float = POLL_WAIT_S) -> dict[str, Any]:
     w = get(uid)
     w.touch({"sid": sid})
     await w.tick()

@@ -272,3 +272,33 @@ def test_new_watch_screen_resets_old_events():
     w.push({"t": "say", "text": "старое"})
     w.touch({"sid": "s2"})
     assert w.take() == []
+
+
+# ------------------------------------------------------------------ запись часов: «сырые» пакеты Opus (opus_demo)
+def _framed(*packets: bytes) -> bytes:
+    return b"".join(len(p).to_bytes(4, "big") + (0x00DD8220).to_bytes(4, "big") + p for p in packets)
+
+
+def test_parse_frames_reads_opus_demo_records():
+    packets = [bytes([0x48, 0x00, 0xB3, 0xAF]) + bytes(10), bytes([0x48, 0x80, 0x0A]) + bytes(25), b""]
+    assert watch.parse_frames(_framed(*packets)) == packets
+
+
+def test_parse_frames_keeps_whole_packets_of_a_cut_record():
+    whole = _framed(bytes([0x48]) + bytes(20), bytes([0x48]) + bytes(30))
+    assert len(watch.parse_frames(whole[:-5])) == 1          # хвост оборван — берём целый первый пакет
+    assert watch.parse_frames(b"\x00\x00\x10\x00" + bytes(40)) == []   # длина > 1275 — это не наш формат
+
+
+def test_audio_decodes_raw_opus_chunks(monkeypatch):
+    got = {}
+
+    def fake_decode(packets):
+        got["n"] = len(packets)
+        return b"\x01\x00" * 320 * len(packets)
+
+    monkeypatch.setattr(watch, "decode_packets", fake_decode)
+    pcm = asyncio.run(watch.opus_to_pcm(_framed(*[bytes([0x48]) + bytes(20)] * 5)))
+    assert got["n"] == 5 and len(pcm) == 5 * 640
+    with pytest.raises(watch.DecodeError):
+        asyncio.run(watch.opus_to_pcm(b"garbage-not-opus"))
