@@ -20,7 +20,7 @@ import re
 import time
 from typing import Any
 
-from . import caller, live_call, undo
+from . import caller, live_call, undo, wake_dialog
 from .context import ai
 from .live_call import LiveResult, _jsonable, _Session
 from .persona import Persona
@@ -67,6 +67,7 @@ _TITLES = {"ru": ("сэр", "сэр", "шеф"), "uz": ("ser", "ser", "shef")}
 WAKE_REASK = {"ru": ("Не расслышала, {t}. Вы проснулись?", "{t}, вы меня слышите? Скажите пару слов, пожалуйста."),
               "uz": ("Eshitolmadim, {t}. Uyg'ondingizmi?", "{t}, meni eshityapsizmi? Bir-ikki so'z ayting.")}
 REASK_GAP_S = 10.0
+GRADE_TIMEOUT_S = 6.0          # подъём: оценка его ответа моделью — дольше не ждём (тогда правильный ответ звучит, ошибкой не считается)
 
 
 def quick_kind(text: str) -> str | None:
@@ -138,6 +139,8 @@ class CheapSession(_Session):
         self.hang_after_turn = False
         self._say_task: asyncio.Task | None = None
         self._reask_at = -1e9
+        self.flow: wake_dialog.WakeFlow | None = None   # подъём: ход разговора ведёт программа (bot/wake_dialog.py), модель только оценивает ответ
+        self.user_speaking = False     # он говорит прямо сейчас (фраза ещё не закончилась) — тишину не считаем
         self.result.model = f"{ai.agent_model} (экономно)"
 
     # --- слух
@@ -159,6 +162,7 @@ class CheapSession(_Session):
             if self.out:
                 self._voice_at = loop.time()
             started, phrase, _noise = seg.feed(chunk)
+            self.user_speaking = bool(seg.active)
             if started:
                 # 29.09: начал говорить, пока JES думает, — может быть повтор того же вопроса («она не слышала»): сначала
                 # расшифровка, и повтор второй раз не отвечаем
@@ -261,6 +265,9 @@ class CheapSession(_Session):
         from .phone_live import pcm_to_wav
 
         wav = pcm_to_wav(pcm, RATE)
+        if self.flow is not None:
+            await self._on_phrase_wake(pcm, wav, overlapped=overlapped)
+            return
         if overlapped:
             # началась поверх ответа JES (или сразу после): может быть эхо из трубки — сначала расшифровка, и эхо до модели
             # не доходит (иначе «Записала сорок тысяч» эхом записалось бы второй раз)
@@ -306,6 +313,114 @@ class CheapSession(_Session):
             self.hang_after_turn = True
         await self.say(answer)
         return True
+
+    # --- подъём: ход разговора ведёт программа (bot/wake_dialog.py), модель только оценивает ответ на вопрос
+    async def _on_phrase_wake(self, pcm: bytes, wav: bytes, *, overlapped: bool) -> None:
+        """Его фраза на подъёме: «алло» — сразу; остальное — расшифровка → разбор программой → (ответ на вопрос) оценка моделью →
+        готовая фраза. Шум и эхо — молчим: тишиной занимается nudger (вопрос, а не «вы меня слышите?»)."""
+        self.thinking = True
+        try:
+            if not overlapped and len(pcm) / 2 / RATE <= QUICK_MAX_S and await self._quick_wake(wav):
+                return
+            heard = await self._transcribe(wav)
+            if not heard or self._is_echo(heard):
+                logger.info("wake flow: шум или эхо — молчу «%s»", heard[:60])
+                return
+            if overlapped and is_repeat(heard, self.last_heard):
+                logger.info("wake flow: повторил то же, пока я думала, — второй раз не отвечаю «%s»", heard[:60])
+                self.result.transcript.append("он (повтор): " + heard)
+                return
+            self.result.transcript.append("он: " + heard)
+            self.last_heard = heard
+            await self._flow_turn(heard)
+        finally:
+            self.thinking = False
+
+    async def _quick_wake(self, wav: bytes) -> bool:
+        """Подъём: «алло / вы меня слышите?» — свой распознаватель (~0.1 с): подтверждаем и сразу возвращаем к вопросу. Это не считается
+        нашим «слышите ли» (то — максимум один раз за звонок)."""
+        from . import wakeword
+
+        try:
+            heard = await wakeword.check(wav)
+        except Exception:
+            logger.warning("cheap voice: распознаватель", exc_info=True)
+            return False
+        said = (heard or {}).get("text") or ""
+        if quick_kind(said) != "hear" or self.flow is None:
+            return False
+        self.result.transcript.append("он: " + said)
+        self.last_heard = said
+        await self.say(self.flow.hear_reply())
+        return True
+
+    def _is_echo(self, heard: str) -> bool:
+        """Расшифровка — его же слова JES, вернувшиеся эхом. В подъёме строже: короткий ответ на вопрос («Нух построил ковчег»)
+        повторяет слова вопроса, но эхом не является."""
+        if self.flow is None:
+            return is_echo(heard, self.last_said)
+        h, s = _words(heard), _words(self.last_said)
+        return len(h) >= 3 and len(h & s) / len(h) >= 0.85
+
+    async def _grade(self, prompt: str, allowed: tuple[str, ...]) -> str:
+        """Оценка его ответа моделью: узкий JSON-вызов (вердикт одним словом). Не ответила за GRADE_TIMEOUT_S — пусто."""
+        try:
+            data = await asyncio.wait_for(ai.generate_json(prompt, thinking_budget=0, max_tokens=40, temperature=0.0), timeout=GRADE_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning("wake flow: оценка ответа не удалась: %s", str(exc)[:160])
+            return ""
+        return wake_dialog.parse_verdict(data, allowed)
+
+    async def _flow_turn(self, heard: str) -> None:
+        flow = self.flow
+        assert flow is not None
+        started, stage = time.monotonic(), flow.stage
+        move = flow.route(heard)
+        verdict = ""
+        if move.grade == "quiz":
+            question = flow.current()
+            assert question is not None
+            verdict = await self._grade(wake_dialog.quiz_prompt(question, heard), wake_dialog.QUIZ_VERDICTS)
+            move = flow.answer(verdict)
+        elif move.grade == "final":
+            verdict = await self._grade(wake_dialog.final_prompt(heard), wake_dialog.FINAL_VERDICTS)
+            move = flow.final_answer(verdict, heard)
+        if move.confirm:
+            self.result.confirmed = True
+            self.hang_after_turn = True     # трубку — когда договорит прощание
+        if move.snooze:
+            self.result.snooze_minutes = move.snooze
+            self.hang_after_turn = True
+        logger.info("wake flow: %.1f с, этап %s→%s (вопрос %s/%s), оценка «%s»%s: «%s» → «%s»", time.monotonic() - started, stage, flow.stage,
+                    flow.idx, len(flow.quiz), verdict or "-", ", подтвердил" if move.confirm else (f", отложил на {move.snooze}" if move.snooze else ""),
+                    heard[:60], move.say[:80])
+        if move.say:
+            await self.say(move.say)
+
+    async def nudge_once(self) -> None:
+        """Тишина дольше положенного: следующая реплика по лестнице подъёма (вопрос → повтор → мотивация → …)."""
+        flow = self.flow
+        if flow is None:
+            return
+        text = flow.nudge()
+        logger.info("wake flow: тишина, этап %s, пауза №%s → «%s»", flow.stage, flow.nudges, text[:80])
+        await self.say(text)
+
+    async def _wake_nudger(self) -> None:
+        """Будильник: он молчит (мог снова заснуть) — реплика по программе подъёма, а не «вы меня слышите?» каждые 8 секунд."""
+        loop = asyncio.get_running_loop()
+        self.last_activity = loop.time()
+        while not self.stop.is_set():
+            await asyncio.sleep(1.0)
+            if self.out or self.speaking or self.thinking or self.user_speaking:
+                self.last_activity = loop.time()
+                continue
+            if self.flow is None or self.hang_after_turn or self.result.confirmed or not self.queue.empty():
+                continue
+            if loop.time() - self.last_activity < self.flow.silence_limit():
+                continue
+            self.last_activity = loop.time()
+            await self.nudge_once()
 
     def phrase(self, kind: str, *, uz: bool = False) -> str:
         lang = "uz" if uz and self.persona.mirror else (self.persona.lang if self.persona.lang in PHRASES else "ru")
@@ -407,6 +522,8 @@ class CheapSession(_Session):
 
     async def nudger(self) -> None:
         """Будильник: замолчал (мог снова заснуть) — позвать; уже разговаривали — ждём дольше."""
+        if self.flow is not None:
+            return await self._wake_nudger()
         loop = asyncio.get_running_loop()
         self.last_activity = loop.time()
         while not self.stop.is_set():
@@ -458,6 +575,30 @@ def _prewarm_soon(persona: Persona) -> None:
     task.add_done_callback(_prewarming.discard)
 
 
+def wake_flow(profile: Profile, persona: Persona, wake: dict[str, Any]) -> wake_dialog.WakeFlow:
+    """Ход подъёма для этого звонка: сегодняшние вопросы (сколько успеем до такбира), с какого продолжить, как называть его.
+    Верно/неверно и пройденное пишутся в islam_quiz — ошибки вернутся в следующие дни, повторный звонок продолжит с того же места."""
+    from . import islam_quiz
+
+    uid, day = profile.telegram_id, wake.get("day")
+    test = bool(wake.get("test"))     # «Проверить будильник»: звонок как утром, но ничего не запоминаем
+    quiz = list(wake.get("quiz_list") or [])
+
+    def on_result(qid: str, ok: bool) -> None:
+        islam_quiz.note_result(uid, qid, ok)
+
+    def on_progress(done: int) -> None:
+        if day is not None:
+            islam_quiz.set_progress(uid, day, done)
+
+    return wake_dialog.build(
+        lang=persona.lang, title=live_call.wake_title(persona, profile.first_name), day_quiz=quiz, tz=profile.tz,
+        minutes_left=wake.get("minutes_left"), takbir_at=wake.get("takbir_at"), attempt=int(wake.get("attempt") or 1),
+        done=islam_quiz.progress(uid, day) if day is not None and not test else 0,
+        review_ids=frozenset(q.id for q in quiz if islam_quiz.is_review(uid, q)),
+        on_result=None if test else on_result, on_progress=None if test else on_progress)
+
+
 async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mode: str, topic: str = "",
                    wake: dict[str, Any] | None = None) -> LiveResult:
     """Звонок уже набирается (dial): готовим приветствие (запись с диска), взяли трубку — разговор экономным голосом."""
@@ -469,8 +610,10 @@ async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mo
     if mode == "assistant":
         system += billing.voice_note()
     decls = live_call.tool_declarations(mode, full=True)
-    sess = CheapSession(profile, persona, mode=mode, system=system, decls=decls)
-    if mode != "wake":
+    sess = CheapSession(profile, persona, mode=mode, system=system, decls=[] if mode == "wake" else decls)
+    if mode == "wake":
+        sess.flow = wake_flow(profile, persona, wake or {})   # подъём без болтливой модели: ход ведёт программа
+    else:
         _prewarm_soon(persona)
     if mode == "wake":
         clip = asyncio.create_task(live_call.wake_clip(profile, persona), name="cheap-clip")
@@ -499,6 +642,11 @@ async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mo
             greeting = None
     await _converse(sess, call, greeting, topic)
     logger.info("call %s: итог (экономно) — реплик %s, действия %s", sess.uid, len(sess.result.transcript), sess.result.actions)
+    if sess.flow is not None:
+        f = sess.flow
+        logger.info("wake flow: итог — этап %s, вопросов пройдено %s/%s, пауз подряд %s (всего %s), «слышите ли» %s, подтвердил %s, отложил %s",
+                    f.stage, f.idx, len(f.quiz), f.nudges, f.total_nudges, "было" if f.hear_used else "не было", sess.result.confirmed,
+                    sess.result.snooze_minutes or "нет")
     return sess.result
 
 
@@ -544,6 +692,8 @@ async def _converse(sess: CheapSession, call: dict[str, Any], greeting: tuple[st
             # модель знает, что уже поздоровалась, — дальше слушает его
             sess.contents += [{"role": "user", "parts": [{"text": f"{_stamp(sess.profile)} [Звонок соединён.]"}]},
                               {"role": "model", "parts": [{"text": text}]}]
+        elif sess.flow is not None:
+            await sess.say(sess.flow.greeting())   # записанного приветствия нет — то же самое сами, дальше по программе подъёма
         else:
             await sess.on_text("[Звонок соединён. Начинай.]" if not topic else f"[Звонок соединён. Он просил поговорить о: {topic}]")
         ended: asyncio.Event = call["ended"]

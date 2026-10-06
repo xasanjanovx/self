@@ -206,22 +206,29 @@ def for_day(uid: int, day: date) -> Q:
         asked = []
         fresh = list(BANK[len(BANK) // 2:])
     pick = fresh[0]
-    _save(uid, {"asked": asked + [pick.id], "day": day.isoformat(), "today": pick.id})
+    _save(uid, {**state, "asked": asked + [pick.id], "day": day.isoformat(), "today": pick.id})
     return pick
 
 
 QUESTIONS_PER_DAY = 3   # 02.10 его выбор: утром в звонке три вопроса, а не один
+MISSED_KEEP = 5         # столько «ошибок» помним, чтобы вернуть их в следующие дни
 
 
 def for_day_set(uid: int, day: date, n: int = QUESTIONS_PER_DAY) -> list[Q]:
-    """n вопросов на этот день по нарастающей сложности: весь день одни и те же (повторные звонки), завтра — следующие n."""
+    """n вопросов на этот день по нарастающей сложности: весь день одни и те же (повторные звонки), завтра — следующие n.
+    06.10: вопрос, на который он вчера ошибся или не знал (note_result), возвращается первым — разминкой на повторение."""
     state = _load(uid)
     ids = [x for x in state.get("today_ids") or [] if x in _BY_ID]
     if state.get("day") == day.isoformat() and len(ids) == n:
         return [_BY_ID[i] for i in ids]
     asked = [x for x in state.get("asked") or [] if x in _BY_ID]
+    missed = [x for x in state.get("missed") or [] if x in _BY_ID]
     picks: list[Q] = []
-    for _ in range(n):
+    review = ""
+    if missed and n >= 2:
+        review = missed[0]   # остаётся в списке, пока он не ответит верно (note_result)
+        picks.append(_BY_ID[review])
+    while len(picks) < n:
         taken = {q.id for q in picks}
         fresh = [q for q in BANK if q.id not in asked and q.id not in taken]
         if not fresh:
@@ -229,8 +236,39 @@ def for_day_set(uid: int, day: date, n: int = QUESTIONS_PER_DAY) -> list[Q]:
             asked = []
             fresh = [q for q in BANK[len(BANK) // 2:] if q.id not in taken]
         picks.append(fresh[0])
-    _save(uid, {"asked": asked + [q.id for q in picks], "day": day.isoformat(), "today": picks[0].id, "today_ids": [q.id for q in picks]})
+    new_ids = [q.id for q in picks if q.id != review]
+    _save(uid, {**state, "asked": asked + new_ids, "day": day.isoformat(), "today": picks[0].id, "today_ids": [q.id for q in picks],
+                "review": review, "missed": missed})
     return picks
+
+
+def is_review(uid: int, q: Q) -> bool:
+    """Этот вопрос — повторение вчерашней ошибки (а не новый)."""
+    return _load(uid).get("review") == q.id
+
+
+def progress(uid: int, day: date) -> int:
+    """Сколько вопросов этого дня он уже прошёл в предыдущих звонках (повторный звонок продолжает, а не начинает с первого)."""
+    state = _load(uid)
+    return int(state.get("done") or 0) if state.get("done_day") == day.isoformat() else 0
+
+
+def set_progress(uid: int, day: date, done: int) -> None:
+    state = _load(uid)
+    if state.get("done_day") == day.isoformat() and int(state.get("done") or 0) >= done:
+        return
+    _save(uid, {**state, "done_day": day.isoformat(), "done": int(done)})
+
+
+def note_result(uid: int, qid: str, ok: bool) -> None:
+    """Ответил верно — вопрос снимается с повторения; ошибся / не знал — вернётся в один из следующих дней."""
+    if qid not in _BY_ID:
+        return
+    state = _load(uid)
+    missed = [x for x in state.get("missed") or [] if x in _BY_ID and x != qid]
+    if not ok:
+        missed.append(qid)
+    _save(uid, {**state, "missed": missed[-MISSED_KEEP:]})
 
 
 def _facts(q: Q) -> list[str]:
@@ -240,6 +278,11 @@ def _facts(q: Q) -> list[str]:
     if q.ref:
         lines.append(f"Источник: {q.ref}")
     return lines
+
+
+def facts(q: Q) -> list[str]:
+    """Правильный ответ, точный арабский и источник — для подсказки модели в момент, когда он отвечает на этот вопрос."""
+    return _facts(q)
 
 
 def prompt_block(q: Q) -> str:
@@ -284,4 +327,5 @@ def card_set(qs: list[Q], lang: str = "ru") -> str:
     return "\n".join(out)
 
 
-__all__ = ["Q", "BANK", "QUESTIONS_PER_DAY", "for_day", "for_day_set", "prompt_block", "prompt_block_set", "card", "card_set"]
+__all__ = ["Q", "BANK", "QUESTIONS_PER_DAY", "for_day", "for_day_set", "is_review", "progress", "set_progress", "note_result",
+           "facts", "prompt_block", "prompt_block_set", "card", "card_set"]

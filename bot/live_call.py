@@ -913,10 +913,15 @@ _WAKE_TITLES = {"ru": {"shef": "шеф", "ser": "сэр", "boss": "босс"}, "
 _WAKE_HELLO = {"ru": "Доброе утро, {t}! Проснулись?", "uz": "Xayrli tong, {t}! Uyg'ondingizmi?", "en": "Good morning, {t}! Are you up?"}
 
 
+def wake_title(persona: Persona, first_name: str) -> str:
+    """Как называть его на подъёме: «шеф» / «сэр» / «босс» (mix — «сэр»), без обращения — по имени."""
+    lang = persona.lang if persona.lang in _WAKE_HELLO else "ru"
+    return _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "ser") or first_name or _WAKE_TITLES[lang]["ser"]
+
+
 def wake_clip_text(persona: Persona, first_name: str) -> str:
     lang = persona.lang if persona.lang in _WAKE_HELLO else "ru"
-    title = _WAKE_TITLES[lang].get(persona.honorific if persona.honorific != "mix" else "ser") or first_name or _WAKE_TITLES[lang]["ser"]
-    return _WAKE_HELLO[lang].format(t=title)
+    return _WAKE_HELLO[lang].format(t=wake_title(persona, first_name))
 
 
 async def wake_clip(profile: Profile, persona: Persona) -> tuple[str, bytes] | None:

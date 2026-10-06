@@ -21,6 +21,7 @@ from . import prayer
 from . import services
 from . import voice
 from . import wake as wake_mod
+from . import wake_dialog
 from .context import ai
 from .profile import Profile
 
@@ -191,9 +192,11 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     from . import islam_quiz
 
     quiz = islam_quiz.for_day_set(profile.telegram_id, plan.day)  # 02.10: три вопроса утром, «встал?» — голосом в конце
+    asked = quiz[:wake_dialog.questions_for(minutes_left, len(quiz))]  # 06.10: мало времени до такбира — меньше вопросов
+    # ход разговора ведёт bot/wake_dialog.py (вопросы по одному, тишина — вопрос/повтор/мотивация, «слышите ли» не чаще раза за звонок)
     live = await live_call.run(profile, mode="wake", ring_seconds=max(20, s.retry_seconds), pregreet=attempt <= PREGREET_ATTEMPTS,
-                               wake={"takbir": plan.takbir, "minutes_left": minutes_left,
-                                     "quiz": islam_quiz.prompt_block_set(quiz), "today": await _today_line(profile)})
+                               wake={"takbir": plan.takbir, "minutes_left": minutes_left, "takbir_at": plan.takbir_at, "attempt": attempt,
+                                     "day": plan.day, "quiz_list": quiz, "today": await _today_line(profile)})
     state = cd.DialogState(lang=s.voice_lang, name=profile.first_name or "", takbir=plan.takbir,
                            minutes_left=minutes_left, task_text="")
     state.confirmed = live.confirmed
@@ -201,7 +204,7 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     if live.snooze_minutes:
         await snooze(profile, live.snooze_minutes)
     if live.model or live.dialed:  # звонок состоялся (взяли или нет) — итог оттуда; запасной путь — только при сбое Gemini
-        return {"answered": live.answered, "error": live.error, "state": state, "quiz": quiz}
+        return {"answered": live.answered, "error": live.error, "state": state, "quiz": asked}
     # Gemini Live недоступен — запасной путь: старый пошаговый разговор
     logger.warning("wake: live недоступен (%s), пошаговый режим", live.error)
     greeting_pcm = await _say(cd.greeting(state))
@@ -271,6 +274,9 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             else:
                 call_error = "tts unavailable"
 
+    if uid in _active:
+        # пауза до следующего звонка — от КОНЦА этого, а не от начала (06.10: после 58-секундного разговора перезвонили через 2 секунды — «занято»)
+        _active[uid]["last"] = datetime.now(timezone.utc)
     if uid not in _active and not confirmed:
         # пока звонил, он написал «проснулся» (mark_awake) — никаких «Пора вставать» и повторов
         logger.info("wake %s: проснулся во время звонка — попытка закрыта", uid)

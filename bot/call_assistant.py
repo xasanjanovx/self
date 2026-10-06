@@ -323,7 +323,7 @@ def wake_test_in_background(profile: Profile) -> asyncio.Task | None:
     async def runner() -> None:
         from datetime import datetime, timedelta, timezone
 
-        from . import live_call, wake_runner
+        from . import islam_quiz, live_call, wake_runner
 
         _running.add(uid)
         try:
@@ -331,8 +331,11 @@ def wake_test_in_background(profile: Profile) -> asyncio.Task | None:
             if not plan.takbir_at or plan.takbir_at < datetime.now(timezone.utc):
                 _, plan = await wake_runner.plan_for(profile, profile.today + timedelta(days=1))
             minutes_left = int((plan.takbir_at - datetime.now(timezone.utc)).total_seconds() // 60) if plan.takbir_at else None
+            # ровно как утром — с вопросами дня; "test": пройденное и ошибки в islam_quiz не пишем (утром вопросы начнутся с первого)
             result = await live_call.run(profile, mode="wake", ring_seconds=45,
-                                         wake={"takbir": plan.takbir, "minutes_left": minutes_left})
+                                         wake={"takbir": plan.takbir, "minutes_left": minutes_left, "takbir_at": plan.takbir_at,
+                                               "day": plan.day, "quiz_list": islam_quiz.for_day_set(uid, plan.day), "attempt": 1,
+                                               "test": True})
             if not result.answered:
                 await _notify_failure(profile, str(result.error or ""))
                 return
