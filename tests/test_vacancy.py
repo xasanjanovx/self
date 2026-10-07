@@ -251,3 +251,17 @@ def test_prompt_forbids_extra_elements_and_literal_plus_signs():
     assert "ONLY THE LISTED ELEMENTS" in prompt and "badge" in prompt.lower()
     assert "Round accent-coloured badge" not in prompt     # элемента-бейджа в списке текстов нет
     assert "icon + " not in prompt and "followed by the text" in prompt
+
+
+# ------------------------------------------------------------------ правка поста аккаунтом владельца (премиум-эмодзи)
+def test_telethon_parses_the_bot_html_into_premium_emoji_entities():
+    """tg_user.edit_post отдаёт Telethon тот же HTML, что и боту: премиум-эмодзи, жирный, цитата и ссылка должны стать entities."""
+    from telethon.extensions import html as tl_html
+    from telethon.tl.types import MessageEntityBlockquote, MessageEntityCustomEmoji, MessageEntityTextUrl
+
+    post, _ = __import__("bot.vacancy", fromlist=["fit_post"]).fit_post(finalize(_data(), ""))
+    text, entities = tl_html.parse(post)
+    custom = [e for e in entities if isinstance(e, MessageEntityCustomEmoji)]
+    assert len(custom) >= 6 and 5389061359403039918 in {e.document_id for e in custom}
+    assert any(isinstance(e, MessageEntityBlockquote) for e in entities) and any(isinstance(e, MessageEntityTextUrl) for e in entities)
+    assert "<" not in text and "ISHDASIZ" in text

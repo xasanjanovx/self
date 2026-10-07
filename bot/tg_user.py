@@ -109,6 +109,27 @@ async def client() -> Any | None:
         return _client
 
 
+async def edit_post(channel: str, message_id: int, html: str) -> dict[str, Any]:
+    """Править подпись/текст поста в канале от имени владельца (07.10: бот не может поставить премиум-эмодзи в канал — Telegram их там
+    отбрасывает, а Premium-аккаунт владельца может). html — как у бота (<tg-emoji emoji-id>, <b>, <blockquote>, <a href>); медиа поста
+    не трогаем. → {"ok": True} или {"ok": False, "error": not_connected | not_premium | <ошибка>}."""
+    c = await client()
+    if c is None:
+        return {"ok": False, "error": "not_connected"}
+    if not getattr(_me, "premium", False):
+        return {"ok": False, "error": "not_premium"}
+    try:
+        entity = await c.get_entity(channel)
+        await c.edit_message(entity, int(message_id), html, parse_mode="html", link_preview=False)
+    except Exception as exc:
+        name = type(exc).__name__
+        if name == "MessageNotModifiedError":
+            return {"ok": True}
+        logger.warning("tg_user: правка поста %s/%s не вышла: %s: %s", channel, message_id, name, exc)
+        return {"ok": False, "error": f"{name}: {str(exc)[:100]}"}
+    return {"ok": True}
+
+
 async def status() -> dict[str, Any]:
     if _creds() is None:
         return {"connected": False, "reason": "no_api_credentials"}
@@ -317,4 +338,5 @@ async def unread(limit_chats: int = 8, per_chat: int = 3) -> list[dict[str, Any]
     return out
 
 
-__all__ = ["configured", "status", "login_start", "login_finish", "logout", "stop", "dialogs", "find_chat", "send", "recent", "unread", "public"]
+__all__ = ["configured", "status", "login_start", "login_finish", "logout", "stop", "dialogs", "find_chat", "send", "recent", "unread", "public",
+           "edit_post"]

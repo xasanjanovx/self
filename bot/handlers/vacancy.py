@@ -25,7 +25,7 @@ from ..keyboards import pbtn as _btn, vacancy_panel_keyboard, vacancy_result_key
 from ..profile import Profile, h
 from ..states import BotStates
 from .common import answer_now, get_profile, message_text, remember_panel, safe_delete, safe_edit, show_panel, show_progress, transcribe_audio
-from .vacancy_feed import channel_markup
+from .vacancy_feed import channel_markup, upgrade_premium
 
 router = Router(name="vacancy")
 logger = logging.getLogger(__name__)
@@ -350,18 +350,20 @@ async def _publish(callback: CallbackQuery, state: FSMContext, *, paid: bool) ->
         return
     feed.mark_own(ids)
     feed.note_feed_post()
+    premium_note = await upgrade_premium(callback.bot, ids, post, markup)           # премиум-эмодзи ставит аккаунт владельца
+    warn = f"\n⚠️ {premium_note}" if premium_note else ""
     link = f"https://t.me/{str(channel).lstrip('@')}/{post_id}" if str(channel).startswith("@") else ""
     from .. import screen as screen_mod
 
     if not paid:
         await answer_now(callback, "Опубликовано в канал ✅")
-        await screen_mod.send_note(callback.bot, callback.from_user.id, "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+        await screen_mod.send_note(callback.bot, callback.from_user.id, "✅ Опубликовано в канал" + (f": {link}" if link else "") + warn,
+                                   ttl=60 if warn else 20)
         return
-    # заказ на размещение: пост должен постоять наверху — автоподбор до конца защиты молчит
+    # заказ на размещение: пост должен постоять наверху — новые карточки до конца защиты не шлём
     feed.note_manual_post(time.time(), post_id)
     until = datetime.fromtimestamp(time.time() + feed.hold_left(), feed.TZ)
     await answer_now(callback, "Опубликовано как платный ✅")
     await screen_mod.send_note(callback.bot, callback.from_user.id,
                                "✅ Платный пост опубликован" + (f": {link}" if link else "")
-                               + f"\n🛡 Лента под защитой до {until:%H:%M} ({feed.human_wait(feed.hold_left())}): "
-                                 "автоподбор ничего не публикует, пока твой пост наверху.", ttl=3 * 3600)
+                               + f"\n🛡 Защита до {until:%H:%M} ({feed.human_wait(feed.hold_left())})" + warn, ttl=3 * 3600)

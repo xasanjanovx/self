@@ -16,7 +16,7 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup
 
-from .. import access, image_gen
+from .. import access, image_gen, tg_user
 from .. import vacancy as vac
 from .. import vacancy_feed as feed
 from ..context import settings
@@ -353,6 +353,36 @@ async def _delete_card(bot: Bot, cand: dict[str, Any]) -> None:
     cand["card_ids"] = []
 
 
+PREMIUM_WARN = {
+    "not_connected": "Эмодзи обычные: Telegram не подключён в JES",
+    "not_premium": "Эмодзи обычные: у подключённого аккаунта нет Premium",
+}
+
+
+async def upgrade_premium(bot: Bot, ids: list[int], post_html: str, markup: InlineKeyboardMarkup | None) -> str:
+    """Бот сам не может поставить премиум-эмодзи в канал (Telegram их там отбрасывает), поэтому сразу после публикации пост правит
+    аккаунт владельца с Premium (tg_user): подпись заменяется той же, но с премиум-эмодзи. Кнопки под постом после правки на всякий случай
+    возвращаем (правка от пользователя может их снять). → "" если всё вышло, иначе короткое предупреждение для заметки."""
+    if len(ids) != 1 or not settings.vacancy_channel:
+        return ""                                  # пост ушёл двумя сообщениями (почти невозможно) — правим нечего
+    try:
+        res = await tg_user.edit_post(settings.vacancy_channel, ids[0], post_html)
+    except Exception as exc:
+        logger.warning("vacancy_feed: премиум-правка упала: %s", exc, exc_info=True)
+        return f"Премиум-эмодзи не поставились: {type(exc).__name__}"
+    if not res.get("ok"):
+        error = str(res.get("error") or "")
+        return PREMIUM_WARN.get(error) or f"Премиум-эмодзи не поставились: {error[:80]}"
+    if markup is not None:
+        try:
+            await bot.edit_message_reply_markup(chat_id=settings.vacancy_channel, message_id=ids[0], reply_markup=markup)
+        except Exception as exc:
+            if "not modified" not in str(exc).lower():
+                logger.warning("vacancy_feed: кнопки после правки не вернулись: %s", exc)
+                return "Премиум-эмодзи стоят, но кнопки под постом пропали"
+    return ""
+
+
 async def publish_candidate(bot: Bot, cand: dict[str, Any]) -> tuple[list[int], int]:
     """Опубликовать вакансию в канал: фото и текст одним сообщением. Без картинки не публикуем никогда.
     Свои сообщения записываем — чужими (ручными) их считать нельзя. → (id сообщений в канале, id поста).
@@ -361,11 +391,13 @@ async def publish_candidate(bot: Bot, cand: dict[str, Any]) -> tuple[list[int], 
     image: bytes | str | None = cand.get("file_id") or _read_image(cand["id"])
     if image is None:
         raise RuntimeError("нет картинки — сначала нарисуй её кнопкой «Другая картинка»")
-    ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, channel_markup(contact_url))
+    markup = channel_markup(contact_url)
+    ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, markup)
     feed.mark_own(ids)
     feed.note_feed_post()
     feed.mark_handled(cand, "published")
     feed.save()
+    cand["premium_note"] = await upgrade_premium(bot, ids, post, markup)       # → в заметке о публикации
     return ids, post_id
 
 
@@ -405,6 +437,8 @@ async def cb_publish(callback: CallbackQuery) -> None:
     await _delete_card(callback.bot, cand)
     link = _post_link(post_id)
     warn = f"\n⚠️ Платный пост наверху был ещё {feed.human_wait(left)} — эта вакансия встала выше него." if left > 0 else ""
+    if cand.get("premium_note"):
+        warn += f"\n⚠️ {cand['premium_note']}"
     await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else "") + warn, ttl=60 if warn else 20)
 
 
@@ -462,7 +496,8 @@ async def publish_due(bot: Bot) -> int:
         owner = owner_id()
         if owner is not None:
             link = _post_link(post_id)
-            await screen_mod.send_note(bot, owner, "⏰ Опубликовал отложенную вакансию" + (f": {link}" if link else ""), ttl=3600)
+            warn = f"\n⚠️ {cand['premium_note']}" if cand.get("premium_note") else ""
+            await screen_mod.send_note(bot, owner, "⏰ Опубликовал отложенную вакансию" + (f": {link}" if link else "") + warn, ttl=3600)
         return 1
     return 0
 

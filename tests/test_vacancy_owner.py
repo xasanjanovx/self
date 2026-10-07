@@ -12,7 +12,7 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import bot.context as ctx
-from bot import access, caller, image_gen, screen
+from bot import access, caller, image_gen, screen, tg_user
 from bot import vacancy_feed as feed
 from bot.ai import VacancyData
 from bot.handlers import channel as channel_h
@@ -31,6 +31,8 @@ class FakeBot:
         self.photos: list = []
         self.messages: list = []
         self.deleted: list = []
+        self.edited_markup: list = []
+        self.markup_error = None
         self._id = 500
 
     def _next(self):
@@ -49,6 +51,11 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
+
+    async def edit_message_reply_markup(self, chat_id=None, message_id=None, reply_markup=None):
+        self.edited_markup.append((chat_id, message_id, reply_markup))
+        if self.markup_error:
+            raise RuntimeError(self.markup_error)
 
 
 class FakeCb:
@@ -323,7 +330,7 @@ def test_publish_now_is_a_free_post_without_protection(monkeypatch):
     assert posted["chat"] == CHANNEL and posted["photo"].startswith("FID") and "Barista kerak" in posted["caption"]
     assert feed.is_own(posted["id"])                                                              # свой пост — не «чужой»
     assert feed.hold_left() == 0                                                                  # защиту не включали
-    assert not any("Лента под защитой" in text for text, _ in _env.notes)
+    assert not any("Защита до" in text for text, _ in _env.notes)
 
 
 def test_paid_button_publishes_and_starts_the_three_hour_protection(monkeypatch):
@@ -338,7 +345,33 @@ def test_paid_button_publishes_and_starts_the_three_hour_protection(monkeypatch)
     assert 2.99 * 3600 < left <= 3 * 3600 + 5                                                     # ≥ 3 часов наверху
     ok, why, _ = feed.publish_gate(respect_schedule=False)
     assert (ok, why) == (False, "hold")
-    assert any("Лента под защитой" in text for text, _ in _env.notes)
+    assert any("Защита до" in text for text, _ in _env.notes)
+
+
+def test_manual_publish_also_gets_the_premium_edit_and_warns_when_it_cannot(monkeypatch):
+    _patch_screen(monkeypatch)
+    calls: list = []
+
+    async def fake_edit(channel, message_id, html):
+        calls.append((channel, message_id))
+        return {"ok": True}
+
+    monkeypatch.setattr(tg_user, "edit_post", fake_edit)
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    asyncio.run(vac_h.cb_publish(FakeCb("vacancy:publish", bot), state))
+    posted = [p for p in bot.photos if p["chat"] == CHANNEL][0]
+    assert calls == [(CHANNEL, posted["id"])] and len(bot.edited_markup) == 1
+    assert not any("⚠️" in text for text, _ in _env.notes)
+
+    async def not_connected(channel, message_id, html):
+        return {"ok": False, "error": "not_connected"}
+
+    monkeypatch.setattr(tg_user, "edit_post", not_connected)
+    _env.notes.clear()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    asyncio.run(vac_h.cb_publish_paid(FakeCb("vacancy:paid", bot), state))
+    assert any("Telegram не подключён в JES" in text and "Защита до" in text for text, _ in _env.notes)
 
 
 def test_channel_post_has_two_blue_buttons_contact_and_ad_request(monkeypatch):

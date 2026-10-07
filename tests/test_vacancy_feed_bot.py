@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Bot, Dispatcher
 
-from bot import access, caller, image_gen, screen
+from bot import access, caller, image_gen, screen, tg_user
 from bot import vacancy_feed as feed
 from bot.ai import VacancyData
 from bot.handlers import vacancy_feed as ui
@@ -23,6 +23,8 @@ class FakeBot:
         self.photos: list = []
         self.messages: list = []
         self.deleted: list = []
+        self.edited_markup: list = []
+        self.markup_error = None
         self._id = 100
 
     def _next(self) -> int:
@@ -41,6 +43,11 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
+
+    async def edit_message_reply_markup(self, chat_id=None, message_id=None, reply_markup=None):
+        self.edited_markup.append((chat_id, message_id, reply_markup))
+        if self.markup_error:
+            raise RuntimeError(self.markup_error)
 
 
 class FakeCb:
@@ -265,6 +272,72 @@ def test_new_picture_at_most_twice():
     third = FakeCb("vf:img:c1", bot)
     asyncio.run(ui.cb_new_image(third))
     assert len(bot.photos) == 3 and third.answers[-1][1] is True
+
+
+def _premium_edit(monkeypatch, result=None, boom=None):
+    """Подмена правки поста от аккаунта владельца: записываем вызовы."""
+    calls: list = []
+
+    async def fake_edit(channel, message_id, html):
+        calls.append((channel, message_id, html))
+        if boom:
+            raise boom
+        return result if result is not None else {"ok": True}
+
+    monkeypatch.setattr(tg_user, "edit_post", fake_edit)
+    return calls
+
+
+def test_after_publishing_his_premium_account_edits_the_post_and_buttons_are_restored(monkeypatch):
+    """Бот не может поставить премиум-эмодзи в канал — сразу после публикации пост правит его Premium-аккаунт."""
+    calls = _premium_edit(monkeypatch)
+    bot, cand = FakeBot(), _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot)))
+    posted = [p for p in bot.photos if p["chat"] == CHANNEL][0]
+    assert calls == [(CHANNEL, posted["id"], posted["caption"])]                              # правит ту же подпись, что опубликовал бот
+    assert 'emoji-id="5389061359403039918"' in calls[0][2]                                     # с тегами премиум-эмодзи
+    assert [(c, m) for c, m, _ in bot.edited_markup] == [(CHANNEL, posted["id"])]              # кнопки возвращены после правки
+    assert bot.edited_markup[0][2] is not None
+    assert not any("⚠️" in n for n in ui._notes)                                               # всё вышло — без предупреждений
+
+
+def test_premium_edit_warnings_are_short_and_do_not_break_publishing(monkeypatch):
+    cases = [
+        ({"ok": False, "error": "not_connected"}, None, "Telegram не подключён в JES"),
+        ({"ok": False, "error": "not_premium"}, None, "нет Premium"),
+        ({"ok": False, "error": "ChatAdminRequiredError: no rights"}, None, "не поставились"),
+        (None, RuntimeError("boom"), "RuntimeError"),
+    ]
+    for i, (result, boom, expected) in enumerate(cases):
+        ui._notes.clear()
+        _premium_edit(monkeypatch, result, boom)
+        bot, cand = FakeBot(), _cand(f"w{i}", headline=f"Vakansiya {i} kerak")
+        asyncio.run(ui.send_card(bot, OWNER, cand))
+        asyncio.run(ui.cb_publish(FakeCb(f"vf:pub:w{i}", bot)))
+        assert cand["status"] == "published" and [p["chat"] for p in bot.photos][-1] == CHANNEL         # пост всё равно вышел
+        assert any(expected in n for n in ui._notes), (expected, ui._notes)
+        assert bot.edited_markup == []                                                         # раз правки нет — кнопки не трогаем
+
+
+def test_buttons_after_the_edit_unchanged_is_fine_but_a_real_failure_is_reported(monkeypatch):
+    _premium_edit(monkeypatch)
+    bot, cand = FakeBot(), _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    bot.markup_error = "Bad Request: message is not modified"                                  # правка сохранила кнопки — это нормально
+    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot)))
+    assert not any("⚠️" in n for n in ui._notes)
+    ui._notes.clear()
+    cand2 = _cand("c2", headline="Oshpaz kerak")
+    asyncio.run(ui.send_card(bot, OWNER, cand2))
+    bot.markup_error = "Bad Request: message can't be edited"
+    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c2", bot)))
+    assert any("кнопки под постом пропали" in n for n in ui._notes)
+
+
+def test_split_post_is_not_edited(monkeypatch):
+    calls = _premium_edit(monkeypatch)
+    assert asyncio.run(ui.upgrade_premium(FakeBot(), [1, 2], "text", None)) == "" and calls == []
 
 
 def test_forward_button_sends_a_clean_post_to_him_and_nothing_to_the_channel():
