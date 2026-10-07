@@ -75,3 +75,45 @@ def test_format_post_contains_sections_and_no_generic_bucket():
 
 def test_default_prompt_is_horizontal():
     assert "16:9" in default_image_prompt("Sotuvchi kerak")
+
+
+# ------------------------------------------------------------------ постер для автоподбора
+def test_headline_is_split_in_two_lines_for_the_two_colour_title():
+    from bot.vacancy import split_headline
+
+    assert split_headline("Kredit menejeri kerak") == ("KREDIT", "MENEJERI KERAK")
+    assert split_headline("Sotuv operatorlarini ishga taklif qilamiz!") == ("SOTUV OPERATORLARINI", "ISHGA TAKLIF QILAMIZ")
+    assert split_headline("Barista") == ("BARISTA", "")
+
+
+def test_age_badge_from_requirements():
+    from bot.vacancy import age_badge
+
+    data = _data()
+    data.requirements = ["18-35 yosh", "Rus tili"]
+    assert age_badge(data) == "18–35 yosh"
+    data.requirements = ["20 yoshdan yuqori"]
+    assert age_badge(data) == "20+ yosh"
+    data.requirements = ["Rus tili"]
+    assert age_badge(data) is None
+
+
+def test_theme_follows_the_profession():
+    from bot.vacancy import poster_theme
+
+    data = _data()
+    assert poster_theme(data) == "gold"
+    data.headline = "Shifokor-stomatolog kerak"
+    assert poster_theme(data) == "clean"
+    data.headline = "Donarchi va ofitsiant kerak"
+    assert poster_theme(data) == "warm"
+
+
+def test_poster_prompt_quotes_exact_texts_and_reserves_the_logo_corner():
+    from bot.vacancy import build_poster_prompt, pretty_phone
+
+    assert pretty_phone("+998901234567 | +998935556677") == "+998 90 123 45 67"
+    prompt = build_poster_prompt(_data(), scene="кафе")
+    assert '"CALL-CENTER"' in prompt and "\"4 000 000 so'm + bonus\"" in prompt and '"+998 90 123 45 67"' in prompt and '"@hr_ish"' in prompt
+    assert "RESERVED ZONE" in prompt and "bottom-left" in prompt
+    assert "Qulayliklar" not in prompt and '"Tushlik bepul"' in prompt             # преимущества — подписями к иконкам

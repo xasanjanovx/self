@@ -48,21 +48,38 @@ def _data():
                        phone="+998901234567", telegram="@hr_ish")
 
 
-def test_prompt_is_his_banner_prompt_with_text_and_a_free_corner_for_the_logo():
+def test_prompt_is_a_full_poster_brief_with_exact_texts_and_a_free_corner_for_the_logo():
     prompt = image_gen.build_prompt(_data(), "уютная кофейня, бариста готовит кофе")
-    # вся вакансия + задача: баннер 16:9 с текстом на узбекской латинице
-    assert "Lavozim: Barista kerak" in prompt and "Maosh: 4 000 000 so'm" in prompt and "+998901234567" in prompt
-    assert "ГОРИЗОНТАЛЬНЫЙ баннер 16:9" in prompt and "узбекской латинице" in prompt and "уютная кофейня" in prompt
-    assert "крупно — должность" in prompt and "зарплата" in prompt and "телефон" in prompt
-    # логотип ставим сами: угол свободен, канал на баннере не пишем
-    assert "Левый нижний угол" in prompt and "@ishdasiz" not in prompt
+    assert "JOB VACANCY POSTER" in prompt and "photorealistic" in prompt and "уютная кофейня" in prompt
+    for exact in ('"BARISTA"', '"KERAK"', '"ISHGA TAKLIF QILAMIZ!"', "\"4 000 000 so'm\"", '"9:00-18:00"', '"+998 90 123 45 67"', '"@hr_ish"',
+                  '"#TOSHKENT"', '"Bepul tushlik"', '"Bahor Coffee"'):
+        assert exact in prompt, exact
+    assert "RESERVED ZONE" in prompt and "bottom-left" in prompt and "Do not draw any logo" in prompt
+
+
+def test_image_request_asks_for_3_2_at_2k_and_falls_back_without_size(setup):
+    install, _ = setup
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        config = json.loads(request.content)["generationConfig"]["imageConfig"]
+        seen.append(config)
+        if "imageSize" in config:
+            return httpx.Response(400, json={"error": {"message": "Invalid value at 'generation_config.image_config.image_size'"}})
+        return httpx.Response(200, json=_ok(_png()))
+
+    install(handler)
+    asyncio.run(image_gen.generate("prompt"))
+    assert seen == [{"aspectRatio": "3:2", "imageSize": "2K"}, {"aspectRatio": "3:2"}]
 
 
 def test_manual_prompt_for_chatgpt_is_unchanged():
     from bot.vacancy import build_full_prompt
 
     manual = build_full_prompt(_data(), scene="кофейня")
-    assert "@ishdasiz" in manual and "Левый нижний угол" not in manual
+    assert "@ishdasiz" in manual and "КОМПОЗИЦИЯ" not in manual
 
 
 def test_only_vertex_even_when_ai_studio_is_selected_in_settings(setup):
@@ -273,19 +290,19 @@ def test_inspect_accepts_exact_phone_and_empty_corner(monkeypatch):
 
 
 def test_inspect_rejects_a_wrong_digit_in_the_phone(monkeypatch):
-    (ok, why), _ = _inspect(monkeypatch, {"lines": ["4 000 000", "Tel: +998 90 123 45 68"], "text_in_bottom_left": False})
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "4 000 000", "Tel: +998 90 123 45 68"], "text_in_bottom_left": False})
     assert not ok and "телефон" in why
 
 
 def test_inspect_rejects_text_in_the_logo_corner(monkeypatch):
-    (ok, why), _ = _inspect(monkeypatch, {"lines": ["4 000 000", "Tel: +998901234567"], "text_in_bottom_left": True})
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "4 000 000", "Tel: +998901234567"], "text_in_bottom_left": True})
     assert not ok and "левом нижнем углу" in why
 
 
 def test_inspect_rejects_a_wrong_digit_in_the_salary(monkeypatch):
-    (ok, why), _ = _inspect(monkeypatch, {"lines": ["MAOSH: 4 000 010 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "MAOSH: 4 000 010 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
     assert not ok and "зарплаты" in why
-    (ok, _), _ = _inspect(monkeypatch, {"lines": ["MAOSH: 4 000 000 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    (ok, _), _ = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "MAOSH: 4 000 000 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
     assert ok
 
 
@@ -316,3 +333,8 @@ def test_unchecked_banner_goes_out_with_a_warning_after_a_single_drawing(setup, 
     monkeypatch.setattr(image_gen, "inspect", unknown)
     banner = asyncio.run(image_gen.vacancy_image(_data()))
     assert len(drawn) == 1 and "не удалось проверить" in banner.warning
+
+
+def test_inspect_rejects_a_misspelled_headline(monkeypatch):
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARSITA KERAK", "4 000 000", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert not ok and "заголовок" in why

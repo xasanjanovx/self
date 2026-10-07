@@ -46,6 +46,7 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-nano-banana-2.1": {"text_in": 0.5, "image_in": 0.5, "text_out": 60.0},
     "gemini-3.1-flash-image": {"text_in": 0.5, "image_in": 0.5, "text_out": 60.0},
     "gemini-2.5-flash-image": {"text_in": 0.3, "image_in": 0.3, "text_out": 30.0},
+    "gemini-3-pro-image": {"text_in": 2.0, "image_in": 2.0, "text_out": 120.0},   # Nano Banana Pro: ≈$0.134 за кадр 1K/2K (мысли учтены грубо)
     "gemini-2.5-flash": {"text_in": 0.3, "audio_in": 1.0, "image_in": 0.3, "text_out": 2.5},
     # Alibaba Model Studio, Сингапур (alibabacloud.com/help/en/model-studio/model-pricing) — отдельный счёт, не AI Studio
     "qwen3.8-omni-flash-realtime": {"text_in": 0.23, "audio_in": 0.93, "image_in": 0.23, "text_out": 0.70, "audio_out": 1.87},

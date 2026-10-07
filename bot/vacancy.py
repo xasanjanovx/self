@@ -282,6 +282,130 @@ def build_full_prompt(data: VacancyData, *, scene: str | None = None, for_logo: 
     return "\n".join(lines + task)
 
 
+# ------------------------------------------------------------------ постер для автоподбора (07.10)
+# Его референсы: тёмный фон + акцентный цвет, огромный двухцветный заголовок, плашка «ISHGA TAKLIF QILAMIZ!», карточки с иконками
+# (зарплата, график), ряд преимуществ, карточка контактов, бейдж возраста, фотореалистичные улыбающиеся люди. Просто «баннер с текстом»
+# (build_full_prompt) выглядел как шаблон — этот промпт задаёт целый дизайн.
+_THEMES = {
+    "gold": ("Deep black / charcoal background with a warm cinematic gradient. Signature accent: rich GOLD-YELLOW (#FFC400) with a "
+             "subtle metallic gradient and soft glow; secondary text pure white; thin gold outlines; dark glass rounded cards."),
+    "clean": ("Bright, clean, trustworthy look: white and very light background with soft teal-turquoise (#14A3A8) accents, deep navy "
+              "(#0B2A4A) headline text, soft shadows, light glass cards with thin teal outlines."),
+    "warm": ("Appetising high-energy look: black background with warm fiery lighting, accent colours RED (#E02424) and golden YELLOW "
+             "(#FFC400), white text, red ribbon labels, dark glass cards with thin yellow outlines."),
+}
+_THEME_WORDS = {
+    "clean": ("shifokor", "klinika", "hamshira", "vrach", "stomatolog", "dorixona", "apteka", "laborant", "врач", "клиник", "медсестр",
+              "аптек", "стоматолог", "o'qituvchi", "tarbiyachi", "учител", "воспитател"),
+    "warm": ("oshpaz", "povar", "ofitsiant", "donarchi", "kafe", "restoran", "fast food", "barista", "pitsa", "pizza", "shashlik",
+             "non yopuvchi", "qandolat", "повар", "официант", "кафе", "ресторан", "пекар", "кондитер"),
+}
+
+
+def poster_theme(data: VacancyData, scene: str | None = None) -> str:
+    text = " ".join(filter(None, [data.headline, data.company, scene])).lower().replace("ʻ", "'").replace("‘", "'").replace("’", "'")
+    for name, words in _THEME_WORDS.items():
+        if any(word in text for word in words):
+            return name
+    return "gold"
+
+
+def split_headline(headline: str) -> tuple[str, str]:
+    """«Kredit menejeri kerak» → («KREDIT», «MENEJERI KERAK»): две строки заголовка (первая белая, вторая акцентная)."""
+    words = re.sub(r"\s+", " ", headline or "").strip(" !.").upper().split()
+    if len(words) <= 1:
+        return " ".join(words), ""
+    cut = max(1, len(words) // 2)
+    return " ".join(words[:cut]), " ".join(words[cut:])
+
+
+def age_badge(data: VacancyData) -> str | None:
+    for item in data.requirements:
+        low = item.lower()
+        found = re.search(r"(\d{2})\s*[-–—]\s*(\d{2})\s*(?:yosh|лет|yoshgacha|yoshdan)", low)
+        if found:
+            return f"{found.group(1)}–{found.group(2)} yosh"
+        found = re.search(r"(\d{2})\s*(?:yoshdan|yosh va|dan katta|\+)", low)
+        if found:
+            return f"{found.group(1)}+ yosh"
+    return None
+
+
+def pretty_phone(phone: str | None) -> str | None:
+    first = (phone or "").split("|")[0].strip()
+    digits = re.sub(r"\D", "", first)
+    if len(digits) == 12 and digits.startswith("998"):
+        return f"+998 {digits[3:5]} {digits[5:8]} {digits[8:10]} {digits[10:12]}"
+    return first or None
+
+
+def build_poster_prompt(data: VacancyData, *, scene: str | None = None, theme: str | None = None) -> str:
+    """Промпт постера для Nano Banana: полный дизайн-бриф (стиль, композиция, фото, ТОЧНЫЕ тексты) + зона под логотип слева внизу."""
+    theme = theme if theme in _THEMES else poster_theme(data, scene)
+    line1, line2 = split_headline(data.headline)
+    region = region_name(data.region_tag)
+    place = data.address if data.address and region.lower() in data.address.lower() else ", ".join(filter(None, [data.address, region]))
+    pill = "YANGI VAKANSIYA!" if "taklif" in (data.headline or "").lower() else "ISHGA TAKLIF QILAMIZ!"
+    phone = pretty_phone(data.phone)
+    handle = vac_handle(data.telegram)
+    texts = [f'Small tag (letter-spaced, accent colour): "{data.region_tag}"',
+             f'HEADLINE — huge heavy condensed sans-serif, ALL CAPS, two lines: line 1 white "{line1}"'
+             + (f', line 2 in the accent colour (metallic gradient) "{line2}"' if line2 else ""),
+             f'Pill label (accent-coloured rounded rectangle, dark bold text): "{pill}"']
+    if data.company:
+        texts.append(f'Company name (small, under the pill): "{_short(data.company, 44)}"')
+    if data.salary:
+        texts.append(f'Info card with a wallet icon in a circle — label "Oylik maosh:" and below it the value, large, bold, accent colour: "{_short(data.salary, 40)}"')
+    if data.schedule:
+        texts.append(f'Info card with a clock icon in a circle — label "Ish vaqti:" and below it, bold white: "{_short(data.schedule, 38)}"')
+    if place:
+        texts.append(f'Location row with a map-pin icon: "{_short(place, 50)}"')
+    perks = [p for p in (_short(b, 26) for b in data.benefits[:4]) if p]
+    if perks:
+        texts.append("Perks row — " + str(len(perks)) + " small line icons, each with a 2–3 word caption under it, exactly: "
+                     + ", ".join(f'"{p}"' for p in perks))
+    badge = age_badge(data)
+    if badge:
+        texts.append(f'Round accent-coloured badge in the top-right corner: "{badge}"')
+    contacts = []
+    if phone:
+        contacts.append(f'phone icon + "{phone}"')
+    if handle:
+        contacts.append(f'Telegram paper-plane icon + "{handle}"')
+    if contacts:
+        texts.append("Contact card (dark glass rounded box with a thin accent outline, bottom-right): " + " ; ".join(contacts))
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, 1))
+    subject = (scene or "").strip().rstrip(".")
+    return "\n".join([
+        "Design a premium, scroll-stopping JOB VACANCY POSTER for a Telegram jobs channel in Uzbekistan. Landscape 3:2, ultra-sharp, "
+        "professional advertising-agency quality — the level of top recruitment ads, not a plain stock template.",
+        "",
+        f"STYLE: {_THEMES[theme]}",
+        "",
+        "COMPOSITION: the left ~55% is the text column over a smooth dark/light gradient that blends seamlessly into the photo on the right "
+        "~45%. Clear hierarchy: headline → salary → details → contact. Consistent generous margins, perfect alignment, crisp vector-clean thin "
+        "line icons inside circles, rounded glass cards with thin outlines, soft glow and depth. Dense but tidy, every element intentional.",
+        "",
+        "PHOTO (right side, photorealistic): " + (f"scene — {subject}; " if subject else "")
+        + f"job — {data.headline}. One or two friendly, confident, smiling people of Central Asian (Uzbek) appearance looking at the camera, "
+        "natural poses, wearing work clothes typical for this job, realistic faces and hands. Shot on an 85mm lens, shallow depth of field, "
+        "cinematic rim light, warm bokeh; the real workplace of this profession is visible behind them.",
+        "",
+        "TEXT — write every string EXACTLY as given between the quotes, in Uzbek Latin, letter for letter, keeping the same apostrophes, digits "
+        "and spacing. Add no other words, no placeholder or gibberish text:",
+        numbered,
+        "",
+        "RESERVED ZONE: keep the bottom-left corner (left third of the width, bottom 18% of the height) empty — a smooth continuation of the "
+        "background with no text, icons or cards — a logo will be placed there. Do not draw any logo or channel name yourself.",
+        "QUALITY: flawless spelling, sharp edges, no distorted letters, no watermark, no extra logos.",
+    ])
+
+
+def vac_handle(value: str | None) -> str | None:
+    name = username_from_telegram(value)
+    return f"@{name}" if name else None
+
+
 def default_image_prompt(headline: str) -> str:
     return build_image_prompt(VacancyData(headline=headline, intro=None, company=None, region_tag=VACANCY_DEFAULT_REGION_TAG,
                                           address=None, salary=None, schedule=None))

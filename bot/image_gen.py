@@ -5,7 +5,7 @@
 картинки не будет, карточка уйдёт к нему без неё, с кнопкой «Другая картинка». Работает независимо от переключателя «Gemini через…»
 в настройках и не трогает его состояние (пауза ключа и «модели нет» относятся к текстовым запросам).
 На баннере — текст вакансии на узбекской латинице (должность, зарплата, место, график, плюс, телефон) по его промпту
-vacancy.build_full_prompt; левый нижний угол оставлен под логотип.
+vacancy.build_poster_prompt (по его референсам — тёмный/светлый дизайн с акцентом); левый нижний угол оставлен под логотип.
 """
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ from .ai import VacancyData
 logger = logging.getLogger(__name__)
 
 MODELS = ("gemini-nano-banana-2.1", "gemini-3.1-flash-image")
-ASPECT = "16:9"                       # как у прежних баннеров канала
+ASPECT = "3:2"                        # как референсы: 1536×1024 — больше места под дизайн, чем у 16:9
+IMAGE_SIZE = "2K"                     # крупнее — мелкий текст и иконки чётче (Telegram потом сам уменьшит)
 LOGO = Path(__file__).parent / "assets" / "ishdasiz_logo.png"
 LOGO_WIDTH_SHARE = 0.30               # ширина логотипа — доля ширины картинки
 LOGO_MARGIN_SHARE = 0.03              # отступ от левого и нижнего края
@@ -47,9 +48,9 @@ def _http() -> Any:
 
 
 def build_prompt(data: VacancyData, scene: str | None = None) -> str:
-    """Его промпт баннера 16:9 (vacancy.build_full_prompt): вся вакансия + задача — на картинке крупно должность, зарплата, место, график,
-    плюс и телефон на узбекской латинице. for_logo: левый нижний угол пустой под логотип, «@ishdasiz» не пишем (он в логотипе)."""
-    return vac.build_full_prompt(data, scene=scene, for_logo=True)
+    """Дизайн-бриф постера (vacancy.build_poster_prompt): тёмный стиль с акцентом, двухцветный заголовок, карточки зарплаты и графика,
+    ряд преимуществ, карточка контактов, бейдж возраста, фото людей; все тексты точно, на узбекской латинице; левый нижний угол пустой под логотип."""
+    return vac.build_poster_prompt(data, scene=scene)
 
 
 def _extract(data: dict[str, Any]) -> bytes | None:
@@ -61,10 +62,15 @@ def _extract(data: dict[str, Any]) -> bytes | None:
     return None
 
 
-def _payload(prompt: str) -> dict[str, Any]:
+def _payload(prompt: str, aspect: str = "", size: str | None = None) -> dict[str, Any]:
+    config: dict[str, Any] = {"aspectRatio": aspect or ASPECT}
+    if size is None:
+        size = IMAGE_SIZE
+    if size:
+        config["imageSize"] = size
     return {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": ASPECT}},
+        "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": config},
     }
 
 
@@ -89,15 +95,18 @@ async def _try(client: Any, url: str, headers: dict[str, str], payload: dict[str
     return status, None, text
 
 
-async def generate(prompt: str, *, client: Any | None = None) -> tuple[bytes, str]:
+async def generate(prompt: str, *, client: Any | None = None, models: tuple[str, ...] | None = None, aspect: str = "",
+                   size: str | None = None) -> tuple[bytes, str]:
     """Картинка по промпту через Vertex → (байты как пришли от модели, имя модели). Бросает ImageError, если не вышло."""
     if not gcloud.vertex_key():
         raise ImageError("нет VERTEX_API_KEY — картинки только через Vertex AI")
     client = client or _http()
-    payload = _payload(prompt)
     errors: list[str] = []
-    for model in MODELS:
-        status, data, text = await _try(client, gcloud.url(model, "generateContent"), gcloud.headers(), payload)
+    for model in models or MODELS:
+        status, data, text = await _try(client, gcloud.url(model, "generateContent"), gcloud.headers(), _payload(prompt, aspect, size))
+        if status == 400 and "size" in text.lower() and (size is None and IMAGE_SIZE or size):
+            # эта модель размера не знает — тот же запрос без imageSize
+            status, data, text = await _try(client, gcloud.url(model, "generateContent"), gcloud.headers(), _payload(prompt, aspect, ""))
         if data is not None:
             image = _extract(data)
             if image:
@@ -147,7 +156,7 @@ def _salary_numbers(salary: str | None) -> list[str]:
 
 
 async def inspect(raw: bytes, data: VacancyData) -> tuple[bool | None, str]:
-    """Нейросеть (Vertex) читает текст с готового баннера: телефон и сумма зарплаты должны совпасть до цифры, а угол под логотип —
+    """Нейросеть (Vertex) читает текст с готового баннера: телефон, сумма зарплаты и слова заголовка должны совпасть до буквы, а угол под логотип —
     быть пустым. Модель путает цифры («4 000 010») и садит текст в угол, поэтому неточный баннер без перерисовки не отпускаем.
     → (True, "") всё сошлось | (False, причина) | (None, "") проверить не вышло (лимит Vertex): баннер уйдёт с предупреждением."""
     from PIL import Image
@@ -181,6 +190,10 @@ async def inspect(raw: bytes, data: VacancyData) -> tuple[bool | None, str]:
         problems.append("телефон на картинке не совпал с вакансией")
     if any(number not in seen for number in _salary_numbers(data.salary)):
         problems.append("сумма зарплаты на картинке не совпала с вакансией")
+    letters = re.sub(r"[^0-9A-ZА-ЯЁ]", "", " ".join(str(x) for x in answer.get("lines") or []).upper())
+    words = [w for w in (re.sub(r"[^0-9A-ZА-ЯЁ]", "", word) for word in (data.headline or "").upper().split()) if len(w) >= 4]
+    if any(word not in letters for word in words):
+        problems.append("заголовок на картинке не совпал с вакансией")
     return not problems, "; ".join(problems)
 
 
