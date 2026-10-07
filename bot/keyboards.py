@@ -33,6 +33,22 @@ def _btn(
     return InlineKeyboardButton(**kwargs)
 
 
+def pbtn(
+    text: str,
+    callback_data: str | None = None,
+    *,
+    url: str | None = None,
+    style: str | None = None,
+    icon: str | None = None,
+    copy_text: str | None = None,
+) -> InlineKeyboardButton:
+    """Как _btn, но обычное эмодзи в начале текста становится премиум-иконкой кнопки (icon_custom_emoji_id) — для личного чата владельца.
+    Под постами в канале иконки Telegram отбрасывает (проверено), поэтому там — обычный _btn."""
+    if icon is None:
+        text, icon = _pe.split_icon(text)
+    return _btn(text, callback_data, url=url, style=style, icon=icon, copy_text=copy_text)
+
+
 TEXTS: dict[Lang, dict[str, str]] = {
     "ru": {
         "menu_nutrition": "Питание",
@@ -754,7 +770,7 @@ def finance_add_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 # ------------------------------------------------------------------ vacancy
 def vacancy_panel_keyboard(lang: str = "ru", *, feed: bool = False) -> InlineKeyboardMarkup:
     """feed — владельцу показываем «Автоподбор» (вакансии из чужих каналов, bot/vacancy_feed.py)."""
-    rows = [[_btn("🤖 Автоподбор из каналов", "vf:panel", style="primary")]] if feed else []
+    rows = [[pbtn("🤖 Автоподбор из каналов", "vf:panel", style="primary")]] if feed else []
     return InlineKeyboardMarkup(inline_keyboard=rows + [[_back(lang)]])
 
 
@@ -767,12 +783,12 @@ def vacancy_result_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if contact_url:
-        rows.append([_btn(t(lang, "vacancy_contact"), url=contact_url, style="primary")])
+        rows.append([pbtn(t(lang, "vacancy_contact"), url=contact_url, style="primary")])
     publish_key = "vacancy_publish" if can_publish else "vacancy_copy"
     rows.append([_btn(t(lang, publish_key), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
     if can_publish:
-        rows.append([_btn("💰 Платный пост", "vacancy:paid")])
-        rows.append([_btn("📤 Премиум-эмодзи: пришли, перешлю сам", "vacancy:fwd")])
+        rows.append([pbtn("💰 Платный пост", "vacancy:paid")])
+        rows.append([pbtn("📤 Премиум-пост мне", "vacancy:fwd")])
     if image_prompt:
         # нажатие копирует промпт в буфер — сам текст в чате не показываем
         rows.append([_btn(t(lang, "vacancy_prompt"), icon=_pe.ID_STAR, copy_text=image_prompt)])

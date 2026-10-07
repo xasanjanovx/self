@@ -20,7 +20,7 @@ from .. import access, image_gen
 from .. import vacancy as vac
 from .. import vacancy_feed as feed
 from ..context import settings
-from ..keyboards import _btn, vacancy_channel_keyboard
+from ..keyboards import pbtn as _btn, vacancy_channel_keyboard
 from ..profile import h
 from .common import answer_now, safe_edit
 
@@ -62,8 +62,8 @@ def gap_label(minutes: int) -> str:
 def guard_line() -> str:
     left = feed.hold_left()
     if left > 0:
-        return f"🛡 Платный пост наверху ленты: новые карточки не шлю ещё {feed.human_wait(left)}"
-    return "🛡 Лента свободна: платного поста наверху нет"
+        return f"🛡 Платный пост наверху: ещё {feed.human_wait(left)}"
+    return "🛡 Лента свободна"
 
 
 def panel_text() -> str:
@@ -73,18 +73,13 @@ def panel_text() -> str:
     lines = [
         "🤖 <b>Автоподбор вакансий</b>",
         "",
-        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · каждую вакансию решаешь ты (карточка), по одной, "
-        f"не чаще раза в {gap_label(int(feed.cfg('card_gap_min')))}",
-        f"Каналы: {s['approved']} в работе · {s['pending']} ждут твоего решения",
-        f"Сегодня {s['today']} из {s['cap']} · окно {start:02d}:00–{end:02d}:00 · в очереди {s['new']} · ждут ответа {s['carded']}"
-        + (f" · отложено {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
+        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'}",
+        f"Каналы: {s['approved']}" + (f" · ждут решения: {s['pending']}" if s["pending"] else ""),
+        f"Сегодня: {s['today']} из {s['cap']} · в очереди: {s['new']} · ждут ответа: {s['carded']}"
+        + (f" · отложено: {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
+        f"Окно: {start:02d}:00–{end:02d}:00 · карточка раз в {gap_label(int(feed.cfg('card_gap_min')))}",
         guard_line(),
-        f"🚫 Реклама: фильтр {'включён' if feed.cfg('ads_on') else 'выключен'} · удалено {sum(1 for a in ads if a.get('deleted'))}",
-        "",
-        "JES читает каналы-источники и отбрасывает ненадёжное: нет контакта работодателя, деньги вперёд, работа за границей, "
-        "нет зарплаты или условий. Остальное оформляет по шаблону канала и рисует баннер (Nano Banana 2.1 только "
-        "через Vertex, дизайн каждый раз другой, логотип снизу слева). Фото и текст — одним постом. В канал — только после твоего «Опубликовать». "
-        "Премиум-эмодзи бот в канал поставить не может (Telegram не принимает от бота) — для них кнопка «📤»: пришлю готовый пост, перешлёшь сам.",
+        f"🚫 Реклама: фильтр {'вкл' if feed.cfg('ads_on') else 'выкл'} · удалено {sum(1 for a in ads if a.get('deleted'))}",
     ]
     if float(s["flood_until"] or 0) > time.time():
         lines += ["", f"⏳ Telegram просит JES подождать до {datetime.fromtimestamp(float(s['flood_until']), feed.TZ):%H:%M}."]
@@ -267,7 +262,7 @@ def _card_markup(cand: dict[str, Any], contact_url: str | None, *, can_publish: 
     if can_publish:
         rows = [
             [_btn("✅ Опубликовать сейчас", f"vf:pub:{cid}", style="success"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
-            [_btn("📤 Премиум-эмодзи: пришли, перешлю сам", f"vf:fwd:{cid}")],
+            [_btn("📤 Премиум-пост мне", f"vf:fwd:{cid}")],
             [_btn("🔄 Другая картинка", f"vf:img:{cid}"), source],
         ]
     else:
@@ -334,13 +329,13 @@ async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate:
             if not regenerate and cand["img_tries"] < IMAGE_TRIES:
                 return False
     post, contact_url, trimmed = _post_html(cand)
-    shown = post if image else post + "\n\n⚠️ Картинка не получилась — без неё публиковать нельзя. Нажми «Нарисовать картинку»."
+    shown = post if image else post + "\n\n⚠️ Картинки нет — нажми «Нарисовать картинку»."
     head = f"📥 {h(str(cand['data'].get('headline') or 'Вакансия'))} · из @{cand['source']}"
     ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url, can_publish=bool(image)), head=head)
     cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image)})
     feed.note_card_sent()
     feed.save()
-    notes = [n for n in (warning, "✂️ Текст сокращён до лимита подписи (1024 знака), чтобы фото и текст шли одним постом. Полный — по кнопке «Источник»."
+    notes = [n for n in (warning, "✂️ Текст сокращён до 1024 знаков."
                          if trimmed else None) if n]
     if notes:
         from .. import screen as screen_mod
@@ -393,7 +388,7 @@ async def cb_publish(callback: CallbackQuery) -> None:
         await answer_now(callback, "Канал не настроен (VACANCY_CHANNEL)", alert=True)
         return
     if not (cand.get("file_id") or _read_image(cand["id"])):
-        await answer_now(callback, "Без картинки не публикую — фото должно быть в одном посте с текстом. Нажми «Нарисовать картинку»", alert=True)
+        await answer_now(callback, "Без картинки нельзя — нажми «Нарисовать картинку»", alert=True)
         return
     from .. import screen as screen_mod
 
@@ -424,7 +419,7 @@ async def cb_forward(callback: CallbackQuery) -> None:
         return
     image = cand.get("file_id") or _read_image(cand["id"])
     if image is None:
-        await answer_now(callback, "Без картинки не делаю — нажми «Нарисовать картинку»", alert=True)
+        await answer_now(callback, "Без картинки нельзя — нажми «Нарисовать картинку»", alert=True)
         return
     post, _, _ = _post_html(cand)
     chat_id = cand.get("chat_id") or callback.from_user.id
@@ -439,8 +434,7 @@ async def cb_forward(callback: CallbackQuery) -> None:
     feed.mark_handled(cand, "published")                       # раз он взял его себе — такую же вакансию больше не предлагаем
     from .. import screen as screen_mod
 
-    await screen_mod.send_note(callback.bot, chat_id, "📤 Готовый пост выше: перешли его в канал (при пересылке выбери «Скрыть отправителя») — "
-                               "премиум-эмодзи сохранятся.", ttl=3600)
+    await screen_mod.send_note(callback.bot, chat_id, "📤 Готово — перешли в канал.", ttl=3600)
 
 
 async def publish_due(bot: Bot) -> int:
@@ -554,5 +548,5 @@ async def cb_now(callback: CallbackQuery) -> None:
     else:
         read = (f"Прочитано каналов: {pulled.get('sources', 0)} · в очередь добавлено: {pulled.get('queued', 0)} · "
                 f"отброшено: {pulled.get('rejected', 0)} · ") if pulled else ""
-        note = read + ("карточка отправлена ниже" if res.get("card") else "подходящих новых вакансий для карточки нет")
+        note = "" if res.get("card") else read + "новых вакансий нет"
     await _show_panel(callback, note)

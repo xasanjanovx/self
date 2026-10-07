@@ -21,7 +21,7 @@ from .. import emoji as pe
 from .. import vacancy as vac
 from .. import vacancy_feed as feed
 from ..context import ai, settings
-from ..keyboards import _btn, vacancy_panel_keyboard, vacancy_result_keyboard
+from ..keyboards import pbtn as _btn, vacancy_panel_keyboard, vacancy_result_keyboard
 from ..profile import Profile, h
 from ..states import BotStates
 from .common import answer_now, get_profile, message_text, remember_panel, safe_delete, safe_edit, show_panel, show_progress, transcribe_audio
@@ -87,7 +87,7 @@ def _card_markup(contact_url: str | None, regen: int, *, can_publish: bool = Tru
     if can_publish:
         rows = [
             [_btn("✅ Опубликовать сейчас", "vacancy:publish", style="success"), _btn("💰 Платный пост", "vacancy:paid")],
-            [_btn("📤 Премиум-эмодзи: пришли, перешлю сам", "vacancy:fwd")],
+            [_btn("📤 Премиум-пост мне", "vacancy:fwd")],
             [_btn("🔄 Другой дизайн", "vacancy:img"), _btn("🎨 Промпт (ChatGPT)", "vacancy:prompt")],
             [_btn("📝 Новая вакансия", "vacancy:again")],
         ]
@@ -120,7 +120,7 @@ async def _send_card(message_or_cb, state: FSMContext, chat_id: int, bot, banner
             pass
     vdata = feed.data_from_dict(data["vacancy_data"])
     post, trimmed = vac.fit_post(vdata, premium=True, footer_url=settings.vacancy_footer_url)
-    note = "" if banner else "\n\n⚠️ Картинка не получилась — без неё публиковать нельзя. Нажми «Нарисовать баннер»."
+    note = "" if banner else "\n\n⚠️ Баннера нет — нажми «Нарисовать баннер»."
     head = f"📥 {h(vdata.headline)}"
     ids, file_id, _ = await _send_post(bot, chat_id, post + note, banner.image if banner else None,
                                        _card_markup(data.get("vacancy_contact_url"), int(data.get("vacancy_regen") or 0),
@@ -128,7 +128,7 @@ async def _send_card(message_or_cb, state: FSMContext, chat_id: int, bot, banner
     await state.update_data(vacancy_card_ids=ids, vacancy_chat_id=chat_id, vacancy_file_id=file_id,
                             vacancy_design=(banner.design if banner else data.get("vacancy_design")))
     notes = [n for n in ((banner.warning if banner else None),
-                         "✂️ Текст сокращён до лимита подписи (1024 знака), чтобы фото и текст шли одним постом." if trimmed else None) if n]
+                         "✂️ Текст сокращён до 1024 знаков." if trimmed else None) if n]
     if notes:
         from .. import screen as screen_mod
 
@@ -276,7 +276,7 @@ async def cb_forward(callback: CallbackQuery, state: FSMContext) -> None:
         return
     image = data.get("vacancy_photo_id") or data.get("vacancy_file_id")
     if image is None:
-        await answer_now(callback, "Без картинки не делаю — нажми «Нарисовать баннер»", alert=True)
+        await answer_now(callback, "Без баннера нельзя — нажми «Нарисовать баннер»", alert=True)
         return
     from .vacancy_feed import _send_post
 
@@ -297,8 +297,7 @@ async def cb_forward(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_now(callback, "Готовый пост — выше")
     from .. import screen as screen_mod
 
-    await screen_mod.send_note(callback.bot, chat_id, "📤 Готовый пост выше: перешли его в канал (при пересылке выбери «Скрыть отправителя») — "
-                               "премиум-эмодзи сохранятся.", ttl=3600)
+    await screen_mod.send_note(callback.bot, chat_id, "📤 Готово — перешли в канал.", ttl=3600)
 
 
 @router.callback_query(F.data == "vacancy:publish")
@@ -332,7 +331,7 @@ async def _publish(callback: CallbackQuery, state: FSMContext, *, paid: bool) ->
     target = channel or callback.message.chat.id
     image = data.get("vacancy_photo_id") or data.get("vacancy_file_id")
     if image is None:
-        await answer_now(callback, "Без картинки не публикую — фото должно быть в одном посте с текстом. Нажми «Нарисовать баннер»", alert=True)
+        await answer_now(callback, "Без баннера нельзя — нажми «Нарисовать баннер»", alert=True)
         return
     try:
         ids, _, post_id = await _send_post(callback.bot, target, post, image, markup)

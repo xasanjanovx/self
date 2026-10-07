@@ -152,8 +152,28 @@ def _message(bot, text, uid=OWNER, photo=None):
                            caption=None, voice=None, audio=None, message_id=1)
 
 
+def pe_id(char: str):
+    from bot import emoji as pe
+
+    return pe.id_for(char)
+
+
 def _buttons(markup) -> dict:
-    return {b.text: (b.callback_data or b.url) for row in markup.inline_keyboard for b in row}
+    """текст → данные; у кнопок с премиум-иконкой эмодзи уходит из текста в иконку, поэтому добавляем и ключи «эмодзи текст»."""
+    from bot import emoji as pe
+
+    by_id: dict = {}
+    for ch, ident in pe._ID_BY_EMOJI.items():
+        by_id.setdefault(ident, []).append(ch)
+    out: dict = {}
+    for row in markup.inline_keyboard:
+        for b in row:
+            data = b.callback_data or b.url
+            out[b.text] = data
+            for ch in by_id.get(getattr(b, "icon_custom_emoji_id", None), []):
+                out[f"{ch} {b.text}"] = data
+                out[f"{ch}️ {b.text}"] = data
+    return out
 
 
 # ------------------------------------------------------------------ только владелец
@@ -230,7 +250,7 @@ def test_manual_forward_button_sends_a_clean_post_with_premium_emoji_to_him(monk
     clean = bot.photos[-1]
     assert clean["chat"] == OWNER and clean["markup"] is None and 'emoji-id="5389061359403039918"' in clean["caption"]
     assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and (OWNER, card_id) in bot.deleted
-    assert any("перешли его в канал" in text for text, _ in _env.notes)
+    assert any("перешли в канал" in text for text, _ in _env.notes)
     guest = FakeCb("vacancy:fwd", bot, uid=GUEST)
     asyncio.run(vac_h.cb_forward(guest, _state(GUEST)))
     assert guest.answers[-1][1] is True and len(bot.photos) == 2
@@ -246,12 +266,12 @@ def test_manual_without_a_banner_cannot_be_published(monkeypatch):
     monkeypatch.setattr(image_gen, "vacancy_image", broken)
     bot, state = FakeBot(), _state()
     asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
-    assert bot.photos == [] and "Картинка не получилась" in bot.messages[0]["text"]
+    assert bot.photos == [] and "Баннера нет" in bot.messages[0]["text"]
     labels = _buttons(bot.messages[0]["markup"])
     assert "✅ Опубликовать сейчас" not in labels and labels["🎨 Нарисовать баннер"] == "vacancy:img"
     cb = FakeCb("vacancy:publish", bot)
     asyncio.run(vac_h.cb_publish(cb, state))
-    assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0]
+    assert cb.answers[-1][1] is True and "Без баннера" in cb.answers[-1][0]
     assert [m for m in bot.messages if m["chat"] == CHANNEL] == [] and [p for p in bot.photos if p["chat"] == CHANNEL] == []
 
 
@@ -471,7 +491,7 @@ def test_settings_screen_cycles_values_and_protection_never_drops_below_three(mo
         asyncio.run(sett.cb_setting(FakeCb("vf:s:prot", bot)))
         assert feed.protect_seconds() >= 3 * 3600
     text, markup = cap.shown[-1]
-    assert "Защита платного поста" in text and "меньше 3 нельзя" in text
+    assert "Защита платного поста: <b>6 ч</b>" in text and "Между карточками: <b>3 ч</b>" in text
     assert "vf:ds" in _buttons(markup).values() and "vf:ads" in _buttons(markup).values()
 
 
@@ -485,7 +505,7 @@ def test_designs_screen_lists_all_and_toggles(monkeypatch):
     design_buttons = [b for row in markup.inline_keyboard for b in row if (b.callback_data or "").startswith("vf:d:") and b.callback_data != "vf:d:all"]
     assert len(design_buttons) == len(v.DESIGNS) >= 30 and f"{len(v.DESIGNS)} из {len(v.DESIGNS)}" in text
     asyncio.run(sett.cb_design_toggle(FakeCb("vf:d:gold_black", bot)))
-    assert "gold_black" not in feed.allowed_designs() and "⛔" in cap.shown[-1][1].inline_keyboard[0][0].text
+    assert "gold_black" not in feed.allowed_designs() and cap.shown[-1][1].inline_keyboard[0][0].icon_custom_emoji_id == pe_id("⛔")
     asyncio.run(sett.cb_design_toggle(FakeCb("vf:d:all", bot)))
     assert "gold_black" in feed.allowed_designs()
     asyncio.run(sett.cb_design_toggle(FakeCb("vf:d:nonsense", bot)))                               # чужой id игнорируем
@@ -504,6 +524,39 @@ def test_banner_never_uses_a_switched_off_design(monkeypatch):
     assert set(_env.designs) == {"neon_green"}
 
 
+def test_vacancy_screens_use_premium_icons_on_buttons_but_channel_buttons_stay_plain():
+    """Эмодзи в начале кнопки раздела вакансий — премиум-иконка (пак UnigramIcons и прежние). Под постом в канале иконок нет:
+    Telegram отбрасывает их там (проверено тестовым постом), оставляем только синий цвет."""
+    from bot import emoji as pe
+    from bot.keyboards import vacancy_channel_keyboard
+
+    cards = []
+    for markup in (ui.panel_keyboard(), sett.settings_keyboard(), sett.ads_keyboard()):
+        cards += [b for row in markup.inline_keyboard for b in row]
+    with_icon = [b for b in cards if getattr(b, "icon_custom_emoji_id", None)]
+    assert len(with_icon) >= 10
+    assert all(b.text and b.text[0] not in "🤖🔍📡💰⚙🛡🔄" for b in with_icon)             # эмодзи ушло из текста в иконку
+    next_button = next(b for b in cards if b.text == "Следующая вакансия")
+    assert getattr(next_button, "icon_custom_emoji_id", None) == pe.id_for("▶") and next_button.style == "success"   # ▶ — из UnigramIcons
+    channel_row = vacancy_channel_keyboard("uz", "tg://resolve?domain=x", "tg://resolve?domain=y").inline_keyboard[0]
+    assert all(getattr(b, "icon_custom_emoji_id", None) is None and b.style == "primary" for b in channel_row)
+
+
+def test_plain_emoji_of_the_vacancy_section_are_now_premium():
+    from bot import emoji as pe
+
+    for char in ("▶", "✂", "👁", "👥", "📤", "⏲", "🖌", "📶", "🔒"):                       # в UnigramIcons
+        assert pe.id_for(char), char
+    for char, same_as in (("⏱", "⏲"), ("⏳", "⏲"), ("🕗", "⏰"), ("✖", "❌"), ("🎨", "🖌"), ("📡", "📶"), ("🔍", "🔎"), ("🛡", "🔒")):
+        assert pe.id_for(char) == pe.id_for(same_as), char                                  # близкие по смыслу
+    text = pe.premiumize("🛡 Лента свободна · 📤 · ▶️ · 🎨")
+    assert text.count("<tg-emoji") == 4 and "🛡" in text
+    assert pe.premiumize("📥 уже было") == pe.premiumize(pe.premiumize("📥 уже было"))      # повторно не оборачиваем
+    assert pe.split_icon("🔄 Другая картинка") == ("Другая картинка", pe.id_for("🔄"))
+    assert pe.split_icon("Без эмодзи") == ("Без эмодзи", None) and pe.split_icon("🙂") == ("🙂", None)
+    assert pe.id_for("📥") == "5877307202888273539"                                         # прежние id не тронуты
+
+
 def test_paid_mark_buttons_start_and_clear_the_protection(monkeypatch):
     cap = ScreenCapture(monkeypatch, sett)
     bot = FakeBot()
@@ -511,7 +564,7 @@ def test_paid_mark_buttons_start_and_clear_the_protection(monkeypatch):
     asyncio.run(sett.cb_paid(FakeCb("vf:paid", bot)))
     assert 2.99 * 3600 < feed.hold_left() <= 3 * 3600 + 5
     text, markup = cap.shown[-1]
-    assert "Сейчас защита: ещё" in text and "vf:unpaid" in _buttons(markup).values()
+    assert "защита ещё" in text and "vf:unpaid" in _buttons(markup).values()
     asyncio.run(sett.cb_unpaid(FakeCb("vf:unpaid", bot)))
     assert feed.hold_left() == 0 and "vf:paid" in _buttons(cap.shown[-1][1]).values()
     assert {"vf:now", "vf:paid"} <= set(_buttons(ui.panel_keyboard()).values())
@@ -524,7 +577,7 @@ def test_ads_screen_toggles_and_shows_the_log(monkeypatch):
     feed.log_ad({"id": 1, "ts": time.time(), "topics": ["credit"], "text": "Tez kredit!", "deleted": True})
     asyncio.run(sett.cb_ads(FakeCb("vf:ads", bot)))
     text, markup = cap.shown[-1]
-    assert "Удалено рекламы: 1" in text and "Кредиты и займы" in text and "Tez kredit" in text
+    assert "Удалено: 1" in text and "Кредиты и займы" in text and "Tez kredit" in text
     for key in ("on", "mode", "c:bank", "c:credit"):
         asyncio.run(sett.cb_ads_setting(FakeCb(f"vf:a:{key}", bot)))   # (это режим ФИЛЬТРА РЕКЛАМЫ: удалять/сообщать — он остаётся)
     assert feed.cfg("ads_on") is False and feed.cfg("ads_mode") == "notify"
@@ -534,7 +587,7 @@ def test_ads_screen_toggles_and_shows_the_log(monkeypatch):
 def test_panel_shows_ask_mode_protection_and_ads():
     feed.note_manual_post(time.time(), 1)
     text = ui.panel_text()
-    assert "решаешь ты" in text and "Платный пост наверху" in text and "Реклама: фильтр включён" in text
+    assert "Платный пост наверху" in text and "Реклама: фильтр вкл" in text and "раз в 2 ч" in text
     assert {"vf:cfg", "vf:ads"} <= set(_buttons(ui.panel_keyboard()).values())
 
 

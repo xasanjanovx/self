@@ -93,7 +93,21 @@ def _cand(cid="c1", headline="Barista kerak", long=False, telegram="@cafe_hr"):
 
 
 def _buttons(markup) -> dict:
-    return {b.text: (b.callback_data or b.url) for row in markup.inline_keyboard for b in row}
+    """текст → данные; у кнопок с премиум-иконкой эмодзи уходит из текста в иконку, поэтому добавляем и ключи «эмодзи текст»."""
+    from bot import emoji as pe
+
+    by_id: dict = {}
+    for ch, ident in pe._ID_BY_EMOJI.items():
+        by_id.setdefault(ident, []).append(ch)
+    out: dict = {}
+    for row in markup.inline_keyboard:
+        for b in row:
+            data = b.callback_data or b.url
+            out[b.text] = data
+            for ch in by_id.get(getattr(b, "icon_custom_emoji_id", None), []):
+                out[f"{ch} {b.text}"] = data
+                out[f"{ch}️ {b.text}"] = data
+    return out
 
 
 # ------------------------------------------------------------------ маршрутизация
@@ -168,7 +182,7 @@ def test_picture_failure_is_retried_and_then_shown_without_publish(monkeypatch):
         assert bot.photos == [] and bot.messages == [] and cand["status"] == "new" and cand["img_tries"] == tries
     assert asyncio.run(ui.send_card(bot, OWNER, cand)) is True
     buttons = _buttons(bot.messages[0]["markup"])
-    assert "Картинка не получилась" in bot.messages[0]["text"]
+    assert "Картинки нет" in bot.messages[0]["text"]
     assert "✅ Опубликовать сейчас" not in buttons and buttons["🎨 Нарисовать картинку"] == "vf:img:c1"
     cb = FakeCb("vf:pub:c1", bot)                                                          # старая кнопка тоже не пропустит без картинки
     asyncio.run(ui.cb_publish(cb))
@@ -264,7 +278,7 @@ def test_forward_button_sends_a_clean_post_to_him_and_nothing_to_the_channel():
     assert clean["chat"] == OWNER and clean["markup"] is None and clean["id"] != card_id          # без кнопок — так пересылают в канал
     assert 'emoji-id="5389061359403039918"' in clean["caption"] and "Barista kerak" in clean["caption"]
     assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and (OWNER, card_id) in bot.deleted
-    assert feed.get_candidate("c1")["status"] == "published" and any("перешли его в канал" in n for n in ui._notes)
+    assert feed.get_candidate("c1")["status"] == "published" and any("перешли в канал" in n for n in ui._notes)
     again = FakeCb("vf:fwd:c1", bot)
     asyncio.run(ui.cb_forward(again))
     assert again.answers[-1][1] is True and len(bot.photos) == 2                                  # второй раз не шлём
@@ -397,7 +411,7 @@ def test_feed_has_no_auto_mode_anymore():
     assert not hasattr(ui, "auto_publish") and not hasattr(ui, "cb_undo")
     values = {b.callback_data for row in sett.settings_keyboard().inline_keyboard for b in row}
     assert "vf:s:mode" not in values and "vf:s:imgs" not in values
-    assert "только после твоего" in sett.settings_text() and "решаешь ты" in ui.panel_text()
+    assert "В день" in sett.settings_text() and "Автоподбор" in ui.panel_text()
 
 
 def test_source_decision_buttons():

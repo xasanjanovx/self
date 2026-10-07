@@ -15,7 +15,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 from .. import channel_guard as guard
 from .. import vacancy as vac
 from .. import vacancy_feed as feed
-from ..keyboards import _btn
+from ..keyboards import pbtn as _btn
 from ..profile import h
 from .common import answer_now, safe_edit
 from .vacancy_feed import gap_label, owner_filter
@@ -42,16 +42,12 @@ def settings_text() -> str:
     return "\n".join([
         "⚙️ <b>Настройки вакансий</b>",
         "",
-        "Публикация: <b>только после твоего «Опубликовать»</b> — каждую вакансию бот сначала показывает карточкой",
-        f"В день (карточек): <b>{feed.load()['cap']}</b>",
-        f"Время карточек: <b>{start:02d}:00–{end:02d}:00</b> (Ташкент)",
-        f"Между карточками: <b>{gap_label(int(feed.cfg('card_gap_min')))}</b> · одна карточка за раз, следующая — после твоего решения",
-        f"Защита платного поста наверху: <b>{feed.protect_seconds() / 3600:.0f} ч</b> (меньше 3 нельзя) — включается только твоей отметкой",
-        f"Зарплата обязательна: <b>{'да («по собеседованию» подходит)' if feed.cfg('require_salary') else 'нет'}</b>",
+        f"В день: <b>{feed.load()['cap']}</b>",
+        f"Время: <b>{start:02d}:00–{end:02d}:00</b>",
+        f"Между карточками: <b>{gap_label(int(feed.cfg('card_gap_min')))}</b>",
+        f"Защита платного поста: <b>{feed.protect_seconds() / 3600:.0f} ч</b>",
+        f"Зарплата обязательна: <b>{'да' if feed.cfg('require_salary') else 'нет'}</b>",
         f"Дизайны: <b>{designs} из {len(vac.DESIGNS)}</b>",
-        "",
-        "Фото — всегда в одном посте с текстом (Nano Banana 2.1, Vertex); без картинки пост не публикуется. Премиум-эмодзи бот в канал "
-        "поставить не может — для них на карточке кнопка «📤» (пришлёт готовый пост, перешлёшь сам).",
     ])
 
 
@@ -138,18 +134,12 @@ def ads_text() -> str:
     lines = [
         "🛡 <b>Защита ленты и реклама</b>",
         "",
-        f"<b>Платный пост наверху.</b> {('Сейчас защита: ещё ' + feed.human_wait(feed.hold_left())) if feed.hold_left() > 0 else 'Сейчас платного поста наверху нет.'}",
-        f"Платным пост считается только по твоей отметке: кнопка «💰 Платный пост» при публикации из бота или кнопка ниже, если разместил "
-        f"сам. Тогда {feed.protect_seconds() / 3600:.0f} ч бот не шлёт новые карточки, чтобы пост постоял на топе. Все остальные посты в канале — "
-        "бесплатные, защиты от них нет.",
-        "",
-        f"<b>Реклама (#reklama).</b> Фильтр: {'включён' if feed.cfg('ads_on') else 'выключен'} · "
-        f"режим: {'удалять сразу' if feed.cfg('ads_mode') == 'delete' else 'только сообщать'}",
+        f"Платный пост: {('защита ещё ' + feed.human_wait(feed.hold_left())) if feed.hold_left() > 0 else 'нет'}",
+        f"Реклама #reklama: фильтр {'вкл' if feed.cfg('ads_on') else 'выкл'} · {'удалять' if feed.cfg('ads_mode') == 'delete' else 'сообщать'}",
         "Темы: " + " · ".join(f"{'✅' if cats.get(key) else '⛔'} {label}" for key, label in feed.AD_CATEGORIES.items()),
-        "Твои вакансии в шаблоне канала не трогаю, даже если они про банк.",
     ]
     deleted = [a for a in log if a.get("deleted")]
-    lines += ["", f"Удалено рекламы: {len(deleted)}"]
+    lines += ["", f"Удалено: {len(deleted)}"]
     for entry in log[:3]:
         when = datetime.fromtimestamp(float(entry["ts"]), feed.TZ).strftime("%d.%m %H:%M")
         topics = ", ".join(feed.AD_CATEGORIES.get(t, t) for t in entry.get("topics") or [])

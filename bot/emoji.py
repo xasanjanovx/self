@@ -148,10 +148,29 @@ PLAIN_TO_ID: dict[str, str] = {
     "🪙": "5992430854909989581",
     "🤖": "5985780596268339498",
     "🎙": "5897853622057700958",
+    # 07.10, пак UnigramIcons (t.me/addemoji/UnigramIcons): только то, что раньше шло обычным эмодзи в разделе вакансий
+    "▶": "5870921127685001066",
+    "✂": "5870462219019358212",
+    "👁": "5870542612217204751",
+    "👥": "5870772616305839506",
+    "📤": "5873225338984599714",
+    "⏲": "5870496192210669260",
+    "🖌": "5870601874175954911",
+    "📶": "5870815548798931404",
+    "🔒": "5870704313440932932",
 }
 
 # Эмодзи, которых нет в паке, но есть близкие по смыслу
 _ALIASES: dict[str, str] = {
+    "⏱": "⏲",
+    "⏳": "⏲",
+    "🕗": "⏰",
+    "🕘": "⏰",
+    "✖": "❌",
+    "🎨": "🖌",
+    "📡": "📶",
+    "🔍": "🔎",
+    "🛡": "🔒",
     "🍽": "🍎",
     "🌅": "🌞",
     "⏭": "⏩",
@@ -179,6 +198,16 @@ _SKIP_RE = _re.compile(r"(<tg-emoji[^>]*>.*?</tg-emoji>|<code>.*?</code>|<pre>.*
 
 def id_for(emoji_char: str) -> str | None:
     return _ID_BY_EMOJI.get(str(emoji_char or "").replace("️", ""))
+
+
+def split_icon(text: str) -> tuple[str, str | None]:
+    """«🔄 Другая картинка» → («Другая картинка», id премиум-эмодзи): на кнопке эмодзи — это иконка (icon_custom_emoji_id), а не часть
+    текста. Если текст начинается не с эмодзи из карты — возвращаем как есть."""
+    match = _EMOJI_RE.match(text or "")
+    if not match:
+        return text, None
+    rest = text[match.end():].lstrip()
+    return (rest, _ID_BY_EMOJI[match.group(1)]) if rest else (text, None)
 
 
 def premiumize(text: str | None) -> str | None:
