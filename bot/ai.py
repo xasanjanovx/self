@@ -268,6 +268,12 @@ class VacancyData:
     phone: str | None = None
     telegram: str | None = None
     image_prompt: str | None = None
+    # 07.10 короткие тексты для плаката (автоподбор): крупный шрифт не терпит длинных фраз, а обрезка с «…» рисуется буквально
+    short_title: str | None = None
+    short_salary: str | None = None
+    short_schedule: str | None = None
+    short_place: str | None = None
+    short_perks: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- json utils
@@ -1109,11 +1115,18 @@ class AIService:
             "- phone: ВСЕ телефоны через « | » (например «+998901112233 | +998935556677») или null.\n"
             "- telegram: @username или ссылка t.me для связи или null.\n"
             "- image_prompt: ОЧЕНЬ короткое описание фона картинки НА РУССКОМ (до 7 слов, без точки): место и люди по профессии, "
-            "например «современный колл-центр, улыбающиеся операторы в гарнитурах». Без текста, телефонов, зарплат, компаний.\n\n"
+            "например «современный колл-центр, улыбающиеся операторы в гарнитурах». Без текста, телефонов, зарплат, компаний.\n"
+            "- КОРОТКИЕ ТЕКСТЫ ДЛЯ КРУПНОГО ПЛАКАТА (на узбекской латинице, без многоточий и без обрезанных слов, только факты из вакансии): "
+            "short_title — 2–4 слова: должность + «kerak» (например «Barista kerak», «Sotuvchi-konsultant kerak», «Seh nazoratchisi kerak»); "
+            "short_salary — сумма коротко («4 000 000 so'mdan», «3–11 mln so'm», «400–800$»), без пояснений в скобках; "
+            "short_schedule — график коротко («09:00–18:00, 6/1», «15:00–22:00»); "
+            "short_place — город/район/ориентир до 4 слов; "
+            "short_perks — до 4 преимуществ по 2–3 слова каждое («Tushlik bepul», «Yotoq joy», «Rasmiy ish»), пустой список, если их нет.\n\n"
             "Ответ — ТОЛЬКО JSON такого вида:\n"
             '{"headline":"...","intro":null,"company":null,"region_tag":"#TOSHKENT","address":null,"salary":null,'
             '"schedule":null,"requirements":[],"duties":[],"benefits":[],"extra_sections":[{"title":"...","items":["..."]}],'
-            '"phone":null,"telegram":null,"image_prompt":"..."}\n\n'
+            '"phone":null,"telegram":null,"image_prompt":"...","short_title":"...","short_salary":null,"short_schedule":null,'
+            '"short_place":null,"short_perks":[]}\n\n'
             f"ТЕКСТ ВАКАНСИИ:\n{raw_text}"
         )
         text = await self.generate(
@@ -1151,4 +1164,9 @@ class AIService:
             phone=_clean_text(data.get("phone"), max_len=200),
             telegram=_clean_text(data.get("telegram"), max_len=120),
             image_prompt=_clean_text(data.get("image_prompt"), max_len=900),
+            short_title=_clean_text(data.get("short_title"), max_len=48),
+            short_salary=_clean_text(data.get("short_salary"), max_len=36),
+            short_schedule=_clean_text(data.get("short_schedule"), max_len=36),
+            short_place=_clean_text(data.get("short_place"), max_len=44),
+            short_perks=_clean_list(data.get("short_perks"), max_items=4, max_len=28),
         )

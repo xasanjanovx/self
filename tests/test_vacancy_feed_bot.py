@@ -71,8 +71,8 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(screen, "send_note", fake_note)
     monkeypatch.setattr(ui, "_notes", notes, raising=False)
 
-    async def fake_image(data, scene=None):
-        return image_gen.Banner(b"JPEGDATA")
+    async def fake_image(data, scene=None, *, design=None):
+        return image_gen.Banner(b"JPEGDATA", None, design["id"])
 
     monkeypatch.setattr(image_gen, "vacancy_image", fake_image)
     yield
@@ -302,7 +302,7 @@ def test_vacancy_panel_shows_feed_button_only_to_the_owner():
 
 
 def test_unverified_banner_is_posted_with_a_warning_note(monkeypatch):
-    async def doubtful(data, scene=None):
+    async def doubtful(data, scene=None, *, design=None):
         return image_gen.Banner(b"JPEGDATA", "⚠️ Проверь картинку: телефон на картинке не совпал с вакансией. Если неверно — «Другая картинка».")
 
     monkeypatch.setattr(image_gen, "vacancy_image", doubtful)
@@ -315,3 +315,22 @@ def test_checked_banner_has_no_warning_note():
     bot, cand = FakeBot(), _cand()
     asyncio.run(ui.send_card(bot, OWNER, cand))
     assert ui._notes == []
+
+
+def test_every_card_gets_a_different_design_and_new_picture_changes_it(monkeypatch):
+    used: list = []
+
+    async def pictured(data, scene=None, *, design=None):
+        used.append(design["id"])
+        return image_gen.Banner(b"JPEGDATA", None, design["id"])
+
+    monkeypatch.setattr(image_gen, "vacancy_image", pictured)
+    bot = FakeBot()
+    cands = [_cand(f"c{i}", headline=f"Vakansiya {i} kerak") for i in range(5)]
+    for cand in cands:
+        asyncio.run(ui.send_card(bot, OWNER, cand))
+    assert len(set(used)) == 5                                         # пять вакансий подряд — пять разных дизайнов
+    assert feed.recent_designs()[:5] == used[::-1]
+    before = cands[0]["design"]
+    asyncio.run(ui.cb_new_image(FakeCb("vf:img:c0", bot)))
+    assert cands[0]["design"] != before and len(used) == 6              # «Другая картинка» — другой дизайн, не тот же

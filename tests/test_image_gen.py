@@ -54,7 +54,7 @@ def test_prompt_is_a_full_poster_brief_with_exact_texts_and_a_free_corner_for_th
     for exact in ('"BARISTA"', '"KERAK"', '"ISHGA TAKLIF QILAMIZ!"', "\"4 000 000 so'm\"", '"9:00-18:00"', '"+998 90 123 45 67"', '"@hr_ish"',
                   '"#TOSHKENT"', '"Bepul tushlik"', '"Bahor Coffee"'):
         assert exact in prompt, exact
-    assert "RESERVED ZONE" in prompt and "bottom-left" in prompt and "Do not draw any logo" in prompt
+    assert "RESERVED ZONE" in prompt and "bottom-left" in prompt and "do not draw any logo" in prompt and "NO panel" in prompt
 
 
 def test_image_request_asks_for_3_2_at_2k_and_falls_back_without_size(setup):
@@ -179,22 +179,41 @@ def test_reply_without_image_is_an_error(setup):
         asyncio.run(image_gen.generate("prompt"))
 
 
-def test_logo_lands_bottom_left_and_result_is_jpeg():
+def _logo_box(width=1280, height=720):
+    logo_w = max(40, int(width * image_gen.LOGO_WIDTH_SHARE))
+    from PIL import Image as _I
+
+    logo_h = round(_I.open(image_gen.LOGO_LIGHT).height * logo_w / _I.open(image_gen.LOGO_LIGHT).width)
+    margin = int(width * image_gen.LOGO_MARGIN_SHARE)
+    return margin, height - logo_h - margin, logo_w, logo_h
+
+
+def _count(img, box, predicate):
+    x0, y0, w, h = box
+    return sum(1 for x in range(x0, x0 + w, 2) for y in range(y0, y0 + h, 2) if predicate(img.getpixel((x, y))))
+
+
+def test_logo_on_a_dark_photo_is_the_light_one_without_the_yellow_plate():
     blue = (30, 60, 160)
-    out = image_gen.add_logo(_png(blue))
-    img = Image.open(BytesIO(out))
+    img = Image.open(BytesIO(image_gen.add_logo(_png(blue))))
     assert img.format == "JPEG" and img.size == (1280, 720)
-    margin = int(1280 * image_gen.LOGO_MARGIN_SHARE)
-    logo_w = int(1280 * image_gen.LOGO_WIDTH_SHARE)
-    # внутри плашки логотипа (левый нижний угол) цвет изменился — основной жёлтый фон логотипа
-    r, g, b = img.getpixel((margin + logo_w - 6, 720 - margin - 6))
-    assert r > 200 and g > 150 and b < 120
-    # верхний правый угол остался как был
-    r, g, b = img.getpixel((1270, 10))
-    assert abs(r - blue[0]) < 12 and abs(g - blue[1]) < 12 and abs(b - blue[2]) < 12
-    # логотип не вылезает: правее и выше плашки — исходный фон
-    r, g, b = img.getpixel((margin + logo_w + 30, 720 - margin - 6))
+    box = _logo_box()
+    assert _count(img, box, lambda p: p[0] > 200 and p[1] > 170 and p[2] < 90) > 150      # жёлтый круг и слово есть
+    x0, y0, w, h = box
+    r, g, b = img.getpixel((x0 + 3, y0 + 3))                                               # угол бывшей плашки — снова фон, не жёлтый
+    assert abs(r - blue[0]) < 25 and abs(g - blue[1]) < 25 and abs(b - blue[2]) < 25
+    r, g, b = img.getpixel((1270, 10))                                                      # верхний правый угол как был
+    assert abs(r - blue[0]) < 12 and abs(b - blue[2]) < 12
+    r, g, b = img.getpixel((x0 + w + 40, y0 + h // 2))                                      # правее логотипа — исходный фон
     assert abs(b - blue[2]) < 12
+
+
+def test_logo_on_a_light_photo_is_navy():
+    light = (240, 242, 246)
+    img = Image.open(BytesIO(image_gen.add_logo(_png(light))))
+    box = _logo_box()
+    assert _count(img, box, lambda p: p[2] < 110 and p[0] < 60) > 150                     # тёмно-синие буквы и круг
+    assert _count(img, box, lambda p: p[0] > 200 and p[1] > 170 and p[2] < 90) == 0       # жёлтого нет
 
 
 def test_vacancy_image_is_model_picture_with_logo(setup, monkeypatch):
@@ -217,7 +236,8 @@ def test_missing_logo_still_gives_the_picture(setup, monkeypatch):
         return True, ""
 
     monkeypatch.setattr(image_gen, "inspect", good)
-    monkeypatch.setattr(image_gen, "LOGO", image_gen.LOGO.with_name("nope.png"))
+    monkeypatch.setattr(image_gen, "LOGO_LIGHT", image_gen.LOGO_LIGHT.with_name("nope.png"))
+    monkeypatch.setattr(image_gen, "LOGO_NAVY", image_gen.LOGO_NAVY.with_name("nope.png"))
     banner = asyncio.run(image_gen.vacancy_image(_data()))
     assert banner.image[:4] == b"\x89PNG"                                  # без логотипа, но с картинкой
 
@@ -338,3 +358,48 @@ def test_unchecked_banner_goes_out_with_a_warning_after_a_single_drawing(setup, 
 def test_inspect_rejects_a_misspelled_headline(monkeypatch):
     (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARSITA KERAK", "4 000 000", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
     assert not ok and "заголовок" in why
+
+
+def test_inspect_compares_the_short_salary_that_is_actually_drawn(monkeypatch):
+    data = _data()
+    data.salary = "3 000 000 - 11 000 000 so'm (o'z vaqtida)"
+    data.short_salary = "3-11 mln so'm"
+    from bot.context import ai
+
+    fake = _FakeAI({"lines": ["BARISTA KERAK", "3-11 mln so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    monkeypatch.setattr(ai, "generate", fake.generate)
+    ok, why = asyncio.run(image_gen.inspect(_png(), data))
+    assert ok and why == ""
+
+
+def test_inspect_rejects_a_doubled_headline_word_but_not_repeated_digits(monkeypatch):
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["BARISTA BARISTA KERAK", "4 000 000", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert not ok and "задвоено" in why
+    (ok, _), _ = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "4 000 000", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert ok
+
+
+def test_logo_variant_follows_the_background_under_the_letters_not_the_whole_corner():
+    # красная волна почти под всем логотипом (белым осталась только кромка слева) → светлый (жёлтый) логотип, а не тёмно-синий
+    img = Image.new("RGB", (1280, 720), (245, 245, 245))
+    box = _logo_box()
+    x0, y0, w, h = box
+    for x in range(x0 - 10, x0 + w + 10):
+        for y in range(y0 - 6, y0 + h + 6):
+            if (x - x0) > w * 0.05:
+                img.putpixel((x, y), (215, 25, 28))
+    out = BytesIO()
+    img.save(out, "PNG")
+    result = Image.open(BytesIO(image_gen.add_logo(out.getvalue())))
+    assert _count(result, box, lambda p: p[0] > 200 and p[1] > 170 and p[2] < 90) > 100        # жёлтое слово на красном
+
+
+def test_navy_logo_gets_a_light_halo():
+    # средне-светлый фон → тёмно-синий логотип; вокруг букв светлый ореол, чтобы читался и на красном, и на пёстром фото
+    gray = 150
+    out = BytesIO()
+    Image.new("RGB", (1280, 720), (gray, gray, gray)).save(out, "PNG")
+    result = Image.open(BytesIO(image_gen.add_logo(out.getvalue())))
+    x0, y0, w, h = _logo_box()
+    assert _count(result, (x0, y0, w, h), lambda p: p[2] < 110 and p[0] < 60) > 100          # синий логотип выбран
+    assert result.getpixel((x0 + 2, y0 + h // 2))[0] > gray + 6                              # а у самого края круга — светлее фона

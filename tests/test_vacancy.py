@@ -98,22 +98,93 @@ def test_age_badge_from_requirements():
     assert age_badge(data) is None
 
 
-def test_theme_follows_the_profession():
-    from bot.vacancy import poster_theme
+def test_designs_are_many_and_complete():
+    from bot.vacancy import DESIGNS
+
+    assert len(DESIGNS) >= 10 and len({d["id"] for d in DESIGNS}) == len(DESIGNS)
+    assert all(d["style"] and d["layout"] and d["photo"] for d in DESIGNS)
+
+
+def test_design_follows_the_profession_but_never_repeats_the_recent_ones():
+    from bot.vacancy import pick_design
 
     data = _data()
-    assert poster_theme(data) == "gold"
     data.headline = "Shifokor-stomatolog kerak"
-    assert poster_theme(data) == "clean"
+    assert pick_design(data, seed="x")["id"] == "clean_teal"
     data.headline = "Donarchi va ofitsiant kerak"
-    assert poster_theme(data) == "warm"
+    assert pick_design(data, seed="x")["id"] == "fastfood_red"
+    assert pick_design(data, recent=["fastfood_red"], seed="x")["id"] != "fastfood_red"        # недавний не берём, даже если подходит
+    data.headline = "Operator kerak"
+    seen = []
+    for i in range(12):
+        seen.insert(0, pick_design(data, recent=seen, seed=str(i))["id"])
+    assert all(seen[i] not in seen[i + 1:i + 7] for i in range(len(seen) - 1))                   # в окне из 6 дизайнов повторов нет
+
+
+def test_same_seed_same_design_and_different_seeds_spread():
+    from bot.vacancy import pick_design
+
+    data = _data()
+    data.headline = "Xodim kerak"
+    assert pick_design(data, seed="a")["id"] == pick_design(data, seed="a")["id"]
+    assert len({pick_design(data, seed=str(i))["id"] for i in range(40)}) >= 6
 
 
 def test_poster_prompt_quotes_exact_texts_and_reserves_the_logo_corner():
     from bot.vacancy import build_poster_prompt, pretty_phone
 
     assert pretty_phone("+998901234567 | +998935556677") == "+998 90 123 45 67"
-    prompt = build_poster_prompt(_data(), scene="кафе")
+    prompt = build_poster_prompt(_data(), scene="кафе", design="neon_green")
+    assert "LIME-GREEN" in prompt and "STYLE:" in prompt
     assert '"CALL-CENTER"' in prompt and "\"4 000 000 so'm + bonus\"" in prompt and '"+998 90 123 45 67"' in prompt and '"@hr_ish"' in prompt
     assert "RESERVED ZONE" in prompt and "bottom-left" in prompt
     assert "Qulayliklar" not in prompt and '"Tushlik bepul"' in prompt             # преимущества — подписями к иконкам
+
+
+def test_cut_words_never_leaves_an_ellipsis_or_half_a_word():
+    from bot.vacancy import cut_words
+
+    assert cut_words("Yotoq joy ishxona hisobidan", 14) == "Yotoq joy"
+    assert cut_words("Kompaniya tomonidan qo'shimcha", 20) == "Kompaniya tomonidan"
+    assert cut_words("Short", 20) == "Short"
+    assert cut_words(None, 10) is None
+    assert "…" not in (cut_words("a" * 50 + " " + "b" * 50, 60) or "")
+
+
+def test_poster_uses_the_short_texts_and_never_draws_an_ellipsis():
+    from bot.vacancy import build_poster_prompt
+
+    data = _data()
+    data.headline = "Bolalar kiyim do'koniga sotuvchi-konsultant qizlarni taklif qilamiz"
+    data.short_title = "Sotuvchi-konsultant kerak"
+    data.salary = "3 000 000 - 5 000 000 so'm (oz vaqtida to'lanadi, bonuslar bilan)"
+    data.short_salary = "3–5 mln so'm"
+    data.short_schedule = "15:00–22:00"
+    data.short_place = "Mirzo Ulug'bek"
+    data.short_perks = ["Tushlik bepul", "Rasmiy ish"]
+    prompt = build_poster_prompt(data, scene="do'kon", design="gold_black")
+    for exact in ('"SOTUVCHI-KONSULTANT"', '"KERAK"', "\"3–5 mln so'm\"", '"15:00–22:00"', "\"Mirzo Ulug'bek\"",
+                  '"Tushlik bepul"', '"Rasmiy ish"'):
+        assert exact in prompt, exact
+    assert "…" not in prompt and "workplace" not in prompt and "qizlarni" not in prompt
+
+
+def test_without_short_texts_the_full_ones_are_cut_at_word_boundaries():
+    from bot.vacancy import build_poster_prompt
+
+    data = _data()
+    data.benefits = ["Yotoq joy ishxona hisobidan", "3 mahal ovqat ishxona hisobidan"]
+    data.schedule = "08:00 dan 17:00 gacha (doimiy aloqada bo'lish vaqti 07:00–22:00)"
+    prompt = build_poster_prompt(data, scene="seh")
+    assert "…" not in prompt and '"Yotoq joy ishxona"' in prompt and "doimiy" not in prompt and "hisobid" not in prompt
+
+
+def test_prompt_forbids_extra_elements_and_literal_plus_signs():
+    from bot.vacancy import build_poster_prompt
+
+    data = _data()
+    data.requirements = ["Rus tili"]                      # возраста нет — бейджа в плакате быть не должно
+    prompt = build_poster_prompt(data, scene="ofis", design="worker_left_dark")
+    assert "ONLY THE LISTED ELEMENTS" in prompt and "badge" in prompt.lower()
+    assert "Round accent-coloured badge" not in prompt     # элемента-бейджа в списке текстов нет
+    assert "icon + " not in prompt and "followed by the text" in prompt

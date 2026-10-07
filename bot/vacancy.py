@@ -286,28 +286,158 @@ def build_full_prompt(data: VacancyData, *, scene: str | None = None, for_logo: 
 # Его референсы: тёмный фон + акцентный цвет, огромный двухцветный заголовок, плашка «ISHGA TAKLIF QILAMIZ!», карточки с иконками
 # (зарплата, график), ряд преимуществ, карточка контактов, бейдж возраста, фотореалистичные улыбающиеся люди. Просто «баннер с текстом»
 # (build_full_prompt) выглядел как шаблон — этот промпт задаёт целый дизайн.
-_THEMES = {
-    "gold": ("Deep black / charcoal background with a warm cinematic gradient. Signature accent: rich GOLD-YELLOW (#FFC400) with a "
-             "subtle metallic gradient and soft glow; secondary text pure white; thin gold outlines; dark glass rounded cards."),
-    "clean": ("Bright, clean, trustworthy look: white and very light background with soft teal-turquoise (#14A3A8) accents, deep navy "
-              "(#0B2A4A) headline text, soft shadows, light glass cards with thin teal outlines."),
-    "warm": ("Appetising high-energy look: black background with warm fiery lighting, accent colours RED (#E02424) and golden YELLOW "
-             "(#FFC400), white text, red ribbon labels, dark glass cards with thin yellow outlines."),
-}
-_THEME_WORDS = {
-    "clean": ("shifokor", "klinika", "hamshira", "vrach", "stomatolog", "dorixona", "apteka", "laborant", "врач", "клиник", "медсестр",
-              "аптек", "стоматолог", "o'qituvchi", "tarbiyachi", "учител", "воспитател"),
-    "warm": ("oshpaz", "povar", "ofitsiant", "donarchi", "kafe", "restoran", "fast food", "barista", "pitsa", "pizza", "shashlik",
-             "non yopuvchi", "qandolat", "повар", "официант", "кафе", "ресторан", "пекар", "кондитер"),
-}
+# И его просьба: «все вакансии не одним и тем же дизайном, каждый раз по-другому» — поэтому не один стиль, а набор DESIGNS: палитра,
+# шрифт, раскладка и подача фото у каждого свои. Выбор — pick_design: по профессии (fit), но без повторов подряд.
+DESIGNS: list[dict] = [
+    {
+        "id": "gold_black",
+        "fit": (),
+        "style": ("Deep black / charcoal background with a warm cinematic gradient. Signature accent: rich GOLD-YELLOW (#FFC400) with a subtle "
+                  "metallic gradient and soft glow; secondary text pure white; thin gold outlines; dark glass rounded cards. Ultra-bold "
+                  "geometric sans for the headline, clean sans for details."),
+        "layout": ("The left ~55% is the text column over a smooth dark gradient that blends seamlessly into the photo that bleeds to the right "
+                   "edge. Huge headline at the top-left, the pill under it, then the salary and schedule cards (side by side or stacked), "
+                   "the location row, the contact card at the bottom-right over the photo, the round badge in the top-right corner."),
+        "photo": ("One confident person, waist-up, looking at the camera, in the real working environment of this job; warm window light, shallow "
+                  "depth of field."),
+    },
+    {
+        "id": "fastfood_red",
+        "fit": ("oshpaz", "povar", "ofitsiant", "donarchi", "kafe", "restoran", "fast food", "barista", "pitsa", "pizza", "shashlik",
+                "qandolat", "повар", "официант", "кафе", "ресторан", "пекар", "кондитер", "bufet", "oshxona"),
+        "style": ("Black background with fiery warm lighting; accents RED (#E02424) and golden YELLOW (#FFC400); white text; heavy "
+                  "condensed italic headline; red ribbon labels with a slanted edge; a diagonal yellow corner shape."),
+        "layout": ("Headline top-left in white and yellow; the pill as a red slanted ribbon label; the salary in a bold black box with a red "
+                   "tab over the lower right of the photo; a dark horizontal information strip along the bottom made of three columns "
+                   "(schedule | perks | contact) that starts to the right of the reserved logo corner; the location sits in the yellow "
+                   "corner shape in the top-right; the age badge, if any, next to it."),
+        "photo": ("Dynamic action shot of the worker doing the job (cooking, serving, steam, warm sparks of light), photo fills the right and "
+                  "centre, shallow depth of field."),
+    },
+    {
+        "id": "neon_green",
+        "fit": ("sotuv", "savdo", "menejer", "operator", "call", "marketing", "agent", "sales", "менеджер", "продаж", "оператор"),
+        "style": ("Near-black background with an emerald-black gradient; neon LIME-GREEN accent (#9BE000) with a glow; white text; modern "
+                  "rounded geometric sans; frosted glass cards with a soft green glow; a flowing lime swoosh wave in the bottom-right corner."),
+        "layout": ("Small hashtag chip top-left; huge headline on two lines (white + lime) on the left; three equal glass cards in a row "
+                   "(salary, schedule, location); the pill and the contact block as a lime pill-shaped button with the Telegram icon and "
+                   "handle plus the phone next to it near the bottom centre-right; the photo takes the right half."),
+        "photo": ("Two confident smiling colleagues in the foreground, a modern open-space office with a busy team softly blurred behind them."),
+    },
+    {
+        "id": "clean_teal",
+        "fit": ("shifokor", "klinika", "hamshira", "vrach", "stomatolog", "dorixona", "apteka", "laborant", "врач", "клиник", "медсестр",
+                "аптек", "stomatolog", "o'qituvchi", "tarbiyachi", "учител", "воспитател"),
+        "style": ("Bright, clean, trustworthy look: white background with soft teal-turquoise (#14A3A8) accents and a deep navy (#0B2A4A) "
+                  "headline; soft shadows; light rounded cards with thin teal outlines; a friendly humanist sans."),
+        "layout": ("The left ~52% is a white panel with a smooth curved right edge overlapping the photo: large navy + teal headline, the "
+                   "pill, two info cards side by side with round teal icon badges, the location row and the perks as compact bullet "
+                   "columns with small teal check icons; the contact card as a wide teal rounded bar across the lower part of the photo side."),
+        "photo": ("A friendly smiling professional in clean work clothes at a bright, airy, modern reception or clinic interior."),
+    },
+    {
+        "id": "worker_left_dark",
+        "fit": ("qurilish", "elektrik", "usta", "payvand", "zavod", "seh", "haydovchi", "kuryer", "ombor", "xavfsizlik", "quruvchi",
+                "santexnik", "mexanik", "slesar", "stroit", "электр", "водител", "курьер", "склад", "охран", "сварщ"),
+        "style": ("Dark navy-black with a strong industrial feel; accent GOLD-YELLOW (#FFC400) with subtle safety-stripe details; thick "
+                  "condensed italic headline; faint haze and warm sparks."),
+        "layout": ("Mirrored layout: the full-height photo of the worker fills the LEFT ~48% (its lower-left area dark and calm), the text "
+                   "column is on the RIGHT: tag chip, huge two-line headline (white + yellow), a salary card with a big number, the "
+                   "schedule card, the location row with a pin icon, the contact card at the bottom-right, the round badge top-right."),
+        "photo": ("Dramatic cinematic shot of one worker in protective gear (hard hat, gloves) mid-task, strong rim light and warm sparks."),
+    },
+    {
+        "id": "red_white_bold",
+        "fit": ("ishchi", "ishlab chiqarish", "tikuvchi", "yig'uvchi", "sex", "paketlov", "фабрик", "рабоч", "швея", "упаков", "grunt"),
+        "style": ("Clean WHITE background with bold RED (#D7191C) and black condensed type, flat vector accents (megaphone icon, speech "
+                  "burst), a catalogue-like corporate look; a red wave along the bottom edge that rises only on the right side."),
+        "layout": ("A megaphone icon top-left; the headline in two lines (red, then black) on the upper left; the salary inside a red rounded "
+                   "rectangle with a white money icon; the contact lines as outlined rounded rows with red icon badges; the photo of the "
+                   "people at the bottom-right standing in front of the red wave."),
+        "photo": ("Two smiling workers in company uniforms and hard hats, arms crossed, cut out cleanly on the white background."),
+    },
+    {
+        "id": "navy_cyan_tech",
+        "fit": ("bank", "kredit", "moliya", "buxgalter", "dasturchi", "programmist", "kompyuter", "банк", "кредит", "бухгалтер",
+                "программист", "mikromoliya", "kassir", "inkassator"),
+        "style": ("Deep midnight-navy to electric-blue gradient with a subtle hexagon / data-grid pattern and glowing CYAN (#27E1FF) accents; "
+                  "futuristic but friendly; white text; geometric sans; thin glowing lines and soft lens flares."),
+        "layout": ("The photo of the person on the right with a cyan rim light and glowing circuit-line decorations fading out of it; text on "
+                   "the left: huge white headline with a cyan second line, the pill as a glowing outlined capsule, the info cards as "
+                   "translucent glass panels with cyan icons, the contact card at the bottom-right."),
+        "photo": ("One smiling professional at a desk with a laptop or monitor glow, cool blue ambient light with a cyan rim light."),
+    },
+    {
+        "id": "sunset_orange",
+        "fit": ("do'kon", "sotuvchi", "kiyim", "kosmetika", "go'zallik", "bolalar", "moda", "magazin", "мага", "продавец", "одежд", "salon",
+                "konsultant", "консультант"),
+        "style": ("Vibrant sunset gradient (orange #FF7A18 → hot pink #FF2E63 → deep purple), energetic and glossy; white text with soft "
+                  "shadows; chunky rounded sans; confetti-like geometric shapes and a big diagonal split."),
+        "layout": ("A bold diagonal split: the gradient with the text on the left; the cut-out person on the right overlapping the diagonal "
+                   "and slightly the end of the headline; the pill as a white capsule with colourful text; info cards as white rounded cards "
+                   "with gradient icon badges; the contact as a white pill at the bottom-right."),
+        "photo": ("A cheerful person cut out with a soft white outline and glow, dynamic friendly pose, hints of a shop or salon behind."),
+    },
+    {
+        "id": "emerald_cream",
+        "fit": ("mehmonxona", "hotel", "administrator", "resepshn", "reception", "salon", "ofitsiant", "администратор", "ресепшн",
+                "gostinitsa", "menejer-administrator"),
+        "style": ("Premium emerald-green (#0F5C4A) and warm cream (#F6EFE0) with fine brass-gold (#C9A24B) lines; elegant: a refined serif "
+                  "headline mixed with a clean sans; a subtle paper texture and a thin ornamental frame."),
+        "layout": ("A cream panel on the left carries the text: the headline in deep green serif with the second line in gold, the pill, "
+                   "details as elegant rows with thin line icons separated by hairlines; the photo on the right inside a tall arch-shaped "
+                   "frame with a soft green glow; the contact in an emerald rounded rectangle at the bottom-right."),
+        "photo": ("An elegant, warm, upscale environment; one polished smiling person in smart business-casual or a neat uniform."),
+    },
+    {
+        "id": "purple_glass",
+        "fit": (),
+        "style": ("Rich violet (#5B2EFF) to deep indigo to magenta (#C026D3) gradient with glassmorphism: frosted translucent cards, soft "
+                  "glowing orbs and light streaks; white text; a modern rounded sans."),
+        "layout": ("The photo of the person inside a large circle with a glowing ring on the right-centre, partly overlapping the headline "
+                   "block; text on the left; frosted glass cards for salary and schedule; the contact in a glowing pill at the bottom-right."),
+        "photo": ("A friendly person in a bright modern setting, framed in a circle, soft bokeh."),
+    },
+    {
+        "id": "yellow_pop",
+        "fit": ("kuryer", "yetkazib", "haydovchi", "taksi", "talaba", "kurier", "курьер", "студент", "promouter", "targ'ibotchi"),
+        "style": ("Bold BRAND-YELLOW (#FFD400) background with thick black type and black geometric blocks — a high-contrast pop-poster look; "
+                  "a black diagonal band; star-burst stickers and hand-drawn arrows; a chunky heavy grotesque headline."),
+        "layout": ("The headline huge in black on yellow at the top-left; the salary inside a black star-burst sticker overlapping the photo; "
+                   "a black diagonal band carries the schedule and perks in yellow and white; the contact card black with yellow text at the "
+                   "bottom-right; the person cut out on the right with a thick sticker outline."),
+        "photo": ("An energetic cheerful person, cut-out sticker style with a thick white-and-black outline."),
+    },
+    {
+        "id": "editorial_light",
+        "fit": (),
+        "style": ("Minimal editorial magazine look: off-white paper (#F4F1EA), a huge black sans-serif headline with tight tracking, one bold "
+                  "accent colour (vermilion #FF4B2B), thin black rules, generous white space, small-caps labels."),
+        "layout": ("A huge headline across the top-left in black with the second line in vermilion; a large circular photo cut-out on the right "
+                   "overlapping a thin ring; the details in a clean grid below separated by thin rules with small outlined icons; the "
+                   "contact line at the bottom-right with a vermilion underline; the age badge as a vermilion circle."),
+        "photo": ("A natural lifestyle portrait in soft daylight, a relaxed smile, the working environment gently blurred."),
+    },
+]
+_DESIGN_BY_ID = {d["id"]: d for d in DESIGNS}
+RECENT_AVOID = 6                  # столько последних дизайнов не повторяем
 
 
-def poster_theme(data: VacancyData, scene: str | None = None) -> str:
-    text = " ".join(filter(None, [data.headline, data.company, scene])).lower().replace("ʻ", "'").replace("‘", "'").replace("’", "'")
-    for name, words in _THEME_WORDS.items():
-        if any(word in text for word in words):
-            return name
-    return "gold"
+def _plain(text: str) -> str:
+    return text.lower().replace("ʻ", "'").replace("‘", "'").replace("’", "'").replace("ё", "е")
+
+
+def pick_design(data: VacancyData, scene: str | None = None, *, recent: tuple[str, ...] | list[str] = (), seed: str = "") -> dict:
+    """Дизайн постера: сначала по профессии (fit), но не из последних RECENT_AVOID; нет подходящих — любой из «давно не было».
+    seed делает выбор воспроизводимым (id вакансии + номер перерисовки), а перерисовка получает другой дизайн."""
+    import hashlib
+
+    text = _plain(" ".join(filter(None, [data.headline, data.company, scene])))
+    recent = list(recent)
+    fresh = [d for d in DESIGNS if d["id"] not in recent[:RECENT_AVOID]]
+    fitting = [d for d in fresh if any(word in text for word in d["fit"])]
+    pool = fitting or fresh or [d for d in DESIGNS if d["id"] != (recent[0] if recent else "")] or DESIGNS
+    return pool[int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(pool)]
 
 
 def split_headline(headline: str) -> tuple[str, str]:
@@ -339,64 +469,90 @@ def pretty_phone(phone: str | None) -> str | None:
     return first or None
 
 
-def build_poster_prompt(data: VacancyData, *, scene: str | None = None, theme: str | None = None) -> str:
-    """Промпт постера для Nano Banana: полный дизайн-бриф (стиль, композиция, фото, ТОЧНЫЕ тексты) + зона под логотип слева внизу."""
-    theme = theme if theme in _THEMES else poster_theme(data, scene)
-    line1, line2 = split_headline(data.headline)
+def cut_words(text: str | None, limit: int) -> str | None:
+    """Обрезка по границе слова БЕЗ многоточия (модель рисует «…» буквально) — запасной путь, если нейросеть не дала короткий текст."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip(" .;,:-–—")
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else text[:limit]
+    if cut.count("(") > cut.count(")"):          # не оставляем висящую скобку
+        cut = cut[: cut.rfind("(")]
+    return cut.strip(" .;,:-–—(") or None
+
+
+def poster_title(data: VacancyData) -> str:
+    """Крупный заголовок плаката: короткий от нейросети (2–4 слова) или обрезанный полный."""
+    return data.short_title or cut_words(data.headline, 38) or "Xodim kerak"
+
+
+def build_poster_prompt(data: VacancyData, *, scene: str | None = None, design: dict | str | None = None) -> str:
+    """Промпт постера для Nano Banana: дизайн-бриф выбранного стиля (палитра, раскладка, фото) + ТОЧНЫЕ тексты + зона под логотип слева внизу."""
+    if isinstance(design, str):
+        design = _DESIGN_BY_ID.get(design)
+    design = design or _DESIGN_BY_ID["gold_black"]
+    line1, line2 = split_headline(poster_title(data))
     region = region_name(data.region_tag)
-    place = data.address if data.address and region.lower() in data.address.lower() else ", ".join(filter(None, [data.address, region]))
+    full_place = data.address if data.address and region.lower() in data.address.lower() else ", ".join(filter(None, [data.address, region]))
+    place = data.short_place or cut_words(full_place, 40)
     pill = "YANGI VAKANSIYA!" if "taklif" in (data.headline or "").lower() else "ISHGA TAKLIF QILAMIZ!"
     phone = pretty_phone(data.phone)
     handle = vac_handle(data.telegram)
     texts = [f'Small tag (letter-spaced, accent colour): "{data.region_tag}"',
-             f'HEADLINE — huge heavy condensed sans-serif, ALL CAPS, two lines: line 1 white "{line1}"'
-             + (f', line 2 in the accent colour (metallic gradient) "{line2}"' if line2 else ""),
-             f'Pill label (accent-coloured rounded rectangle, dark bold text): "{pill}"']
+             f'HEADLINE — huge, ALL CAPS, two lines: line 1 "{line1}"'
+             + (f', line 2 in the accent colour "{line2}"' if line2 else ""),
+             f'Pill label (accent-coloured rounded label, bold): "{pill}"']
     if data.company:
-        texts.append(f'Company name (small, under the pill): "{_short(data.company, 44)}"')
-    if data.salary:
-        texts.append(f'Info card with a wallet icon in a circle — label "Oylik maosh:" and below it the value, large, bold, accent colour: "{_short(data.salary, 40)}"')
-    if data.schedule:
-        texts.append(f'Info card with a clock icon in a circle — label "Ish vaqti:" and below it, bold white: "{_short(data.schedule, 38)}"')
+        texts.append(f'Company name (small, near the pill): "{cut_words(data.company, 40)}"')
+    salary = data.short_salary or cut_words(data.salary, 32)
+    if salary:
+        texts.append(f'Info card with a wallet icon in a circle — label "Oylik maosh:" and below it the value, large, bold, accent colour: "{salary}"')
+    schedule = data.short_schedule or cut_words(data.schedule, 30)
+    if schedule:
+        texts.append(f'Info card with a clock icon in a circle — label "Ish vaqti:" and below it, bold: "{schedule}"')
     if place:
-        texts.append(f'Location row with a map-pin icon: "{_short(place, 50)}"')
-    perks = [p for p in (_short(b, 26) for b in data.benefits[:4]) if p]
+        texts.append(f'Location row with a map-pin icon: "{place}"')
+    perks = [p for p in (data.short_perks or [cut_words(b, 22) for b in data.benefits]) if p and len(p) >= 4][:4]
     if perks:
         texts.append("Perks row — " + str(len(perks)) + " small line icons, each with a 2–3 word caption under it, exactly: "
                      + ", ".join(f'"{p}"' for p in perks))
     badge = age_badge(data)
     if badge:
-        texts.append(f'Round accent-coloured badge in the top-right corner: "{badge}"')
+        texts.append(f'Round accent-coloured badge: "{badge}"')
     contacts = []
     if phone:
-        contacts.append(f'phone icon + "{phone}"')
+        contacts.append(f'a phone icon followed by the text "{phone}"')
     if handle:
-        contacts.append(f'Telegram paper-plane icon + "{handle}"')
+        contacts.append(f'a Telegram paper-plane icon followed by the text "{handle}"')
     if contacts:
-        texts.append("Contact card (dark glass rounded box with a thin accent outline, bottom-right): " + " ; ".join(contacts))
+        texts.append("Contact card styled to match the design: " + " ; ".join(contacts))
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, 1))
     subject = (scene or "").strip().rstrip(".")
     return "\n".join([
         "Design a premium, scroll-stopping JOB VACANCY POSTER for a Telegram jobs channel in Uzbekistan. Landscape 3:2, ultra-sharp, "
         "professional advertising-agency quality — the level of top recruitment ads, not a plain stock template.",
         "",
-        f"STYLE: {_THEMES[theme]}",
+        f"STYLE: {design['style']}",
         "",
-        "COMPOSITION: the left ~55% is the text column over a smooth dark/light gradient that blends seamlessly into the photo on the right "
-        "~45%. Clear hierarchy: headline → salary → details → contact. Consistent generous margins, perfect alignment, crisp vector-clean thin "
-        "line icons inside circles, rounded glass cards with thin outlines, soft glow and depth. Dense but tidy, every element intentional.",
+        f"COMPOSITION: {design['layout']} Clear hierarchy: headline → salary → details → contact. Consistent generous margins, perfect "
+        "alignment, crisp vector-clean thin line icons inside circles, soft glow and depth. Dense but tidy, every element intentional.",
         "",
-        "PHOTO (right side, photorealistic): " + (f"scene — {subject}; " if subject else "")
-        + f"job — {data.headline}. One or two friendly, confident, smiling people of Central Asian (Uzbek) appearance looking at the camera, "
-        "natural poses, wearing work clothes typical for this job, realistic faces and hands. Shot on an 85mm lens, shallow depth of field, "
-        "cinematic rim light, warm bokeh; the real workplace of this profession is visible behind them.",
+        "PHOTO (photorealistic): " + (f"scene — {subject}; " if subject else "") + f"job — {poster_title(data)}. {design['photo']} "
+        "People of Central Asian (Uzbek) appearance, realistic faces and hands, wearing work clothes typical for this job; shot on an 85mm "
+        "lens; the real working environment of this profession is visible.",
         "",
         "TEXT — write every string EXACTLY as given between the quotes, in Uzbek Latin, letter for letter, keeping the same apostrophes, digits "
         "and spacing. Add no other words, no placeholder or gibberish text:",
         numbered,
         "",
-        "RESERVED ZONE: keep the bottom-left corner (left third of the width, bottom 18% of the height) empty — a smooth continuation of the "
-        "background with no text, icons or cards — a logo will be placed there. Do not draw any logo or channel name yourself.",
+        "RESERVED ZONE: the bottom-left corner (left third of the width, bottom 18% of the height) must look like the ordinary background — "
+        "the same gradient, texture or photo simply continues through it. NO panel, plate, box, card, outline, bar, rounded shape or contrasting "
+        "rectangle there, and no text or icons; bottom strips or bars start to the right of it. A logo will be pasted into that spot later — "
+        "do not draw any logo, placeholder or channel name yourself.",
+        "ONLY THE LISTED ELEMENTS: draw only what is listed under TEXT. If the layout above mentions an element that is not listed (a badge, "
+        "perks, a company name, a second card), leave it out completely. Never draw seals, stamps or stickers carrying words, never repeat a "
+        "word of the headline, and never write labels such as \"badge\", \"logo\" or \"approved\".",
         "QUALITY: flawless spelling, sharp edges, no distorted letters, no watermark, no extra logos.",
     ])
 

@@ -242,16 +242,22 @@ def _read_image(cid: str) -> bytes | None:
         return None
 
 
-async def _make_image(cand: dict[str, Any]) -> tuple[bytes | None, str | None]:
-    """→ (картинка или None, предупреждение, если проверка баннера не прошла и после перерисовок)."""
+async def _make_image(cand: dict[str, Any], *, again: bool = False) -> tuple[bytes | None, str | None]:
+    """→ (картинка или None, предупреждение, если проверка баннера не прошла и после перерисовок).
+    Дизайн каждый раз другой (vacancy.pick_design: по профессии, но не из последних); «Другая картинка» — ещё и другой дизайн."""
+    data = feed.data_from_dict(cand["data"])
+    recent = ([cand["design"]] if again and cand.get("design") else []) + feed.recent_designs()
+    design = vac.pick_design(data, cand.get("scene"), recent=recent, seed=f"{cand['id']}:{cand.get('regen', 0)}")
     try:
-        banner = await image_gen.vacancy_image(feed.data_from_dict(cand["data"]), cand.get("scene"))
+        banner = await image_gen.vacancy_image(data, cand.get("scene"), design=design)
     except image_gen.ImageError as exc:
         logger.warning("vacancy_feed: картинка %s не вышла: %s", cand["id"], exc)
         return None, None
     except Exception:
         logger.exception("vacancy_feed: картинка %s сломалась", cand["id"])
         return None, None
+    cand["design"] = banner.design or design["id"]
+    feed.note_design(cand["design"])
     try:
         feed.image_path(cand["id"]).write_bytes(banner.image)
     except OSError:
@@ -264,7 +270,7 @@ async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate:
     image = None if regenerate else _read_image(cand["id"])
     warning = cand.get("image_warning") if image else None
     if image is None:
-        image, warning = await _make_image(cand)
+        image, warning = await _make_image(cand, again=regenerate)
         cand["image_warning"] = warning
     post, contact_url = _post_html(cand, bool(feed.load().get("premium")))
     shown = post if image else post + '\n\n' + "⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."

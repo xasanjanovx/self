@@ -29,8 +29,10 @@ logger = logging.getLogger(__name__)
 MODELS = ("gemini-nano-banana-2.1", "gemini-3.1-flash-image")
 ASPECT = "3:2"                        # как референсы: 1536×1024 — больше места под дизайн, чем у 16:9
 IMAGE_SIZE = "2K"                     # крупнее — мелкий текст и иконки чётче (Telegram потом сам уменьшит)
-LOGO = Path(__file__).parent / "assets" / "ishdasiz_logo.png"
-LOGO_WIDTH_SHARE = 0.30               # ширина логотипа — доля ширины картинки
+LOGO_LIGHT = Path(__file__).parent / "assets" / "ishdasiz_logo_light.png"   # для тёмных фонов
+LOGO_NAVY = Path(__file__).parent / "assets" / "ishdasiz_logo_navy.png"     # для светлых (scripts/make_logo.py)
+LIGHT_BACKGROUND = 123                # средняя яркость фона под буквами; выше — тёмно-синий логотип (середина между яркостью светлого ≈215 и синего ≈32)
+LOGO_WIDTH_SHARE = 0.27               # ширина логотипа — доля ширины картинки
 LOGO_MARGIN_SHARE = 0.03              # отступ от левого и нижнего края
 _RETRY = {429, 500, 502, 503, 504}
 _client: Any = None
@@ -47,10 +49,10 @@ def _http() -> Any:
     return _client
 
 
-def build_prompt(data: VacancyData, scene: str | None = None) -> str:
+def build_prompt(data: VacancyData, scene: str | None = None, design: dict | str | None = None) -> str:
     """Дизайн-бриф постера (vacancy.build_poster_prompt): тёмный стиль с акцентом, двухцветный заголовок, карточки зарплаты и графика,
     ряд преимуществ, карточка контактов, бейдж возраста, фото людей; все тексты точно, на узбекской латинице; левый нижний угол пустой под логотип."""
-    return vac.build_poster_prompt(data, scene=scene)
+    return vac.build_poster_prompt(data, scene=scene, design=design)
 
 
 def _extract(data: dict[str, Any]) -> bytes | None:
@@ -121,18 +123,41 @@ async def generate(prompt: str, *, client: Any | None = None, models: tuple[str,
 
 
 def add_logo(image: bytes, *, logo_path: Path | None = None) -> bytes:
-    """Логотип канала — в левый нижний угол; на выходе JPEG (в Telegram он легче PNG от модели)."""
-    from PIL import Image
+    """Логотип канала — в левый нижний угол, без жёлтой плашки: на тёмном фоне — светлая версия (жёлтый круг и слово, белый слоган),
+    на светлом — тёмно-синяя; какая нужна — по яркости фона под ним. Мягкая тень, чтобы сидел на фото. На выходе JPEG (в Telegram он
+    легче PNG от модели)."""
+    import numpy as np
+    from PIL import Image, ImageFilter
 
-    base = Image.open(BytesIO(image)).convert("RGB")
-    logo = Image.open(logo_path or LOGO).convert("RGBA")
+    base = Image.open(BytesIO(image)).convert("RGBA")
     width = max(40, int(base.width * LOGO_WIDTH_SHARE))
-    height = max(1, round(logo.height * width / logo.width))
-    logo = logo.resize((width, height), Image.LANCZOS)
     margin = int(base.width * LOGO_MARGIN_SHARE)
-    base.paste(logo, (margin, base.height - height - margin), logo)
+    source = Image.open(logo_path or LOGO_LIGHT).convert("RGBA")
+    height = max(1, round(source.height * width / source.width))
+    x, y = margin, base.height - height - margin
+    logo = source.resize((width, height), Image.LANCZOS)
+    dark_background = True
+    if logo_path is None:
+        # яркость фона именно под буквами и кругом (а не всего угла): красная волна под половиной слова — это тёмный фон
+        weights = np.asarray(logo.split()[3], dtype=np.float32) / 255.0
+        under = np.asarray(base.crop((x, y, x + width, y + height)).convert("L"), dtype=np.float32)
+        brightness = float((under * weights).sum() / max(1.0, weights.sum()))
+        dark_background = brightness <= LIGHT_BACKGROUND
+        if not dark_background:
+            logo = Image.open(LOGO_NAVY).convert("RGBA").resize((width, height), Image.LANCZOS)
+    # мягкая тень под светлым логотипом и светлый ореол вокруг тёмно-синего: читается и на красной волне, и на пёстром фото
+    if dark_background:
+        color, strength, offset, radius = (0, 0, 0), 0.55, max(2, height // 30), max(2, height // 14)
+    else:
+        color, strength, offset, radius = (255, 255, 255), 0.9, 0, max(2, height // 10)
+    mask = Image.new("L", base.size, 0)
+    mask.paste(logo.split()[3].point(lambda a: int(a * strength)), (x, y + offset))
+    glow = Image.new("RGBA", base.size, color + (0,))
+    glow.putalpha(mask.filter(ImageFilter.GaussianBlur(radius)))
+    base = Image.alpha_composite(base, glow)
+    base.alpha_composite(logo, (x, y))
     out = BytesIO()
-    base.save(out, "JPEG", quality=92, optimize=True)
+    base.convert("RGB").save(out, "JPEG", quality=92, optimize=True)
     return out.getvalue()
 
 
@@ -140,7 +165,8 @@ ATTEMPTS = 3                          # столько раз перерисов
 _INSPECT_PROMPT = (
     "Это рекламный баннер вакансии. Прочитай ВЕСЬ текст на нём дословно, ничего не исправляя и не додумывая. "
     'Ответь ТОЛЬКО JSON: {"lines":["строка 1","строка 2"],"text_in_bottom_left":false}. '
-    "text_in_bottom_left — true, если в левом нижнем углу (левая треть ширины, нижние 20% высоты) есть любой текст, цифры, значок или плашка."
+    "text_in_bottom_left — true, только если в левом нижнем углу (левая треть ширины, нижние 20% высоты) есть текст, цифры, значок, "
+    "иконка или часть карточки с содержимым. Пустая плашка, градиент, полоса или простой фон — это false."
 )
 
 
@@ -148,6 +174,7 @@ _INSPECT_PROMPT = (
 class Banner:
     image: bytes
     warning: str | None = None        # проверка не прошла и после перерисовок — владельцу скажем, что сверить
+    design: str = ""                  # какой дизайн из vacancy.DESIGNS нарисован
 
 
 def _salary_numbers(salary: str | None) -> list[str]:
@@ -188,19 +215,24 @@ async def inspect(raw: bytes, data: VacancyData) -> tuple[bool | None, str]:
     first_phone = re.sub(r"\D", "", (data.phone or "").split("|")[0])[-9:]
     if len(first_phone) == 9 and first_phone not in seen:
         problems.append("телефон на картинке не совпал с вакансией")
-    if any(number not in seen for number in _salary_numbers(data.salary)):
+    if any(number not in seen for number in _salary_numbers(data.short_salary or data.salary)):   # сверяем то, что нарисовано
         problems.append("сумма зарплаты на картинке не совпала с вакансией")
-    letters = re.sub(r"[^0-9A-ZА-ЯЁ]", "", " ".join(str(x) for x in answer.get("lines") or []).upper())
-    words = [w for w in (re.sub(r"[^0-9A-ZА-ЯЁ]", "", word) for word in (data.headline or "").upper().split()) if len(w) >= 4]
+    spoken = " ".join(str(x) for x in answer.get("lines") or []).upper()
+    expected = vac.poster_title(data).upper()
+    stutter = re.search(r"\b([A-ZА-ЯЁ]{3,})\s+\1\b", spoken)
+    if stutter and f"{stutter.group(1)} {stutter.group(1)}" not in expected:     # «SEH SEH»: модель задвоила слово
+        problems.append(f"на картинке задвоено слово «{stutter.group(1)}»")
+    letters = re.sub(r"[^0-9A-ZА-ЯЁ]", "", spoken)
+    words = [w for w in (re.sub(r"[^0-9A-ZА-ЯЁ]", "", word) for word in vac.poster_title(data).upper().split()) if len(w) >= 4]
     if any(word not in letters for word in words):
         problems.append("заголовок на картинке не совпал с вакансией")
     return not problems, "; ".join(problems)
 
 
-async def vacancy_image(data: VacancyData, scene: str | None = None) -> Banner:
+async def vacancy_image(data: VacancyData, scene: str | None = None, *, design: dict | str | None = None) -> Banner:
     """Готовый баннер для поста: модель (с текстом вакансии) → проверка → логотип. До ATTEMPTS попыток; не вышло чисто —
     отдаём последнюю с предупреждением. Бросает ImageError, если Vertex картинку не дал вовсе."""
-    prompt = build_prompt(data, scene)
+    prompt = build_prompt(data, scene, design)
     raw, ok, why = b"", False, ""
     for attempt in range(1, ATTEMPTS + 1):
         raw, model = await generate(prompt)
@@ -219,7 +251,7 @@ async def vacancy_image(data: VacancyData, scene: str | None = None) -> Banner:
         warning = f"⚠️ Проверь картинку: {why}. Если неверно — «Другая картинка»."
     else:
         warning = None
-    return Banner(final, warning)
+    return Banner(final, warning, design if isinstance(design, str) else (design or {}).get("id", ""))
 
 
 __all__ = ["vacancy_image", "inspect", "generate", "add_logo", "build_prompt", "Banner", "ImageError", "MODELS"]

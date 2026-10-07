@@ -71,7 +71,7 @@ def load() -> dict[str, Any]:
         except (OSError, ValueError):
             _state = {}
         for key, default in (("enabled", True), ("cap", DEFAULT_CAP), ("premium", False), ("sources", {}), ("seen", {}),
-                             ("published", {}), ("queue", {}), ("daily", {}), ("flood_until", 0.0), ("last_discovery", 0.0)):
+                             ("published", {}), ("queue", {}), ("daily", {}), ("designs", []), ("flood_until", 0.0), ("last_discovery", 0.0)):
             _state.setdefault(key, default)
     return _state
 
@@ -622,6 +622,19 @@ async def discover(*, own_channel: str = "", limit_new: int = 6) -> list[dict[st
     load()["last_discovery"] = time.time()
     save()
     return added
+
+
+def recent_designs() -> list[str]:
+    """Какими дизайнами рисовали последние картинки (новые первыми) — чтобы не повторять подряд."""
+    return list(load()["designs"])
+
+
+def note_design(design_id: str) -> None:
+    if design_id:
+        designs = load()["designs"]
+        designs.insert(0, design_id)
+        del designs[12:]
+        save()
 
 
 def status() -> dict[str, Any]:
