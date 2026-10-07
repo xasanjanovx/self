@@ -96,3 +96,64 @@ def test_not_a_command_goes_to_gemini_whole(monkeypatch):
         return await sess._instant(gem, [])
 
     assert asyncio.run(go()) == [audio]
+
+
+# ------------------------------------------------------------------ 07.10: один голос и никакого «только пишет»
+def _quick_session(monkeypatch):  # noqa: ANN001, ANN202
+    from bot import live_call
+
+    ws, gem = FakeWS(), FakeWS()
+    sess = phone_live.PhoneLive(_profile(), Persona(lang="ru", voice="Sulafat"), system="", phone_ws=ws, device={"battery": 80})
+
+    async def delegate(profile, text):  # noqa: ANN001
+        return {"reply": "Добавил задачу «Отметить», сэр." if "добавь" in text else "Сегодня вы съели 2440 калорий."}
+
+    async def no_tts(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("быстрый ответ не должен озвучиваться другой моделью (TTS) — голос должен быть тот же, что в Live")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(live_call, "delegate", delegate)
+    monkeypatch.setattr(phone_live.ai, "speak_stream", no_tts)
+    return sess, ws, gem
+
+
+@pytest.mark.parametrize("said, kind, expected", [
+    ("добавь задание отметить", "do", "Добавил задачу «Отметить», сэр."),     # раньше: только текст и вибрация, без голоса
+    ("сколько калорий", "ask", "Сегодня вы съели 2440 калорий."),             # раньше: другая модель озвучки — «голос меняется»
+    ("сколько заряд", "battery", "Заряд 80 процентов."),
+])
+def test_quick_answer_is_spoken_by_live_voice(monkeypatch, said, kind, expected):
+    sess, ws, gem = _quick_session(monkeypatch)
+    assert asyncio.run(sess._quick(gem, said, said, kind))
+    turns = [m["clientContent"]["turns"][0]["parts"][0]["text"] for m in gem.sent if "clientContent" in m]
+    assert len(turns) == 1 and expected in turns[0] and "произнеси" in turns[0] and said in turns[0]
+    assert turns[0].count("«") >= 2 and sess.instant_done == 1
+    assert not [m for m in ws.sent if isinstance(m, (bytes, bytearray))]         # со стороны сервера озвучки в телефон нет
+    assert not [m for m in ws.sent if isinstance(m, dict) and m.get("type") in {"done", "jarvis"}]  # подпись придёт вместе с речью Live
+
+
+def test_quick_clarifying_question_is_spoken_too(monkeypatch):
+    """«запиши» → «что именно записать?»: вопрос обязан прозвучать, иначе он его не увидит и не ответит."""
+    from bot import live_call
+
+    sess, ws, gem = _quick_session(monkeypatch)
+
+    async def delegate(profile, text):  # noqa: ANN001
+        return {"reply": "Секунду, сэр, уточните, что именно вы хотите записать?"}
+
+    monkeypatch.setattr(live_call, "delegate", delegate)
+    assert asyncio.run(sess._quick(gem, "запиши", "запиши", "do"))
+    spoken = [m["clientContent"]["turns"][0]["parts"][0]["text"] for m in gem.sent if "clientContent" in m]
+    assert "что именно вы хотите записать?" in spoken[0]
+
+
+def test_quick_without_answer_falls_back_to_live(monkeypatch):
+    from bot import live_call
+
+    sess, ws, gem = _quick_session(monkeypatch)
+
+    async def delegate(profile, text):  # noqa: ANN001
+        return {"reply": ""}
+
+    monkeypatch.setattr(live_call, "delegate", delegate)
+    assert not asyncio.run(sess._quick(gem, "добавь", "добавь", "do")) and not gem.sent and sess.instant_done == 0

@@ -68,6 +68,11 @@ WAKE_REASK = {"ru": ("Не расслышала, {t}. Вы проснулись?
               "uz": ("Eshitolmadim, {t}. Uyg'ondingizmi?", "{t}, meni eshityapsizmi? Bir-ikki so'z ayting.")}
 REASK_GAP_S = 10.0
 GRADE_TIMEOUT_S = 6.0          # подъём: оценка его ответа моделью — дольше не ждём (тогда правильный ответ звучит, ошибкой не считается)
+UNHEARD_MIN_S = 0.9            # подъём: фраза короче — это щелчок или вздох, а не ответ; длиннее и без слов — просим повторить
+UNHEARD_GAP_S = 12.0           # …но не чаще раза в столько секунд
+WAKE_STT_SOFT = ("Человека только что разбудили звонком, он отвечает на вопрос сонным, тихим голосом, возможно шёпотом. Язык — русский или "
+                 "узбекский (узбекский пиши латиницей), бывает смесь. Запиши дословно всё, что слышишь, даже тихо и неуверенно. Верни только "
+                 "текст. Если речи совсем нет (только шум, дыхание, щелчки) — верни ровно: <пусто>")
 
 
 def quick_kind(text: str) -> str | None:
@@ -141,6 +146,7 @@ class CheapSession(_Session):
         self._reask_at = -1e9
         self.flow: wake_dialog.WakeFlow | None = None   # подъём: ход разговора ведёт программа (bot/wake_dialog.py), модель только оценивает ответ
         self.user_speaking = False     # он говорит прямо сейчас (фраза ещё не закончилась) — тишину не считаем
+        self._unheard_at = -1e9        # когда последний раз просила повторить неразборчивую речь
         self.result.model = f"{ai.agent_model} (экономно)"
 
     # --- слух
@@ -323,6 +329,14 @@ class CheapSession(_Session):
             if not overlapped and len(pcm) / 2 / RATE <= QUICK_MAX_S and await self._quick_wake(wav):
                 return
             heard = await self._transcribe(wav)
+            seconds = len(pcm) / 2 / RATE
+            if not heard and seconds >= UNHEARD_MIN_S:
+                heard = await self._transcribe_soft(pcm)   # сонный шёпот: усилить и расшифровать мягче (07.10 «молчу» стоило ответа)
+                if heard:
+                    logger.info("wake flow: вторая расшифровка (тихо/сонно, %.1f с) поймала «%s»", seconds, heard[:60])
+            if not heard and seconds >= UNHEARD_MIN_S:
+                await self._unheard(wav, seconds)
+                return
             if not heard or self._is_echo(heard):
                 logger.info("wake flow: шум или эхо — молчу «%s»", heard[:60])
                 return
@@ -335,6 +349,47 @@ class CheapSession(_Session):
             await self._flow_turn(heard)
         finally:
             self.thinking = False
+
+    async def _transcribe_soft(self, pcm: bytes) -> str:
+        """Вторая попытка, когда обычная вернула пусто, а речь была: усиливаем тихую запись и просим писать всё, что слышно, даже тихо."""
+        from . import watch
+        from .phone_api import clean_transcript
+        from .phone_live import pcm_to_wav
+
+        try:
+            return clean_transcript(await ai.transcribe_audio(pcm_to_wav(watch.boost(pcm), RATE), "audio/wav", prompt=WAKE_STT_SOFT))
+        except Exception as exc:
+            logger.warning("wake flow: мягкая расшифровка не удалась: %s", str(exc)[:160])
+            return ""
+
+    async def _unheard(self, wav: bytes, seconds: float) -> None:
+        """Он говорил, а слов не разобрать даже со второго раза: сохраняем запись (разобрать позже) и один раз в UNHEARD_GAP_S просим повторить."""
+        self._dump_unheard(wav)
+        flow = self.flow
+        loop = asyncio.get_running_loop()
+        if flow is None or loop.time() - self._unheard_at < UNHEARD_GAP_S:
+            logger.info("wake flow: речь %.1f с без слов — молчу (недавно уже просила повторить)", seconds)
+            return
+        said = flow.unheard()
+        logger.info("wake flow: речь %.1f с, слов не разобрать, этап %s → «%s»", seconds, flow.stage, said[:80])
+        if said:
+            self._unheard_at = loop.time()
+            self.result.transcript.append("он: (неразборчиво)")
+            await self.say(said)
+
+    @staticmethod
+    def _dump_unheard(wav: bytes) -> None:
+        """Последние 8 непонятых фраз подъёма — DATA_DIR/wake_dump (послушать и понять, что он говорил и почему не расшифровалось)."""
+        try:
+            from .tg_user import data_dir
+
+            folder = data_dir() / "wake_dump"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{int(time.time() * 1000)}.wav").write_bytes(wav)
+            for old in sorted(folder.glob("*.wav"))[:-8]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("wake dump: не записала", exc_info=True)
 
     async def _quick_wake(self, wav: bytes) -> bool:
         """Подъём: «алло / вы меня слышите?» — свой распознаватель (~0.1 с): подтверждаем и сразу возвращаем к вопросу. Это не считается

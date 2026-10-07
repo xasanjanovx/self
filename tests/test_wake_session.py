@@ -197,3 +197,45 @@ def test_uzbek_wake_speaks_uzbek_around_the_russian_question(monkeypatch, tmp_pa
 
     first, second = asyncio.run(run())
     assert "Birinchi savol" in first and "Ikkinchi savol" in second and w.qs[1].q in second
+
+
+def test_quiet_speech_is_rescued_by_the_second_soft_transcription(monkeypatch, tmp_path):
+    """07.10 05:12: «Вы встали?» — он что-то сказал, расшифровка вернула пусто, JES промолчал 13 секунд, и он повесил трубку."""
+    w = _Wake(monkeypatch, tmp_path, verdicts=["correct"], heard=["да", "", "Абу Бакр"], done=2)
+
+    async def run():
+        await w.say()
+        return await w.say()                                                       # первая расшифровка пуста, вторая (мягкая) услышала
+
+    said = asyncio.run(run())
+    assert w.prompts and "Абу Бакр" in w.prompts[0] and "встали?" in said and w.sess.flow.stage == "final"
+
+
+def test_unreadable_speech_asks_to_repeat_once_and_keeps_the_recording(monkeypatch, tmp_path):
+    w = _Wake(monkeypatch, tmp_path, heard=["да", "", "", "", ""])
+
+    async def run():
+        await w.say()
+        first = await w.say()                                                      # речь 1 с, слов нет даже со второго раза
+        second = await w.say()                                                     # сразу же ещё раз — не засыпаем «не разобрала»
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first.startswith("я: Не разобрала.") and w.qs[0].q in first and "слышите" not in first
+    assert second == "" and not w.prompts
+    dumps = list((tmp_path / "wake_dump").glob("*.wav"))
+    assert dumps                                                                   # запись сохранена — можно послушать, что он говорил
+    w.sess._unheard_at = -1e9                                                      # прошло 12 с — можно ещё раз
+    assert asyncio.run(w.say()).startswith("я: Не разобрала.")
+
+
+def test_short_click_is_not_speech(monkeypatch, tmp_path):
+    w = _Wake(monkeypatch, tmp_path, heard=["да", ""])
+
+    async def run():
+        await w.say()
+        before = len(w.sess.result.transcript)
+        await w.sess.on_phrase(b"\x00\x10" * 4000)                                 # 0.17 с — щелчок
+        return w.sess.result.transcript[before:]
+
+    assert asyncio.run(run()) == []

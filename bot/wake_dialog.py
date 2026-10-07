@@ -31,12 +31,9 @@ SNOOZE_MAX_MIN = 5
 
 
 def questions_for(minutes_left: int | None, total: int = islam_quiz.QUESTIONS_PER_DAY) -> int:
-    """Сколько вопросов успеем: до такбира много времени — все, мало — меньше (но хотя бы один)."""
-    if minutes_left is None or minutes_left >= 12:
-        return total
-    if minutes_left >= 6:
-        return min(total, 2)
-    return min(total, 1)
+    """Сколько вопросов задаём. 07.10 он сказал: «будильник не дал 3 вопроса!» — до такбира оставалось ~9 минут, и я сокращал до двух.
+    Всегда все (три): вопросы идут быстро, а время до такбира JES называет сам."""
+    return max(1, total)
 
 
 def minutes_text(n: int, lang: str) -> str:
@@ -277,7 +274,13 @@ class WakeFlow:
             self.stage = "quiz"
             return self._ask_text(self.idx, wake=silent)
         self.stage = "final"
-        return self.t("final" if silent else "final_q")
+        return self.t("final") if silent else self._final_question()
+
+    def _final_question(self) -> str:
+        """«Вы встали? Не ляжете обратно?» — а если до такбира осталось немного, ещё и сколько."""
+        left = self.minutes_left()
+        tail = f" {self._left_text()}" if left is not None and 0 < left <= 20 else ""
+        return self.t("final_q") + tail
 
     def _again(self) -> str:
         """Что мы ждём от него сейчас — сказать заново (повтор вопроса / «вы встали?»); на приветствии — сам первый вопрос."""
@@ -314,6 +317,15 @@ class WakeFlow:
         if k % 2 == 1:
             return f"{self._left_text()} {self._motivation(k)}".strip()
         return self._again()
+
+    def unheard(self) -> str:
+        """Он говорил (речь была), а расшифровка пуста — сонный шёпот, шум. Не молчим: просим повторить ответ на текущий вопрос.
+        На приветствии ничего — там тишину ведёт лестница (первый вопрос через 6 с)."""
+        if self.stage in {"greet", "done"}:
+            return ""
+        self.heard_user = True
+        self.nudges = 0
+        return f"{self.t('unclear')} {self._again()}".strip()
 
     def hear_reply(self) -> str:
         """Он сам спросил «алло / вы меня слышите»: подтверждаем и возвращаем к делу — это не считается нашим «слышите ли»."""
@@ -388,7 +400,7 @@ class WakeFlow:
             follow = self._ask_text(self.idx)
         else:
             self.stage = "final"
-            follow = self.t("final_q")
+            follow = self._final_question()
         return Move(say=f"{reaction} {follow}")
 
     def final_answer(self, verdict: str, heard: str = "") -> Move:

@@ -58,6 +58,9 @@ INSTANT_MIN_S = 0.35       # короче — это не команда
 INSTANT_MAX_S = 6.0        # длиннее — это разговор, не команда: сразу в Gemini
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
 IDLE_END_S = 15.0        # он выбрал: 15 с тишины — разговор закрывается
+# быстрый путь (время, батарея, «добавь задачу», «сколько калорий»): ответ готов без Live — Live только произносит его своим голосом
+READ_ALOUD = ("[Он сказал: «{said}». Ответ уже готов — произнеси его вслух ровно этими словами, ничего не добавляя, не меняя и не "
+              "вызывая инструменты: «{answer}»]")
 IDLE_END_ECONOMY = 8.0   # после дневного лимита — быстрее
 FRAME_EVERY_S = 3.0      # камера/экран: пока он говорит — не чаще кадра в 3 с
 FIRST_FRAME_WAIT_S = 4.0  # «посмотри»: результат инструмента отдаём, когда первый кадр уже в разговоре
@@ -398,18 +401,13 @@ class PhoneLive(_Session):
             return False
         self.instant_done += 1
         self.user_lines.append(said)
-        self.jarvis_lines.append(answer)
         await self.to_phone({"type": "user", "text": said, "final": True})
-        await self.to_phone({"type": "jarvis", "text": answer})
-        if kind == "do":
-            await self.to_phone({"type": "done"})  # сделал — телефон вибрирует, без слов
-        else:
-            async for pcm in ai.speak_stream(answer, voice=self.persona.voice):
-                await self.to_phone(pcm)
-        await self.to_phone({"type": "turn_complete"})
-        note = f"[Он сказал: «{said}» — уже отвечено/сделано: «{answer[:200]}». Не повторяй.]"
-        await self.to_gemini(gem, {"clientContent": {"turns": [{"role": "user", "parts": [{"text": note}]}], "turnComplete": False}})
-        logger.info("phone live: без Live (%s) «%s» → «%s» за %.1f с", kind, said, answer[:80], time.monotonic() - started)
+        # 07.10 он: «голос меняется на втором-третьем обращении, а иногда только пишет, а не говорит». Быстрые ответы звучали
+        # другой моделью озвучки (TTS) — не голосом Live, которым идёт весь остальной разговор, а подтверждения команд вообще
+        # не озвучивались. Теперь текст готовит быстрый путь (без поиска и инструментов в Live), а ГОВОРИТ его сам Live — тем же голосом;
+        # подпись на экране приходит вместе с его речью (outputTranscription)
+        await self.say_text(gem, READ_ALOUD.format(said=said[:200], answer=answer[:600]))
+        logger.info("phone live: быстрый ответ (%s) «%s» → «%s» голосом Live за %.1f с", kind, said, answer[:80], time.monotonic() - started)
         return True
 
     async def pump_phone(self, gem) -> None:  # noqa: ANN001

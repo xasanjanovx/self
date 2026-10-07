@@ -32,10 +32,10 @@ def _talk(flow: wake_dialog.WakeFlow, heard: str, verdict: str = "correct") -> w
 
 
 # ------------------------------------------------------------------ сколько вопросов
-def test_questions_adapt_to_time_left_before_takbir():
-    assert wake_dialog.questions_for(None) == 3 and wake_dialog.questions_for(25) == 3 and wake_dialog.questions_for(12) == 3
-    assert wake_dialog.questions_for(11) == 2 and wake_dialog.questions_for(6) == 2
-    assert wake_dialog.questions_for(5) == 1 and wake_dialog.questions_for(0) == 1 and wake_dialog.questions_for(-4) == 1
+def test_always_three_questions_whatever_the_time_left():
+    """07.10: «будильник не дал 3 вопроса» — до такбира было ~9 минут, и вопросов было два. Теперь всегда три."""
+    for left in (None, 25, 12, 11, 9, 6, 5, 0, -4):
+        assert wake_dialog.questions_for(left) == 3, left
 
 
 def test_minutes_and_questions_declension():
@@ -64,6 +64,18 @@ def test_three_questions_in_order_then_are_you_up(tmp_path, monkeypatch):
     assert done.confirm and "Отлично, сэр!" in done.say and "примет ваш намаз" in done.say and flow.stage == "done"
 
 
+def test_unheard_speech_asks_to_repeat_the_current_question(tmp_path, monkeypatch):
+    qs = _quiz(tmp_path, monkeypatch)
+    flow = _flow(qs)
+    assert flow.unheard() == ""                                 # на приветствии — ничего, тишину ведёт лестница
+    _talk(flow, "да")
+    said = flow.unheard()
+    assert said.startswith("Не разобрала.") and qs[0].q in said and flow.idx == 0 and HEAR not in said
+    final = _flow(qs, done=3)
+    _talk(final, "да")
+    assert "встали?" in final.unheard()
+
+
 def test_unknown_answer_gives_the_right_answer_and_arabic(tmp_path, monkeypatch):
     dua = next(q for q in islam_quiz.BANK if q.ar)
     flow = _flow([dua])
@@ -90,14 +102,20 @@ def test_grader_failure_still_teaches_but_never_counts_a_miss(tmp_path, monkeypa
     assert "Принято." in said and qs[0].a in said and qs[1].q in said and flow.idx == 1 and results == []
 
 
-def test_short_time_asks_fewer_questions(tmp_path, monkeypatch):
+def test_little_time_still_three_questions_and_the_time_is_named(tmp_path, monkeypatch):
     qs = _quiz(tmp_path, monkeypatch)
-    flow = _flow(qs, minutes_left=8)
-    assert len(flow.quiz) == 2
+    now = datetime(2026, 10, 6, 0, 10, tzinfo=timezone.utc)
+    flow = _flow(qs, minutes_left=8, takbir_at=now + timedelta(minutes=9))
+    flow.now = lambda: now
+    assert len(flow.quiz) == 3 and len(_flow(qs, minutes_left=3).quiz) == 3
     _talk(flow, "да")
     _talk(flow, "x")
-    assert "встали?" in _talk(flow, "y").say
-    assert len(_flow(qs, minutes_left=3).quiz) == 1
+    _talk(flow, "y")
+    last = _talk(flow, "z").say
+    assert "встали?" in last and "До такбира 9 минут." in last               # последний вопрос: «встали?» и сколько осталось
+    far = _flow(qs, done=3, takbir_at=now + timedelta(minutes=40))
+    far.now = lambda: now
+    assert "До такбира" not in _talk(far, "да").say                           # времени много — не торопим
 
 
 def test_second_call_resumes_where_the_first_stopped(tmp_path, monkeypatch):
@@ -353,7 +371,7 @@ def test_runner_hands_the_flow_what_it_needs_and_trims_questions_by_time(tmp_pat
     result = asyncio.run(wake_runner._dialog_call(_profile(), wake_mod.WakeSettings(), plan, 8, 3))
     wake = seen["wake"]
     assert wake["attempt"] == 3 and wake["takbir_at"] == takbir and wake["day"] == plan.day and len(wake["quiz_list"]) == 3
-    assert len(result["quiz"]) == 2                              # до такбира 8 минут — два вопроса, а не три
+    assert len(result["quiz"]) == 3                              # до такбира 8 минут — всё равно три вопроса (07.10)
 
 
 def test_pause_before_the_next_call_counts_from_the_end_of_this_one(monkeypatch):
