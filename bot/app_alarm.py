@@ -159,7 +159,11 @@ async def evening_guard(bot, profile) -> bool:  # noqa: ANN001
                           f"⚠️ Ertangi budilnik{(' (' + at + ')') if at else ''} telefonda qo'yilmagan — JES ilovasi uzoq vaqt javob bermadi. "
                           "JESni bir marta oching — shunda qo'yiladi. Ochmasangiz ham, ertalab Telegram qo'ng'iroq qiladi.")
     try:
-        await bot.send_message(uid, text, reply_markup=markup, disable_notification=False)
+        from . import screen as screen_mod
+
+        # 07.10: липкая заметка — стирает только срок (утром сама исчезнет); нажатие чужой кнопки её не уберёт
+        if await screen_mod.send_note(bot, uid, text, markup, ttl=12 * 3600, sticky=True, disable_notification=False) is None:
+            return False
     except Exception:
         logger.warning("alarm guard: не отправилось", exc_info=True)
         return False

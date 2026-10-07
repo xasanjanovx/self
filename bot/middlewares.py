@@ -207,7 +207,9 @@ class DedupeMiddleware(BaseMiddleware):
 
 class TidyMiddleware(BaseMiddleware):
     """Чистый чат: его сообщение (текст, голос, фото) удаляем, когда бот его обработал; то, что JES
-    скинул в чат по просьбе, убираем при нажатии любой кнопки. Упал обработчик — сообщение оставляем,
+    скинул в чат по просьбе, и все «заметки» (советы, сводки, отчёты, напоминания, детали — screen.send_note) убираем при
+    нажатии любой кнопки (07.10: «удалялись автоматически, если нажать на кнопки в главном»). Сообщение, на кнопку которого
+    нажали, и свежее напоминание (min_age) остаются. Упал обработчик — сообщение оставляем,
     чтобы было видно, что не сработало."""
 
     DELAY = 1.0
@@ -224,6 +226,7 @@ class TidyMiddleware(BaseMiddleware):
             if event.message is not None and event.bot is not None:
                 try:
                     await screen.clear_sent(event.bot, event.message.chat.id)
+                    await screen.clear_ephemerals(event.bot, event.message.chat.id, keep=event.message.message_id, honor_min_age=True)
                 except Exception:
                     logger.debug("clear sent failed", exc_info=True)
             return await handler(event, data)

@@ -855,7 +855,9 @@ async def cb_brief_text(callback: CallbackQuery) -> None:
     except Exception:
         logger.exception("morning brief text failed")
         return
-    await screen_mod.send_ephemeral(callback.bot, profile.telegram_id, text, keep_previous=True)
+    text = text or profile.tr("🌅 Сегодня всё спокойно: сроков, платежей и лимитов под угрозой нет.",
+                              "🌅 Bugun hammasi tinch: muddat, to'lov va xavf ostidagi limit yo'q.")
+    await screen_mod.send_note(callback.bot, profile.telegram_id, text, ttl=10 * 3600)
 
 
 # ------------------------------------------------------------------ ключ Alibaba (Qwen) — «/qwen КЛЮЧ [WORKSPACE_ID]»

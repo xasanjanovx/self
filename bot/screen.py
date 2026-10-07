@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -39,7 +40,11 @@ _loaded: set[int] = set()
 _trash = None
 _trash_loaded: set[int] = set()
 EPHEMERAL_MAX = timedelta(hours=24)  # без ttl — удалим на следующем действии или через сутки
+NOTE_TTL = 6 * 3600                  # заметка (совет, сводка, отчёт, напоминание) без своего срока живёт не дольше
 _bg: set[asyncio.Task] = set()       # держим ссылки на фоновые задачи, иначе их может съесть GC
+# chat_id -> {message_id: (когда отправлено, сколько секунд нельзя стирать нажатием кнопки)} — чтобы напоминание, которое
+# только что пришло, не исчезло от нажатия, сделанного за секунду до него (07.10)
+_meta: dict[int, dict[int, tuple[float, float]]] = defaultdict(dict)
 
 
 def configure_persistence(load=None, save=None) -> None:
@@ -59,12 +64,14 @@ def _spawn(coro) -> None:  # noqa: ANN001
     task.add_done_callback(_bg.discard)
 
 
-async def _remember(chat_id: int, message_id: int, ttl: float | None) -> None:
+async def _remember(chat_id: int, message_id: int, ttl: float | None, *, sticky: bool = False) -> None:
+    """Записать сообщение в журнал временных. sticky — «липкое»: его стирает только срок (в журнале — с минусом, чтобы нажатие
+    кнопки после перезапуска не подобрало его вместе с обычными)."""
     if _trash is None:
         return
     try:
         at = datetime.now(timezone.utc) + (timedelta(seconds=ttl) if ttl else EPHEMERAL_MAX)
-        await _trash.add_ephemeral(chat_id, message_id, at)
+        await _trash.add_ephemeral(chat_id, -message_id if sticky else message_id, at)
     except Exception:
         logger.debug("ephemeral persist failed", exc_info=True)
 
@@ -73,7 +80,7 @@ async def _forget(chat_id: int, ids: list[int]) -> None:
     if _trash is None or not ids:
         return
     try:
-        await _trash.drop_ephemerals(chat_id, ids)
+        await _trash.drop_ephemerals(chat_id, [*ids, *(-i for i in ids)])
     except Exception:
         logger.debug("ephemeral forget failed", exc_info=True)
 
@@ -146,11 +153,11 @@ def track_ephemeral(chat_id: int, message_id: int, ttl: float | None = None) -> 
 _sent: dict[int, list[int]] = defaultdict(list)
 
 
-def track_sent(chat_id: int, message_id: int) -> None:
+def track_sent(chat_id: int, message_id: int, ttl: float | None = NOTE_TTL) -> None:
     """Текст, который JES скинул в чат (из звонка/с телефона): живёт до первой нажатой кнопки
-    (или сутки — потом его подберёт sweep, как любое временное сообщение)."""
+    (или NOTE_TTL — потом его подберёт sweep, как любое временное сообщение)."""
     _sent[chat_id].append(message_id)
-    _spawn(_remember(chat_id, message_id, None))
+    _spawn(_remember(chat_id, message_id, ttl))
 
 
 async def clear_sent(bot: Bot, chat_id: int) -> None:
@@ -161,19 +168,34 @@ async def clear_sent(bot: Bot, chat_id: int) -> None:
     _spawn(_forget(chat_id, ids))
 
 
-async def clear_ephemerals(bot: Bot, chat_id: int) -> None:
+async def clear_ephemerals(bot: Bot, chat_id: int, *, keep: int | None = None, honor_min_age: bool = False) -> None:
+    """Стереть временные сообщения чата. keep — то, на что он нажал (его не трогаем); honor_min_age — заметки с
+    «неприкосновенным» сроком (только что пришедшее напоминание) оставить."""
     ids = _ephemerals.pop(chat_id, [])
     if _trash is not None and chat_id not in _trash_loaded:
-        # первый раз после перезапуска — подберём и то, что осталось с прошлого запуска
+        # первый раз после перезапуска — подберём и то, что осталось с прошлого запуска (липкие — с минусом — не берём)
         _trash_loaded.add(chat_id)
         try:
-            ids += [int(r["message_id"]) for r in await _trash.list_ephemerals(chat_id=chat_id) if int(r["message_id"]) not in ids]
+            ids += [int(r["message_id"]) for r in await _trash.list_ephemerals(chat_id=chat_id)
+                    if int(r["message_id"]) > 0 and int(r["message_id"]) not in ids]
         except Exception:
             logger.debug("ephemeral list failed", exc_info=True)
     if not ids:
         return
-    await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
-    _spawn(_forget(chat_id, ids))
+    meta = _meta.get(chat_id, {})
+    now = time.monotonic()
+    todo: list[int] = []
+    for mid in ids:
+        born, min_age = meta.get(mid, (0.0, 0.0))
+        if mid == keep or (honor_min_age and min_age and now - born < min_age):
+            _ephemerals[chat_id].append(mid)
+        else:
+            todo.append(mid)
+            meta.pop(mid, None)
+    if not todo:
+        return
+    await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in todo))
+    _spawn(_forget(chat_id, todo))
 
 
 async def sweep(bot: Bot) -> int:
@@ -184,11 +206,14 @@ async def sweep(bot: Bot) -> int:
     by_chat: dict[int, list[int]] = defaultdict(list)
     for r in rows:
         by_chat[int(r["chat_id"])].append(int(r["message_id"]))
-    for chat_id, ids in by_chat.items():
+    for chat_id, raw in by_chat.items():
+        ids = [abs(m) for m in raw]   # липкие хранятся с минусом
         await asyncio.gather(*(_safe_delete(bot, chat_id, mid) for mid in ids))
         pending = _ephemerals.get(chat_id)
         if pending:
             _ephemerals[chat_id] = [m for m in pending if m not in ids]
+        for mid in ids:
+            _meta.get(chat_id, {}).pop(mid, None)
         await _forget(chat_id, ids)
     return sum(len(v) for v in by_chat.values())
 
@@ -248,6 +273,41 @@ async def send_ephemeral(
     if ttl:
         _spawn(_delete_later(bot, chat_id, msg.message_id, ttl))
     return msg.message_id
+
+
+async def send_note(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    reply_markup: Any | None = None,
+    *,
+    ttl: float | None = NOTE_TTL,
+    sticky: bool = False,
+    min_age: float = 0.0,
+    **kwargs: Any,
+) -> int | None:
+    """Заметка — совет, сводка, отчёт, напоминание, детали: то, что прочитал и забыл (07.10 он удалял их руками каждый раз).
+
+    Исчезает: при нажатии любой кнопки (TidyMiddleware → clear_ephemerals), по таймеру ttl (и после перезапуска — через журнал)
+    и при следующем показе главного экрана. min_age — сколько секунд после прихода её нельзя стереть нажатием кнопки
+    (напоминание, которое только что пришло). sticky — стирает только срок (предупреждение, которое нельзя потерять,
+    пока он не прочитал, например «будильник выключен»). Возвращает id или None, если отправить не вышло."""
+    try:
+        msg = await bot.send_message(chat_id, text, reply_markup=reply_markup, **kwargs)
+    except Exception:
+        logger.warning("note not sent to %s", chat_id, exc_info=True)
+        return None
+    mid = getattr(msg, "message_id", None)
+    if mid is None:
+        return None
+    if not sticky:
+        _ephemerals[chat_id].append(mid)
+        if min_age:
+            _meta[chat_id][mid] = (time.monotonic(), float(min_age))
+    _spawn(_remember(chat_id, mid, ttl, sticky=sticky))
+    if ttl:
+        _spawn(_delete_later(bot, chat_id, mid, ttl))
+    return mid
 
 
 async def _delete_later(bot: Bot | None, chat_id: int, message_id: int, delay: float) -> None:

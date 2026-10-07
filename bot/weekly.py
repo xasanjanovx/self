@@ -75,34 +75,45 @@ async def facts(profile: Profile) -> dict[str, Any]:
     return out
 
 
+def _takeaway(profile: Profile, f: dict[str, Any]) -> str | None:
+    """Один главный вывод недели — по данным, без выдумок: что изменилось сильнее всего."""
+    tr = profile.tr
+    m, t = f.get("money") or {}, f.get("tasks") or {}
+    change = m.get("change_pct")
+    if change is not None and abs(change) >= 15 and m.get("spent"):
+        top = m["top"][0][0] if m.get("top") else ""
+        return (f"📈 {tr('Расходы выросли', 'Xarajat oshdi')} {change:.0f}%" if change > 0 else f"📉 {tr('Расходы снизились', 'Xarajat kamaydi')} {abs(change):.0f}%") + \
+            (f" · {tr('больше всего', 'ko`proq')} — {top}" if top and change > 0 else "")
+    if t.get("overdue", 0) >= 3:
+        return f"⚠️ {tr('Просрочено задач', 'Muddati o`tgan vazifalar')}: {t['overdue']} — {tr('пора разобрать', 'ko`rib chiqing')}"
+    if t.get("done", 0) >= 5:
+        return f"👏 {tr('Закрыто задач', 'Bajarilgan vazifalar')}: {t['done']}"
+    return None
+
+
 def text(profile: Profile, f: dict[str, Any]) -> str:
-    """Короткий текст под голосовым — цифры, чтобы посмотреть глазами."""
+    """Итоги недели короткой заметкой (07.10: он удалял длинную, не читая): итог, вывод, самое важное — не больше восьми строк."""
     tr = profile.tr
     lines = [f"🗓 <b>{tr('Итоги недели', 'Hafta yakuni')}</b> · {f['start']:%d.%m}–{f['end']:%d.%m}"]
     m = f.get("money")
     if m:
         change = m.get("change_pct")
-        trend = "" if change is None else f" ({'+' if change >= 0 else ''}{change:.0f}% {tr('к прошлой', 'o`tgan haftaga')})"
-        top = ", ".join(f"{name} {fin.fmt_money(v)}" for name, v in m["top"])
-        lines.append(f"💸 {tr('Потрачено', 'Sarflandi')}: <b>{fin.fmt_money(m['spent'])}</b> {profile.currency}{trend}"
-                     + (f"\n   {top}" if top else ""))
-        if m.get("income"):
-            lines.append(f"💰 {tr('Доход', 'Daromad')}: {fin.fmt_money(m['income'])} {profile.currency}")
+        trend = "" if change is None else f" ({'▲' if change >= 0 else '▼'}{abs(change):.0f}%)"
+        top = f"{m['top'][0][0]} {fin.fmt_money(m['top'][0][1])}" if m.get("top") else ""
+        lines.append(f"💸 <b>{fin.fmt_money(m['spent'])}</b> {profile.currency}{trend}" + (f" · {top}" if top else "")
+                     + (f" · 💰 {fin.fmt_money(m['income'])}" if m.get("income") else ""))
+    if (take := _takeaway(profile, f)):
+        lines.append(take)
     t = f.get("tasks")
     if t and (t["done"] or t["open"]):
-        lines.append(f"✅ {tr('Задачи', 'Vazifalar')}: {tr('сделано', 'bajarildi')} {t['done']}, {tr('открыто', 'ochiq')} {t['open']}"
-                     + (f", {tr('просрочено', 'muddati o`tgan')} {t['overdue']}" if t["overdue"] else ""))
-    for d in f.get("daily") or []:
+        lines.append(f"✅ {tr('Задачи', 'Vazifalar')}: {t['done']} {tr('сделано', 'bajarildi')} · {t['open']} {tr('открыто', 'ochiq')}")
+    for d in (f.get("daily") or [])[:2]:
         if d.get("progress"):
             lines.append(f"🔁 {d['title']}: {d['progress']}")
-    for les in f.get("lessons") or []:
-        lines.append(f"🎓 {les['title']} — " + (tr("досмотрено", "tugadi") if les["finished"] else f"{les['at']} / {les['of']}"))
     if f.get("wake"):
         lines.append(str(f["wake"]))
-    j = f.get("jes")
-    if j:
-        parts = [f"{k} {v}" for k, v in j.items() if k != "всего" and v]
-        lines.append(f"🤖 JES: {tr('дел', 'ish')} {j['всего']}" + (f" ({', '.join(parts)})" if parts else ""))
+    for les in (f.get("lessons") or [])[:1]:
+        lines.append(f"🎓 {les['title']} — " + (tr("досмотрено", "tugadi") if les["finished"] else f"{les['at']} / {les['of']}"))
     out = "\n".join(lines)
     return out if len(out) <= CAPTION_MAX else out[: CAPTION_MAX - 1] + "…"
 
@@ -120,29 +131,30 @@ def script_prompt(profile: Profile, p: Persona, caption: str) -> str:
     )
 
 
-async def send(bot: Bot, profile: Profile, p: Persona) -> bool:
-    """Голосовое + текст. Голос не вышел — только текст. True — что-то отправлено."""
+async def send(bot: Bot, profile: Profile, p: Persona, *, voice: bool = False) -> bool:
+    """Итоги недели короткой заметкой (исчезает при нажатии любой кнопки и через сутки). Голосом — только если голос включён
+    (07.10: он удалял и голосовое, и текст, не слушая, — по умолчанию голоса нет). True — что-то отправлено."""
     f = await facts(profile)
     caption = text(profile, f)
     if len(caption.splitlines()) < 2:
         return False  # за неделю пусто — не беспокоим
     ogg = None
-    if voice_mod.available():
+    if voice and voice_mod.available():
         try:
             script = (await ai.generate_text(script_prompt(profile, p, caption), temperature=0.6, max_tokens=600)).strip()
             pcm = await ai.synthesize(script, voice=p.voice) if script else None
             ogg = await voice_mod.pcm_to_ogg(pcm) if pcm else None
         except Exception:
             logger.warning("weekly: голос не вышел", exc_info=True)
+    from . import screen as screen_mod
+
     if ogg:
         sent = await bot.send_voice(profile.telegram_id, BufferedInputFile(ogg, "jes-week.ogg"), caption=caption, parse_mode="HTML")
-    else:
-        sent = await bot.send_message(profile.telegram_id, caption, parse_mode="HTML")
-    if getattr(sent, "message_id", None):  # 02.10: итоги недели не копятся в чате — исчезают при следующем действии, как остальное
-        from . import screen as screen_mod
-
-        screen_mod.track_ephemeral(profile.telegram_id, int(sent.message_id))
-    logger.info("weekly: итоги недели отправлены %s (%s)", profile.telegram_id, "голосом" if ogg else "текстом")
+        if getattr(sent, "message_id", None):
+            screen_mod.track_ephemeral(profile.telegram_id, int(sent.message_id), ttl=24 * 3600)
+    elif await screen_mod.send_note(bot, profile.telegram_id, caption, ttl=24 * 3600, parse_mode="HTML") is None:
+        return False
+    logger.info("weekly: итоги недели отправлены %s (%s)", profile.telegram_id, "голосом" if ogg else "заметкой")
     return True
 
 
@@ -153,7 +165,7 @@ async def maybe_send(bot: Bot, profile: Profile, due_key: str) -> bool:
     if us.get("weekly_voice_key") == due_key or us.get("weekly_voice") is False:
         return False
     await services.save_user_settings(uid, {"weekly_voice_key": due_key})
-    return await send(bot, profile, await services.persona(uid))
+    return await send(bot, profile, await services.persona(uid), voice=us.get("weekly_voice") is True)
 
 
 __all__ = ["facts", "text", "send", "maybe_send", "script_prompt"]

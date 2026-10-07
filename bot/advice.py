@@ -1,4 +1,4 @@
-"""Советы в течение дня (30.09, его выбор): коротко, по ситуации и не чаще 3 раз в день.
+"""Советы в течение дня (30.09, его выбор): коротко, по ситуации; с 07.10 — не чаще раза в день (он их не читал) и заметкой.
 
 «До асра 25 минут — успеете позвонить Алишеру», «съедено мало, а уже 15:00 — пора пообедать», «вы остановились на уроке на 12:30 —
 продолжить?» (только про видео, которые он сам прислал и поставил целью/задачей). Правила простые и точные (данные его, ничего не выдумывается); фразу пишет умная модель (не ответила — шаблон).
@@ -22,7 +22,7 @@ from .profile import Profile, h
 
 logger = logging.getLogger(__name__)
 
-MAX_PER_DAY = 3
+MAX_PER_DAY = 1   # 07.10: он удалял их, не читая, — один совет в день, и только по делу
 MIN_GAP_S = 150 * 60
 FROM_HOUR, TO_HOUR = 9, 20         # с 9:00 до 20:30 — ночью и рано утром не тревожим
 PRAYER_LEFT = (15, 35)             # «до намаза 15–35 минут»
@@ -169,7 +169,9 @@ async def maybe_send(bot, profile: Profile) -> bool:  # noqa: ANN001
     _save(uid, st)
     text = await _phrase(profile, await services.persona(uid), tip)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="▶️ " + profile.tr("Продолжить урок", "Darsni davom ettirish"), url=tip.url)]]) if tip.url else None
-    await bot.send_message(uid, "💡 " + text, reply_markup=kb, parse_mode="HTML")
+    from . import screen as screen_mod
+
+    await screen_mod.send_note(bot, uid, "💡 " + text, kb, ttl=4 * 3600, parse_mode="HTML")   # исчезает при нажатии кнопки и через 4 часа
     logger.info("advice: совет %s отправлен %s (%d/%d сегодня)", tip.key, uid, len(st["keys"]), MAX_PER_DAY)
     return True
 
