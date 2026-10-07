@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -41,7 +42,12 @@ SEARCH_PAUSE_S = 1.0
 REQUIRE_SALARY = True            # «нет зарплаты» отбрасываем; «по договорённости/собеседованию» — это зарплата
 
 KEYWORDS = ("vakansiya", "vakansiyalar", "ish bor", "ish e'lonlari", "bo'sh ish o'rinlari", "ishga taklif", "ish toshkent",
-            "ish o'rinlari", "вакансии ташкент", "работа ташкент", "работа в узбекистане", "ish izlovchilar uchun")
+            "ish o'rinlari", "вакансии ташкент", "работа ташкент", "работа в узбекистане", "ish izlovchilar uchun",
+            "ish kerak", "xodim kerak", "ishchi kerak", "ish topish", "rasmiy ish", "ish e'lon", "вакансии узбекистан", "ish bor toshkent")
+
+# 07.10: каналы, которые он назвал сам, — берём сразу (он их уже одобрил); каждую вакансию из них он всё равно решает карточкой.
+FAVORITE_SOURCES = ("vakansyuz_vacansyuz", "ishtopuz_rasmiy", "ish_keremi")
+MAX_NEW_PER_SOURCE = 12          # столько неотправленных вакансий из одного канала в запасе хватит: дальше не оформляем (и не платим за нейросеть)
 
 
 # ---------------------------------------------------------------- хранилище
@@ -70,7 +76,7 @@ def load() -> dict[str, Any]:
             _state = json.loads(_file().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             _state = {}
-        for key, default in (("enabled", True), ("cap", DEFAULT_CAP), ("premium", False), ("sources", {}), ("seen", {}),
+        for key, default in (("enabled", True), ("cap", DEFAULT_CAP), ("sources", {}), ("seen", {}),
                              ("published", {}), ("queue", {}), ("daily", {}), ("designs", []), ("flood_until", 0.0), ("last_discovery", 0.0),
                              ("cfg", {}), ("own", []), ("hold_until", 0.0), ("hold_post", 0), ("last_feed_post", 0.0), ("guard_cursor", 0),
                              ("ads_log", [])):
@@ -319,6 +325,24 @@ def add_pending(name: str, info: dict[str, Any]) -> bool:
     return True
 
 
+def ensure_favorites() -> bool:
+    """Названные им каналы — в работе сразу. Те, что он потом убрал (rejected), не возвращаем. True — добавили новые
+    (тогда заодно пора искать другие каналы: время последнего поиска сбрасываем)."""
+    items = load()["sources"]
+    added = False
+    for name in FAVORITE_SOURCES:
+        if name in items:
+            continue
+        items[name] = {"title": name, "members": 0, "status": "approved", "favorite": True, "last_id": 0,
+                       "found": datetime.now(TZ).isoformat(timespec="seconds"),
+                       "stats": {"seen": 0, "queued": 0, "rejected": 0, "reasons": {}}}
+        added = True
+    if added:
+        load()["last_discovery"] = 0.0
+        save()
+    return added
+
+
 def set_source_status(name: str, status: str) -> bool:
     item = load()["sources"].get(name)
     if item is None:
@@ -380,8 +404,17 @@ def next_card(now: datetime | None = None, *, ignore_hours: bool = False) -> dic
         return None
     if cards_today() >= int(st["cap"]) or len(candidates("carded")) >= MAX_OPEN_CARDS:
         return None
-    fresh = sorted(candidates("new"), key=lambda c: (-int(c.get("score") or 0), str(c.get("created") or "")))
+    fresh = sorted(candidates("new"), key=lambda c: (-(int(c.get("score") or 0) + views_bonus(c.get("views"))), str(c.get("created") or "")))
     return fresh[0] if fresh else None
+
+
+def views_bonus(views: Any) -> int:
+    """Просмотры оригинала — признак живой вакансии: до +15 к оценке (по логарифму, чтобы большие каналы не забивали остальные)."""
+    try:
+        count = max(0, int(views or 0))
+    except (TypeError, ValueError):
+        return 0
+    return min(15, int(math.log10(count + 1) * 4))
 
 
 def cleanup(now: datetime | None = None) -> None:
@@ -424,8 +457,9 @@ AD_CATEGORIES = {
 
 
 def _defaults() -> dict[str, Any]:
-    return {"mode": "confirm", "window_from": SEND_FROM, "window_to": SEND_TO, "gap_min": 90, "protect_hours": PROTECT_MIN_HOURS,
-            "images": True, "require_salary": REQUIRE_SALARY, "off_designs": [], "ads_on": True, "ads_mode": "delete",
+    # режима «сам размещает» нет: он потребовал, чтобы каждый пост спрашивали у него; картинка — всегда (фото обязательно с текстом)
+    return {"window_from": SEND_FROM, "window_to": SEND_TO, "gap_min": 90, "protect_hours": PROTECT_MIN_HOURS,
+            "require_salary": REQUIRE_SALARY, "off_designs": [], "ads_on": True, "ads_mode": "delete",
             "ads_cats": {"credit": True, "bank": False, "bets": True, "insure": True}}
 
 
@@ -547,6 +581,33 @@ def human_wait(seconds: float) -> str:
     return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
 
 
+CHANNEL_PHONE_DAYS = 21          # телефон из поста нашего канала столько дней считаем «уже выложено»
+
+
+def _phone_keys(text: str) -> set[str]:
+    return {re.sub(r"\D", "", p)[-9:] for p in vac.extract_phones(text or "")}
+
+
+def note_channel_phones(text: str, ts: float | None = None) -> None:
+    """Телефоны вакансии, стоящей в нашем канале (его ручной пост или наш) — такую же из чужих каналов не предлагаем."""
+    keys = _phone_keys(text)
+    if not keys:
+        return
+    seen = load().setdefault("channel_phones", {})
+    stamp = float(ts if ts is not None else time.time())
+    for key in keys:
+        seen[key] = max(stamp, float(seen.get(key) or 0))
+    horizon = time.time() - CHANNEL_PHONE_DAYS * 86400
+    for key in [k for k, v in seen.items() if float(v) < horizon]:
+        seen.pop(key)
+
+
+def in_channel(text: str) -> bool:
+    """Вакансия с таким телефоном уже стоит в нашем канале."""
+    seen = load().get("channel_phones") or {}
+    return any(key in seen for key in _phone_keys(text))
+
+
 def log_ad(entry: dict[str, Any]) -> None:
     log = load()["ads_log"]
     log.insert(0, entry)
@@ -555,7 +616,8 @@ def log_ad(entry: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------- разбор одного поста
-async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = None, now: datetime | None = None) -> tuple[str, Any]:
+async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = None, now: datetime | None = None,
+                   views: int = 0) -> tuple[str, Any]:
     """Один пост из канала → ("skip", причина) | ("reject", [причины]) | ("queued", кандидат) | ("error", текст).
     Дорогое (оформление поста) — только если проверка прошла. Ошибка нейросети отпечаток не записывает: попробуем на следующем круге."""
     if ai is None:
@@ -569,6 +631,8 @@ async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = 
     fp = fingerprint(raw_text)
     if fp in st["seen"]:
         return "skip", "уже видели"
+    if in_channel(raw_text):
+        return "skip", "уже есть в нашем канале"
     _bump(source, "seen")
     try:
         with vertex_only():
@@ -604,7 +668,7 @@ async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = 
     cid = hashlib.sha1(f"{source}/{msg_id}".encode()).hexdigest()[:10]
     cand = {"id": cid, "source": source, "msg_id": msg_id, "url": f"https://t.me/{source}/{msg_id}", "status": "new",
             "created": now.isoformat(timespec="seconds"), "key": key, "scene": scene or "", "regen": 0,
-            "salary": verdict.salary, "score": score(data, verdict, source_quality(source)), "data": data_to_dict(data),
+            "views": int(views or 0), "salary": verdict.salary, "score": score(data, verdict, source_quality(source)), "data": data_to_dict(data),
             "reason": str(assessment.get("reason") or "")[:80]}
     st["queue"][cid] = cand
     _bump(source, "queued")
@@ -651,7 +715,8 @@ async def fetch_posts(client: Any, name: str, *, last_id: int = 0, limit: int = 
         posts = []
         async for message in client.iter_messages(entity, limit=limit, min_id=last_id):
             text = (getattr(message, "message", None) or getattr(message, "text", None) or "").strip()
-            posts.append({"id": int(message.id), "text": text, "date": getattr(message, "date", None)})
+            posts.append({"id": int(message.id), "text": text, "date": getattr(message, "date", None),
+                          "views": int(getattr(message, "views", 0) or 0)})
         return posts
     except Exception as exc:
         _flood(exc)
@@ -677,7 +742,9 @@ async def pull_source(client: Any, name: str, ai: Any | None = None, now: dateti
         if _age_hours(post["date"], now) > MAX_AGE_H:
             counts["skipped"] += 1
         else:
-            result, _ = await consider(post["text"], source=name, msg_id=post["id"], ai=ai, now=now)
+            if sum(1 for c in candidates("new") if c.get("source") == name) >= MAX_NEW_PER_SOURCE:
+                break  # запаса из этого канала достаточно — остальное разберём, когда очередь схлынет (id дальше не двигаем)
+            result, _ = await consider(post["text"], source=name, msg_id=post["id"], ai=ai, now=now, views=int(post.get("views") or 0))
             if result == "error":
                 counts["errors"] += 1
                 break  # этот и следующие посты — на следующий круг: id дальше не двигаем
@@ -693,7 +760,8 @@ async def pull_all(ai: Any | None = None, now: datetime | None = None) -> dict[s
     """Круг по одобренным каналам. FeedUnavailable — наружу (воркер подождёт)."""
     client = _client()
     total = {"sources": 0, "queued": 0, "rejected": 0, "errors": 0}
-    for name in list(sources("approved")):
+    approved = sources("approved")
+    for name in sorted(approved, key=lambda n: not approved[n].get("favorite")):      # сначала каналы, которые он назвал сам
         try:
             counts = await pull_source(client, name, ai, now)
         except FeedUnavailable:
@@ -800,8 +868,3 @@ def set_cap(value: int) -> None:
     save()
 
 
-def remember_premium(value: bool) -> None:
-    st = load()
-    if st.get("premium") != bool(value):
-        st["premium"] = bool(value)
-        save()

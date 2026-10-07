@@ -77,6 +77,69 @@ def test_default_prompt_is_horizontal():
     assert "16:9" in default_image_prompt("Sotuvchi kerak")
 
 
+# ------------------------------------------------------------------ фото и текст одним постом (подпись ≤ 1024)
+def _long_data(items=25, item_len=50):
+    data = _data()
+    data.requirements = [f"Talab {i}: " + "x" * item_len for i in range(items)]
+    data.duties = [f"Vazifa {i}: " + "y" * item_len for i in range(items)]
+    data.benefits = [f"Qulaylik {i}: " + "z" * item_len for i in range(items)]
+    data.intro = "Katta kompaniya yangi xodimlarni ishga taklif qiladi. " * 3
+    return data
+
+
+def test_visible_len_counts_text_without_tags_and_emoji_as_utf16():
+    from bot.vacancy import visible_len
+
+    assert visible_len("<b>abc</b> &amp; d") == 7
+    assert visible_len('<tg-emoji emoji-id="1">💬</tg-emoji>x') == 3             # 💬 — две единицы UTF-16, как считает Telegram
+    assert visible_len("") == 0 and visible_len(None) == 0
+
+
+def test_short_post_is_not_touched_by_fit():
+    from bot.vacancy import fit_post
+
+    data = finalize(_data(), "")
+    post, trimmed = fit_post(data)
+    assert trimmed is False and post == format_vacancy_post(data)
+
+
+def test_long_post_is_trimmed_to_the_caption_limit_and_keeps_what_matters():
+    from bot.vacancy import CAPTION_LIMIT, fit_post, visible_len
+
+    data = finalize(_long_data(), "")
+    assert visible_len(format_vacancy_post(data)) > CAPTION_LIMIT
+    post, trimmed = fit_post(data)
+    assert trimmed is True and visible_len(post) <= CAPTION_LIMIT
+    for must in ("Call-center operatori kerak", "4 000 000 so'm", "9:00-18:00", "+998901234567", "@hr_ish", "<blockquote>", "ISHDASIZ",
+                 "Talab 0:", "Qulaylik 0:"):
+        assert must in post
+    assert len(data.requirements) == 25                                           # исходные данные не портим: режется копия
+
+
+def test_the_most_secondary_goes_first():
+    from bot.vacancy import CAPTION_LIMIT, fit_post, visible_len
+
+    data = finalize(_data(), "")
+    data.extra_sections = [VacancySection(title="Qo'shimcha", items=["Q" * 60 for _ in range(8)])]
+    data.requirements = ["R" * 70 for _ in range(6)]
+    data.duties = ["D" * 70 for _ in range(6)]
+    data.benefits = ["B" * 70 for _ in range(3)]
+    assert visible_len(format_vacancy_post(data)) > CAPTION_LIMIT
+    post, trimmed = fit_post(data)
+    assert trimmed and "Qo'shimcha" not in post and "Qulayliklar" in post and visible_len(post) <= CAPTION_LIMIT
+
+
+def test_even_an_absurd_vacancy_fits_in_one_caption():
+    from bot.vacancy import CAPTION_LIMIT, fit_post, visible_len
+
+    data = _long_data(items=40, item_len=300)
+    data.salary = "5 000 000 so'm " * 30
+    data.schedule = "9:00-18:00 " * 30
+    data.address = "Chilonzor, Bunyodkor ko'chasi " * 10
+    post, trimmed = fit_post(finalize(data, ""))
+    assert trimmed and visible_len(post) <= CAPTION_LIMIT and "+998901234567" in post
+
+
 # ------------------------------------------------------------------ постер для автоподбора
 def test_headline_is_split_in_two_lines_for_the_two_colour_title():
     from bot.vacancy import split_headline

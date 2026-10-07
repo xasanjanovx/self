@@ -15,6 +15,7 @@ from bot.handlers import vacancy_feed as ui
 
 OWNER = 424242
 CHANNEL = "@testch"
+FAVORITES_AT_IMPORT = feed.FAVORITE_SOURCES
 
 
 class FakeBot:
@@ -62,6 +63,7 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(feed, "SOURCE_PAUSE_S", 0)
     monkeypatch.setattr(feed, "SEND_FROM", 0)
     monkeypatch.setattr(feed, "SEND_TO", 24)
+    monkeypatch.setattr(feed, "FAVORITE_SOURCES", ())          # его каналы-«избранные» проверяются отдельным тестом
     notes: list = []
 
     async def fake_note(bot, chat_id, text, reply_markup=None, **kw):
@@ -140,24 +142,56 @@ def test_short_post_goes_as_one_photo_with_buttons():
     assert feed.image_path("c1").read_bytes() == b"JPEGDATA"
 
 
-def test_long_post_goes_as_photo_then_text_with_buttons():
+def test_long_post_is_trimmed_into_one_photo_caption():
+    """Его требование: фото ВСЕГДА в одном сообщении с текстом, поэтому длинная вакансия сокращается до лимита подписи."""
+    from bot import vacancy as vac
+
     bot, cand = FakeBot(), _cand(long=True)
     asyncio.run(ui.send_card(bot, OWNER, cand))
-    assert len(bot.photos) == 1 and len(bot.messages) == 1
-    assert "из @jobs_uz" in bot.photos[0]["caption"] and bot.photos[0]["markup"] is None
-    assert "✅ Опубликовать" in _buttons(bot.messages[0]["markup"])
-    assert cand["card_ids"] == [bot.photos[0]["id"], bot.messages[0]["id"]]
+    assert len(bot.photos) == 1 and bot.messages == []
+    photo = bot.photos[0]
+    assert vac.visible_len(photo["caption"]) <= vac.CAPTION_LIMIT
+    assert "Barista kerak" in photo["caption"] and "+998901234567" in photo["caption"] and "@cafe_hr" in photo["caption"]
+    assert "✅ Опубликовать" in _buttons(photo["markup"]) and cand["card_ids"] == [photo["id"]]
+    assert any("Текст сокращён" in note for note in ui._notes)
 
 
-def test_card_without_picture_is_still_publishable(monkeypatch):
+def test_picture_failure_is_retried_and_then_shown_without_publish(monkeypatch):
+    """Без картинки публиковать нельзя: сначала молча пробуем ещё, потом карточка без «Опубликовать» (только «Нарисовать картинку»)."""
     async def broken(*a, **k):
         raise image_gen.ImageError("503")
 
     monkeypatch.setattr(image_gen, "vacancy_image", broken)
     bot, cand = FakeBot(), _cand()
-    asyncio.run(ui.send_card(bot, OWNER, cand))
-    assert bot.photos == [] and "Картинка не получилась" in bot.messages[0]["text"]
-    assert {"✅ Опубликовать", "🔄 Другая картинка"} <= set(_buttons(bot.messages[0]["markup"]))
+    for tries in range(1, ui.IMAGE_TRIES):
+        assert asyncio.run(ui.send_card(bot, OWNER, cand)) is False
+        assert bot.photos == [] and bot.messages == [] and cand["status"] == "new" and cand["img_tries"] == tries
+    assert asyncio.run(ui.send_card(bot, OWNER, cand)) is True
+    buttons = _buttons(bot.messages[0]["markup"])
+    assert "Картинка не получилась" in bot.messages[0]["text"]
+    assert "✅ Опубликовать" not in buttons and buttons["🎨 Нарисовать картинку"] == "vf:img:c1"
+    cb = FakeCb("vf:pub:c1", bot)                                                          # старая кнопка тоже не пропустит без картинки
+    asyncio.run(ui.cb_publish(cb))
+    assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0]
+    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and cand["status"] == "carded"
+
+
+def test_redraw_after_failure_gets_the_publish_button_back(monkeypatch):
+    calls = {"n": 0}
+
+    async def flaky(data, scene=None, *, design=None):
+        calls["n"] += 1
+        if calls["n"] <= ui.IMAGE_TRIES:
+            raise image_gen.ImageError("503")
+        return image_gen.Banner(b"JPEGDATA", None, design["id"])
+
+    monkeypatch.setattr(image_gen, "vacancy_image", flaky)
+    bot, cand = FakeBot(), _cand()
+    for _ in range(ui.IMAGE_TRIES):
+        asyncio.run(ui.send_card(bot, OWNER, cand))
+    assert bot.photos == []
+    asyncio.run(ui.cb_new_image(FakeCb("vf:img:c1", bot)))
+    assert len(bot.photos) == 1 and "✅ Опубликовать" in _buttons(bot.photos[0]["markup"]) and cand["has_image"] is True
 
 
 # ------------------------------------------------------------------ кнопки карточки
@@ -176,12 +210,15 @@ def test_publish_sends_the_same_photo_to_the_channel():
     assert len(bot.photos) == 2                                                          # второй раз не публикуем
 
 
-def test_long_post_in_channel_is_photo_plus_text():
+def test_long_post_in_channel_is_one_photo_with_the_text():
+    from bot import vacancy as vac
+
     bot, cand = FakeBot(), _cand(long=True)
     asyncio.run(ui.send_card(bot, OWNER, cand))
     asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot)))
-    assert bot.photos[-1]["chat"] == CHANNEL and bot.photos[-1]["caption"] is None
-    assert bot.messages[-1]["chat"] == CHANNEL and "Barista kerak" in bot.messages[-1]["text"]
+    posted = bot.photos[-1]
+    assert posted["chat"] == CHANNEL and vac.visible_len(posted["caption"]) <= vac.CAPTION_LIMIT and "Barista kerak" in posted["caption"]
+    assert [m for m in bot.messages if m["chat"] == CHANNEL] == []                          # отдельного текстового сообщения нет
 
 
 def test_publish_error_keeps_the_card():
@@ -216,11 +253,45 @@ def test_new_picture_at_most_twice():
     assert len(bot.photos) == 3 and third.answers[-1][1] is True
 
 
-def test_premium_flag_follows_the_owner(monkeypatch):
+def test_forward_button_sends_a_clean_post_to_him_and_nothing_to_the_channel():
+    """Telegram не принимает премиум-эмодзи от бота в канал (проверено на живом канале), а в личку — принимает: второй путь — чистый пост ему."""
     bot, cand = FakeBot(), _cand()
     asyncio.run(ui.send_card(bot, OWNER, cand))
-    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot, premium=True)))
-    assert feed.load()["premium"] is True and "tg-emoji" in bot.photos[-1]["caption"]
+    card_id = bot.photos[0]["id"]
+    assert "vf:fwd:c1" in _buttons(bot.photos[0]["markup"]).values()
+    asyncio.run(ui.cb_forward(FakeCb("vf:fwd:c1", bot)))
+    clean = bot.photos[-1]
+    assert clean["chat"] == OWNER and clean["markup"] is None and clean["id"] != card_id          # без кнопок — так пересылают в канал
+    assert 'emoji-id="5389061359403039918"' in clean["caption"] and "Barista kerak" in clean["caption"]
+    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and (OWNER, card_id) in bot.deleted
+    assert feed.get_candidate("c1")["status"] == "published" and any("перешли его в канал" in n for n in ui._notes)
+    again = FakeCb("vf:fwd:c1", bot)
+    asyncio.run(ui.cb_forward(again))
+    assert again.answers[-1][1] is True and len(bot.photos) == 2                                  # второй раз не шлём
+
+
+def test_forward_button_needs_a_picture(monkeypatch):
+    async def broken(*a, **k):
+        raise image_gen.ImageError("503")
+
+    monkeypatch.setattr(image_gen, "vacancy_image", broken)
+    bot, cand = FakeBot(), _cand()
+    for _ in range(ui.IMAGE_TRIES):
+        asyncio.run(ui.send_card(bot, OWNER, cand))
+    cb = FakeCb("vf:fwd:c1", bot)
+    asyncio.run(ui.cb_forward(cb))
+    assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0] and cand["status"] == "carded"
+
+
+def test_posts_always_carry_the_channels_premium_emoji_tags():
+    """Раньше теги премиум-эмодзи включались только после нажатия кнопки пользователем с Premium; теперь всегда (в личку они доходят)."""
+    bot, cand = FakeBot(), _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    assert 'emoji-id="5389061359403039918"' in bot.photos[0]["caption"]                       # ✅ в заголовке — как в его постах
+    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot, premium=False)))
+    posted = bot.photos[-1]["caption"]
+    assert posted.count("<tg-emoji") >= 6 and 'emoji-id="5348418461838098123"' in posted and 'emoji-id="5897938112654348733"' in posted
+    assert "premium" not in feed.load()
 
 
 # ------------------------------------------------------------------ фоновый круг
@@ -274,6 +345,59 @@ def test_tick_does_nothing_when_switched_off_or_jes_offline(monkeypatch):
     feed.set_enabled(False)
     assert asyncio.run(ui.tick(bot))["note"] == "выключен"
     assert bot.photos == [] and bot.messages == []
+
+
+def test_tick_takes_his_named_channels_at_once_and_does_not_bring_back_removed_ones(monkeypatch):
+    monkeypatch.setattr(feed, "FAVORITE_SOURCES", ("fav_one", "fav_two"))
+    monkeypatch.setattr(caller, "user_client", lambda: None)
+    feed.load()["last_discovery"] = time.time()
+    asyncio.run(ui.tick(FakeBot()))
+    assert set(feed.sources("approved")) == {"fav_one", "fav_two"} and feed.load()["last_discovery"] == 0.0   # и пора искать другие каналы
+    feed.set_source_status("fav_one", "rejected")                       # он убрал канал — обратно не возвращаем
+    asyncio.run(ui.tick(FakeBot()))
+    assert set(feed.sources("approved")) == {"fav_two"}
+
+
+def test_his_three_channels_are_the_favorites():
+    assert FAVORITES_AT_IMPORT == ("vakansyuz_vacansyuz", "ishtopuz_rasmiy", "ish_keremi")      # настоящие константы, до подмены в фикстуре
+
+
+def test_card_shows_source_views_and_popular_posts_go_first():
+    low, high = _cand("lo"), _cand("hi", headline="Oshpaz kerak")
+    low["views"], high["views"] = 20, 12400
+    assert feed.next_card()["id"] == "hi"                                 # при равной оценке — та, у которой больше просмотров
+    bot = FakeBot()
+    asyncio.run(ui.send_card(bot, OWNER, high))
+    assert "🔗 Источник · 👁 12.4к" in _buttons(bot.photos[0]["markup"])
+    assert ui._views_label(0) == "" and ui._views_label(None) == "" and ui._views_label(950) == " · 👁 950"
+
+
+def test_tick_does_not_ask_about_a_post_without_a_picture(monkeypatch):
+    from bot.context import ai
+
+    async def broken(*a, **k):
+        raise image_gen.ImageError("503")
+
+    monkeypatch.setattr(ai, "assess_vacancy", FakeAI().assess_vacancy)
+    monkeypatch.setattr(ai, "rewrite_vacancy", FakeAI().rewrite_vacancy)
+    monkeypatch.setattr(caller, "user_client", lambda: FeedClient())
+    monkeypatch.setattr(image_gen, "vacancy_image", broken)
+    feed.add_pending("jobs_uz", {"title": "Jobs"})
+    feed.set_source_status("jobs_uz", "approved")
+    feed.load()["last_discovery"] = time.time()
+    bot = FakeBot()
+    out = asyncio.run(ui.tick(bot))
+    assert out["card"] is False and "картинка" in out["note"] and bot.photos == [] and bot.messages == []
+    assert len(feed.candidates("new")) == 1                                # вакансия ждёт следующего круга, не потеряна
+
+
+def test_feed_has_no_auto_mode_anymore():
+    from bot.handlers import vacancy_settings as sett
+
+    assert not hasattr(ui, "auto_publish") and not hasattr(ui, "cb_undo")
+    values = {b.callback_data for row in sett.settings_keyboard().inline_keyboard for b in row}
+    assert "vf:s:mode" not in values and "vf:s:imgs" not in values
+    assert "только после твоего" in sett.settings_text() and "решаешь ты" in ui.panel_text()
 
 
 def test_source_decision_buttons():

@@ -1,4 +1,4 @@
-"""Настройки вакансий и защита ленты — экраны владельца (07.10): сколько в день, окно, интервал, режим, картинки, дизайны, реклама.
+"""Настройки вакансий и защита ленты — экраны владельца (07.10): сколько в день, окно, интервал, защита, дизайны, реклама.
 
 Всё хранится в состоянии автоподбора (bot/vacancy_feed.py: cfg/set_cfg); экраны — тонкая обвязка. Только владелец.
 """
@@ -39,32 +39,28 @@ def _next(choices: tuple, current: Any) -> Any:
 def settings_text() -> str:
     start, end = feed.window()
     designs = len(feed.allowed_designs())
-    auto = feed.cfg("mode") == "auto"
     return "\n".join([
         "⚙️ <b>Настройки вакансий</b>",
         "",
-        f"Режим: {'🤖 сам размещает (после защиты и проверки)' if auto else '✋ присылает карточку, публикуешь ты'}",
-        f"В день: <b>{feed.load()['cap']}</b>",
-        f"Время публикации: <b>{start:02d}:00–{end:02d}:00</b> (Ташкент)",
+        "Публикация: <b>только после твоего «Опубликовать»</b> — каждую вакансию бот сначала показывает карточкой",
+        f"В день (карточек): <b>{feed.load()['cap']}</b>",
+        f"Время карточек: <b>{start:02d}:00–{end:02d}:00</b> (Ташкент)",
         f"Интервал между постами: <b>{feed.cfg('gap_min')} мин</b>",
         f"Защита платного поста наверху: <b>{feed.protect_seconds() / 3600:.0f} ч</b> (меньше 3 нельзя)",
-        f"Картинки: <b>{'вкл (Nano Banana 2.1, Vertex)' if feed.cfg('images') else 'выкл — только текст'}</b>",
         f"Зарплата обязательна: <b>{'да («по собеседованию» подходит)' if feed.cfg('require_salary') else 'нет'}</b>",
         f"Дизайны: <b>{designs} из {len(vac.DESIGNS)}</b>",
         "",
-        "В авто-режиме пост выходит только если картинка прошла проверку; иначе приходит карточка. Каждый авто-пост — с кнопкой «Удалить».",
+        "Фото — всегда в одном посте с текстом (Nano Banana 2.1, Vertex); без картинки пост не публикуется. Премиум-эмодзи бот в канал "
+        "поставить не может — для них на карточке кнопка «📤» (пришлёт готовый пост, перешлёшь сам).",
     ])
 
 
 def settings_keyboard() -> InlineKeyboardMarkup:
     start, end = feed.window()
-    auto = feed.cfg("mode") == "auto"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🤖 Режим: сам размещает" if auto else "✋ Режим: с подтверждением", "vf:s:mode", style="primary")],
         [_btn(f"📥 В день: {feed.load()['cap']}", "vf:s:cap"), _btn(f"🕗 С {start:02d}:00", "vf:s:wf"), _btn(f"🕘 До {end:02d}:00", "vf:s:wt")],
         [_btn(f"⏱ Интервал: {feed.cfg('gap_min')} мин", "vf:s:gap"), _btn(f"🛡 Защита: {feed.protect_seconds() / 3600:.0f} ч", "vf:s:prot")],
-        [_btn(f"🖼 Картинки: {'вкл' if feed.cfg('images') else 'выкл'}", "vf:s:imgs"),
-         _btn(f"💰 Зарплата обязательна: {'да' if feed.cfg('require_salary') else 'нет'}", "vf:s:sal")],
+        [_btn(f"💰 Зарплата обязательна: {'да' if feed.cfg('require_salary') else 'нет'}", "vf:s:sal")],
         [_btn(f"🎨 Дизайны ({len(feed.allowed_designs())}/{len(vac.DESIGNS)})", "vf:ds"), _btn("🛡 Реклама и защита", "vf:ads")],
         [_btn("⬅️ Назад", "vf:panel")],
     ])
@@ -84,10 +80,7 @@ async def cb_settings(callback: CallbackQuery) -> None:
 async def cb_setting(callback: CallbackQuery) -> None:
     key = callback.data.split(":", 2)[2]
     note = None
-    if key == "mode":
-        feed.set_cfg("mode", "confirm" if feed.cfg("mode") == "auto" else "auto")
-        note = "Теперь сам размещает" if feed.cfg("mode") == "auto" else "Теперь присылает карточки"
-    elif key == "cap":
+    if key == "cap":
         feed.set_cap(_next(feed.CAPS, int(feed.load()["cap"])))
     elif key == "wf":
         feed.set_cfg("window_from", _next(WINDOW_FROM, feed.window()[0]))
@@ -97,8 +90,6 @@ async def cb_setting(callback: CallbackQuery) -> None:
         feed.set_cfg("gap_min", _next(feed.GAP_CHOICES, int(feed.cfg("gap_min"))))
     elif key == "prot":
         feed.set_cfg("protect_hours", _next(feed.PROTECT_CHOICES, int(feed.protect_seconds() // 3600)))
-    elif key == "imgs":
-        feed.set_cfg("images", not feed.cfg("images"))
     elif key == "sal":
         feed.set_cfg("require_salary", not feed.cfg("require_salary"))
     await answer_now(callback, note)

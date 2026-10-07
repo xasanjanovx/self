@@ -26,7 +26,8 @@ from . import vacancy_feed as feed
 logger = logging.getLogger(__name__)
 
 POLL_LIMIT = 25
-FIRST_RUN_LOOKBACK_H = 6        # при первом запуске смотрим только последние часы — историю не трогаем, ничего не удаляем
+SEED_LIMIT = 60                 # сколько последних постов канала один раз прочитать ради телефонов (антидубли)
+FIRST_RUN_LOOKBACK_H = 6       # при первом запуске смотрим только последние часы — историю не трогаем, ничего не удаляем
 
 _REKLAMA = re.compile(r"#\s*(?:reklama|реклама)|\berid\b\s*[:=]?\s*\w", re.IGNORECASE)
 _OUR_TEMPLATE = ("tez va oson ish toping", "ma'muriyati javobgar emas", "ish beruvchi pul so'rasa", "ogoh bo'ling")
@@ -134,6 +135,8 @@ async def handle_post(bot: Any, post: dict[str, Any], *, ai: Any | None = None, 
     del done[:-300]
     text = post.get("text") or ""
     kind = classify(text, mid)
+    if kind != "ad":
+        feed.note_channel_phones(text, float(post["ts"]))      # такую же вакансию из чужих каналов потом не предложим
     if kind == "own":
         feed.save()
         return "own"
@@ -204,10 +207,25 @@ async def poll(bot: Any, *, ai: Any | None = None) -> dict[str, Any]:
     for post in sorted(posts, key=lambda p: p["id"]):
         if first and post["ts"] < horizon:
             st.setdefault("guard_done", []).append(post["id"])
+            if classify(post["text"], post["id"]) != "ad":
+                feed.note_channel_phones(post["text"], post["ts"])
             continue
         result = await handle_post(bot, post, ai=ai, history=first)
         if result in counts:
             counts[result] += 1
+    if not st.get("phones_seeded"):
+        # один раз: телефоны вакансий, которые уже стоят в канале (до нас), — чтобы не предлагать те же из чужих каналов
+        st["phones_seeded"] = True
+        try:
+            async for message in client.iter_messages(entity, limit=SEED_LIMIT):
+                body = (getattr(message, "message", None) or getattr(message, "text", None) or "").strip()
+                date = getattr(message, "date", None)
+                if body and classify(body, int(message.id)) != "ad":
+                    feed.note_channel_phones(body, date.timestamp() if date else None)
+        except Exception as exc:
+            st["phones_seeded"] = False
+            logger.info("channel_guard: телефоны канала не собрались: %s", type(exc).__name__)
+        feed.save()
     if posts:
         st["guard_cursor"] = max(int(st["guard_cursor"]), max(p["id"] for p in posts))
         feed.save()

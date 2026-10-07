@@ -256,6 +256,19 @@ def test_poll_then_deletes_a_new_credit_ad_and_ignores_own_posts(monkeypatch):
     assert asyncio.run(guard.poll(bot))["posts"] == 0                              # новых нет — ничего не делаем
 
 
+def test_phones_of_posts_already_in_the_channel_are_remembered_once(monkeypatch):
+    """Антидубли: вакансия, которую он уже выложил сам, из чужого канала не предлагается (телефоны канала читаем один раз)."""
+    posts = [_post(1, MANUAL_POST, hours_ago=40), _post(2, CREDIT_AD, hours_ago=1)]
+    monkeypatch.setattr(caller, "user_client", lambda: FakeClient(posts))
+    asyncio.run(guard.poll(FakeBot()))
+    assert feed.in_channel("Sotuvchi kerak. Aloqa: +998 90 111 22 33")           # старый пост (дальше окна первого запуска) тоже учтён
+    assert not feed.in_channel("Boshqa vakansiya, tel +998 91 000 11 22")
+    assert feed.load()["phones_seeded"] is True
+    posts.append(_post(3, OUR_VACANCY))                                         # новый пост канала — тоже запоминаем
+    asyncio.run(guard.poll(FakeBot()))
+    assert feed.in_channel("Kredit menejeri. +998 90 123 45 67")
+
+
 def test_poll_without_jes_or_with_a_numeric_channel(monkeypatch):
     monkeypatch.setattr(caller, "user_client", lambda: None)
     assert asyncio.run(guard.poll(FakeBot()))["error"] == "аккаунт JES не в сети"

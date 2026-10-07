@@ -1,5 +1,6 @@
 """07.10: автоподбор вакансий из чужих каналов — отбор «только надёжные», очередь, чтение каналов (без сети и без Telegram)."""
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -321,6 +322,73 @@ def test_handled_vacancy_is_remembered_by_key():
     cand["key"] = "same-key"
     feed.mark_handled(cand, "skipped")
     assert "same-key" in feed.load()["published"]
+
+
+# ------------------------------------------------------------------ просмотры и каналы, которые он назвал сам
+def test_views_bonus_is_logarithmic_and_capped():
+    assert feed.views_bonus(0) == 0 and feed.views_bonus(None) == 0 and feed.views_bonus("x") == 0
+    assert feed.views_bonus(10) < feed.views_bonus(1000) < feed.views_bonus(100000) == 15
+
+
+def test_with_equal_score_the_more_viewed_post_comes_first_but_quality_still_wins():
+    a, b = _cand("a", 70), _cand("b", 70)
+    a["views"], b["views"] = 50, 9000
+    assert feed.next_card(NOON)["id"] == "b"
+    c = _cand("c", 90)
+    c["views"] = 0
+    assert feed.next_card(NOON)["id"] == "c"                                  # 90 + 0 всё равно выше, чем 70 + 15
+
+
+def test_pull_source_remembers_the_views_of_the_original():
+    _src()
+    post = SimpleNamespace(id=6, message=GOOD, date=datetime.now(timezone.utc) - timedelta(hours=2), views=4321)
+    asyncio.run(feed.pull_source(FakeClient([post]), "jobs_uz", FakeAI()))
+    assert feed.candidates("new")[0]["views"] == 4321
+
+
+def test_pull_source_stops_when_the_stock_of_candidates_is_big_enough(monkeypatch):
+    _src()
+    monkeypatch.setattr(feed, "MAX_NEW_PER_SOURCE", 1)
+    second = GOOD.replace("barista", "oshpaz").replace("+998 90 123 45 67", "+998 90 555 11 22")
+    ai = FakeAI()
+    counts = asyncio.run(feed.pull_source(FakeClient([_post(6, GOOD, 2), _post(7, second, 2)]), "jobs_uz", ai))
+    assert counts["queued"] == 1 and ai.assess_calls == 1                       # нейросеть на лишнее не тратим
+    assert feed.sources()["jobs_uz"]["last_id"] == 6                            # а второй пост разберём, когда запас схлынет
+
+
+def test_ensure_favorites_adds_his_channels_once_and_respects_removal():
+    assert feed.ensure_favorites() is True
+    got = feed.sources("approved")
+    assert set(got) == set(feed.FAVORITE_SOURCES) and all(v["favorite"] for v in got.values())
+    assert feed.ensure_favorites() is False
+    feed.set_source_status("ish_keremi", "rejected")                            # убрал сам — не возвращаем
+    feed.ensure_favorites()
+    assert "ish_keremi" not in feed.sources("approved")
+
+
+def test_new_favorites_make_the_channel_search_due_soon():
+    feed.load()["last_discovery"] = 12345.0
+    feed.ensure_favorites()
+    assert feed.load()["last_discovery"] == 0.0
+    feed.load()["last_discovery"] = 777.0
+    feed.ensure_favorites()                                                     # ничего нового — время поиска не трогаем
+    assert feed.load()["last_discovery"] == 777.0
+
+
+def test_vacancy_already_in_our_channel_is_not_offered_again():
+    _src()
+    feed.note_channel_phones("Aloqa: +998 90 123 45 67 | +998 93 111 22 33")
+    ai = FakeAI()
+    assert asyncio.run(feed.consider(GOOD, source="jobs_uz", msg_id=7, ai=ai)) == ("skip", "уже есть в нашем канале")
+    assert ai.assess_calls == 0                                                 # и нейросеть на неё не тратим
+    feed.load()["channel_phones"].clear()
+    feed.note_channel_phones(GOOD, ts=time.time() - 30 * 86400)                 # месяц назад — уже не считается
+    assert not feed.in_channel(GOOD)
+    assert asyncio.run(feed.consider(GOOD, source="jobs_uz", msg_id=7, ai=ai))[0] == "queued"
+
+
+def test_search_keywords_cover_the_channels_he_named():
+    assert {"ish kerak", "xodim kerak", "ish topish"} <= set(feed.KEYWORDS)
 
 
 # ------------------------------------------------------------------ поиск каналов

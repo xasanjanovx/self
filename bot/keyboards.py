@@ -770,6 +770,8 @@ def vacancy_result_keyboard(
         rows.append([_btn(t(lang, "vacancy_contact"), url=contact_url, style="primary")])
     publish_key = "vacancy_publish" if can_publish else "vacancy_copy"
     rows.append([_btn(t(lang, publish_key), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
+    if can_publish:
+        rows.append([_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", "vacancy:fwd")])
     if image_prompt:
         # нажатие копирует промпт в буфер — сам текст в чате не показываем
         rows.append([_btn(t(lang, "vacancy_prompt"), icon=_pe.ID_STAR, copy_text=image_prompt)])

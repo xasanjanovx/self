@@ -1,14 +1,14 @@
 """Автоподбор вакансий: экран, карточки каналов и вакансий, фоновый круг (07.10). Только владелец.
 
 JES читает одобренные каналы (bot/vacancy_feed.py), к каждой прошедшей проверку вакансии рисуется картинка (Nano Banana 2.1 +
-логотип) и приходит карточка: «Опубликовать» / «Пропустить» / «Другая картинка». В канал — только по его кнопке.
+логотип) и приходит карточка: «Опубликовать» / «Пропустить» / «Другая картинка». В канал — только по его кнопке (каждый пост
+спрашивается у него обязательно), всегда фото + текст одним сообщением. Премиум-эмодзи: бот ставит их только в личку — в канал Telegram
+их от бота не принимает (проверено), поэтому у карточки вторая кнопка «📤»: готовый пост приходит владельцу, и он пересылает его сам.
 """
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
-import re
 import time
 from datetime import datetime
 from typing import Any
@@ -27,9 +27,9 @@ from .common import answer_now, safe_edit
 router = Router(name="vacancy_feed")
 logger = logging.getLogger(__name__)
 
-CAPTION_LIMIT = 1024
-DISCOVERY_EVERY_S = 3 * 86400
-MAX_SOURCES_AUTO = 8             # столько каналов в работе — автопоиск новых больше не тревожит
+DISCOVERY_EVERY_S = 86400
+MAX_SOURCES_AUTO = 12            # столько каналов в работе — автопоиск новых больше не тревожит
+IMAGE_TRIES = 3                  # столько кругов пробуем нарисовать картинку, прежде чем показать карточку без неё (она без кнопки «Опубликовать»)
 _tasks: set[asyncio.Task] = set()
 _busy = asyncio.Lock()           # один круг за раз (кнопка «проверить сейчас» и воркер не наступают друг на друга)
 
@@ -64,22 +64,22 @@ def guard_line() -> str:
 
 def panel_text() -> str:
     s = feed.status()
-    mode = "🤖 сам размещает" if feed.cfg("mode") == "auto" else "✋ с подтверждением (карточка)"
     start, end = feed.window()
     ads = feed.load()["ads_log"]
     lines = [
         "🤖 <b>Автоподбор вакансий</b>",
         "",
-        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · режим: {mode}",
+        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · каждую вакансию решаешь ты (карточка)",
         f"Каналы: {s['approved']} в работе · {s['pending']} ждут твоего решения",
         f"Сегодня {s['today']} из {s['cap']} · окно {start:02d}:00–{end:02d}:00 · в очереди {s['new']} · ждут ответа {s['carded']}"
         + (f" · отложено {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
         guard_line(),
         f"🚫 Реклама: фильтр {'включён' if feed.cfg('ads_on') else 'выключен'} · удалено {sum(1 for a in ads if a.get('deleted'))}",
         "",
-        "JES читает одобренные каналы и отбрасывает ненадёжное: нет контакта работодателя, деньги вперёд, работа за границей, "
-        "нет зарплаты или условий. Остальное оформляет по шаблону канала и рисует баннер (Nano Banana 2.1 только через Vertex, "
-        "дизайн каждый раз другой, логотип снизу слева).",
+        "JES читает каналы-источники и отбрасывает ненадёжное: нет контакта работодателя, деньги вперёд, работа за границей, "
+        "нет зарплаты или условий. Остальное оформляет по шаблону канала и рисует баннер (Nano Banana 2.1 только "
+        "через Vertex, дизайн каждый раз другой, логотип снизу слева). Фото и текст — одним постом. В канал — только после твоего «Опубликовать». "
+        "Премиум-эмодзи бот в канал поставить не может (Telegram не принимает от бота) — для них кнопка «📤»: пришлю готовый пост, перешлёшь сам.",
     ]
     if float(s["flood_until"] or 0) > time.time():
         lines += ["", f"⏳ Telegram просит JES подождать до {datetime.fromtimestamp(float(s['flood_until']), feed.TZ):%H:%M}."]
@@ -104,7 +104,6 @@ async def _show_panel(callback: CallbackQuery, note: str = "") -> None:
 @router.callback_query(F.data == "vf:panel")
 async def cb_panel(callback: CallbackQuery) -> None:
     await answer_now(callback)
-    feed.remember_premium(bool(getattr(callback.from_user, "is_premium", False)))
     await _show_panel(callback)
 
 
@@ -127,7 +126,7 @@ async def cb_cap(callback: CallbackQuery) -> None:
 # ------------------------------------------------------------------ каналы
 def _source_line(name: str, info: dict[str, Any]) -> str:
     st = info.get("stats") or {}
-    base = f"@{name}"
+    base = f"@{name}" + (" ⭐" if info.get("favorite") else "")
     if info.get("status") == "pending":
         return f"{base} · {int(info.get('members') or 0):,} подписчиков · {int(info.get('passing') or 0)} из {int(info.get('vacancies') or 0)} вакансий проходят"
     reasons = sorted((st.get("reasons") or {}).items(), key=lambda kv: -kv[1])[:2]
@@ -139,6 +138,7 @@ def _source_line(name: str, info: dict[str, Any]) -> str:
 @router.callback_query(F.data == "vf:srcs")
 async def cb_sources(callback: CallbackQuery) -> None:
     await answer_now(callback)
+    feed.ensure_favorites()
     approved, pending = feed.sources("approved"), feed.sources("pending")
     lines = ["📡 <b>Каналы-источники</b>", ""]
     rows = []
@@ -221,18 +221,16 @@ async def cb_find(callback: CallbackQuery) -> None:
 
 
 # ------------------------------------------------------------------ карточки вакансий
-def _visible_len(post_html: str) -> int:
-    return len(html.unescape(re.sub(r"<[^>]+>", "", post_html)))
-
-
 async def _send_post(bot: Bot, chat_id: int | str, post: str, image: bytes | str | None, markup: InlineKeyboardMarkup | None,
                      *, head: str | None = None) -> tuple[list[int], str | None, int]:
-    """Фото + подпись, если пост влезает в 1024 знака; иначе фото, а следом текст с кнопками. → (id сообщений, file_id, id поста)."""
+    """Фото + текст ОДНИМ сообщением (подпись к фото). Пост заранее сокращается до лимита (vac.fit_post); если всё же не влез
+    (почти невозможно) — фото, а следом текст. Без картинки — только текст (так уходит лишь карточка без картинки владельцу, в канал — никогда).
+    → (id сообщений, file_id, id поста)."""
     if image is None:
         msg = await bot.send_message(chat_id, post, reply_markup=markup)
         return [msg.message_id], None, msg.message_id
     photo = BufferedInputFile(image, filename="vacancy.jpg") if isinstance(image, bytes) else image
-    if _visible_len(post) <= CAPTION_LIMIT:
+    if vac.visible_len(post) <= vac.CAPTION_LIMIT:
         msg = await bot.send_photo(chat_id, photo, caption=post, reply_markup=markup)
         return [msg.message_id], msg.photo[-1].file_id, msg.message_id
     first = await bot.send_photo(chat_id, photo, caption=head)
@@ -240,20 +238,42 @@ async def _send_post(bot: Bot, chat_id: int | str, post: str, image: bytes | str
     return [first.message_id, second.message_id], first.photo[-1].file_id, second.message_id
 
 
-def _card_markup(cand: dict[str, Any], contact_url: str | None) -> InlineKeyboardMarkup:
+def _views_label(views: Any) -> str:
+    """« · 👁 12.4к» — сколько просмотров у исходного поста (в подписи места нет, поэтому в кнопке «Источник»)."""
+    try:
+        count = int(views or 0)
+    except (TypeError, ValueError):
+        return ""
+    if count <= 0:
+        return ""
+    return f" · 👁 {count}" if count < 1000 else f" · 👁 {count / 1000:.1f}к".replace(".0к", "к")
+
+
+def _card_markup(cand: dict[str, Any], contact_url: str | None, *, can_publish: bool = True) -> InlineKeyboardMarkup:
+    """Без картинки «Опубликовать» нет: фото обязательно в одном посте с текстом, поэтому вместо неё — «Нарисовать картинку»."""
     cid = cand["id"]
-    rows = [
-        [_btn("✅ Опубликовать", f"vf:pub:{cid}", style="success"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
-        [_btn("🔄 Другая картинка", f"vf:img:{cid}"), _btn("🔗 Источник", url=cand["url"])],
-    ]
+    source = _btn("🔗 Источник" + _views_label(cand.get("views")), url=cand["url"])
+    if can_publish:
+        rows = [
+            [_btn("✅ Опубликовать", f"vf:pub:{cid}", style="success"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
+            [_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", f"vf:fwd:{cid}")],
+            [_btn("🔄 Другая картинка", f"vf:img:{cid}"), source],
+        ]
+    else:
+        rows = [
+            [_btn("🎨 Нарисовать картинку", f"vf:img:{cid}", style="primary"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
+            [source],
+        ]
     channel_kb = vacancy_channel_keyboard("uz", contact_url)
     return InlineKeyboardMarkup(inline_keyboard=(channel_kb.inline_keyboard if channel_kb else []) + rows)
 
 
-def _post_html(cand: dict[str, Any], premium: bool) -> tuple[str, str | None]:
+def _post_html(cand: dict[str, Any]) -> tuple[str, str | None, bool]:
+    """Пост как уйдёт в канал: с тегами премиум-эмодзи канала (в личку владельцу они доходят; в канал Telegram от бота их отбрасывает,
+    остаются обычные эмодзи), влезает в подпись к фото. → (html, ссылка «написать работодателю», сокращён ли текст)."""
     data = feed.data_from_dict(cand["data"])
-    post = vac.format_vacancy_post(data, premium=premium, footer_url=settings.vacancy_footer_url)
-    return post, vac.build_contact_url(data.telegram)
+    post, trimmed = vac.fit_post(data, premium=True, footer_url=settings.vacancy_footer_url)
+    return post, vac.build_contact_url(data.telegram), trimmed
 
 
 def _read_image(cid: str) -> bytes | None:
@@ -287,25 +307,35 @@ async def _make_image(cand: dict[str, Any], *, again: bool = False) -> tuple[byt
     return banner.image, banner.warning
 
 
-async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate: bool = False) -> None:
-    """Карточка вакансии владельцу. Картинка рисуется здесь (только для тех, кого показываем — деньги не тратим зря)."""
-    images_on = bool(feed.cfg("images"))
-    image = None if (regenerate or not images_on) else _read_image(cand["id"])
+async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate: bool = False) -> bool:
+    """Карточка вакансии владельцу: картинка и пост одним сообщением — так же, как уйдёт в канал. Картинка рисуется здесь
+    (только для тех, кого показываем — деньги не тратим зря).
+    Фото обязательно: если картинка не вышла, карточку не показываем (в следующий круг попробуем снова); после IMAGE_TRIES неудач
+    или по его кнопке «Другая картинка» — карточка без картинки и без кнопки «Опубликовать». → True, если карточка ушла."""
+    image = None if regenerate else _read_image(cand["id"])
     warning = cand.get("image_warning") if image else None
-    if image is None and images_on:
+    if image is None:
         image, warning = await _make_image(cand, again=regenerate)
         cand["image_warning"] = warning
-    post, contact_url = _post_html(cand, bool(feed.load().get("premium")))
-    shown = post if (image or not images_on) else post + '\n\n' + "⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."
+        if image is None:
+            cand["img_tries"] = int(cand.get("img_tries") or 0) + 1
+            feed.save()
+            if not regenerate and cand["img_tries"] < IMAGE_TRIES:
+                return False
+    post, contact_url, trimmed = _post_html(cand)
+    shown = post if image else post + "\n\n⚠️ Картинка не получилась — без неё публиковать нельзя. Нажми «Нарисовать картинку»."
     head = f"📥 {h(str(cand['data'].get('headline') or 'Вакансия'))} · из @{cand['source']}"
-    ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url), head=head)
+    ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url, can_publish=bool(image)), head=head)
     cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image)})
     feed.note_card_sent()
     feed.save()
-    if warning:
+    notes = [n for n in (warning, "✂️ Текст сокращён до лимита подписи (1024 знака), чтобы фото и текст шли одним постом. Полный — по кнопке «Источник»."
+                         if trimmed else None) if n]
+    if notes:
         from .. import screen as screen_mod
 
-        await screen_mod.send_note(bot, chat_id, warning, ttl=3600)
+        await screen_mod.send_note(bot, chat_id, "\n".join(notes), ttl=3600)
+    return True
 
 
 async def _delete_card(bot: Bot, cand: dict[str, Any]) -> None:
@@ -317,21 +347,18 @@ async def _delete_card(bot: Bot, cand: dict[str, Any]) -> None:
     cand["card_ids"] = []
 
 
-async def publish_candidate(bot: Bot, cand: dict[str, Any], *, premium: bool) -> tuple[list[int], int]:
-    """Опубликовать вакансию в канал (фото + пост). Свои сообщения записываем — чужими (ручными) их считать нельзя.
-    → (id сообщений в канале, id поста). Бросает исключение, если Telegram отказал."""
-    post, contact_url = _post_html(cand, premium)
-    image: bytes | str | None = None
-    if feed.cfg("images"):
-        image = cand.get("file_id") or _read_image(cand["id"])
+async def publish_candidate(bot: Bot, cand: dict[str, Any]) -> tuple[list[int], int]:
+    """Опубликовать вакансию в канал: фото и текст одним сообщением. Без картинки не публикуем никогда.
+    Свои сообщения записываем — чужими (ручными) их считать нельзя. → (id сообщений в канале, id поста).
+    Бросает исключение, если картинки нет или Telegram отказал."""
+    post, contact_url, _ = _post_html(cand)
+    image: bytes | str | None = cand.get("file_id") or _read_image(cand["id"])
+    if image is None:
+        raise RuntimeError("нет картинки — сначала нарисуй её кнопкой «Другая картинка»")
     ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, vacancy_channel_keyboard("uz", contact_url))
     feed.mark_own(ids)
     feed.note_feed_post()
     feed.mark_handled(cand, "published")
-    undo = feed.load().setdefault("undo", {})
-    undo[cand["id"]] = {"ids": ids, "ts": time.time()}
-    for old in sorted(undo, key=lambda k: undo[k]["ts"])[:-20]:
-        undo.pop(old)
     feed.save()
     return ids, post_id
 
@@ -354,8 +381,9 @@ async def cb_publish(callback: CallbackQuery) -> None:
     if not settings.vacancy_channel:
         await answer_now(callback, "Канал не настроен (VACANCY_CHANNEL)", alert=True)
         return
-    premium = bool(getattr(callback.from_user, "is_premium", False))
-    feed.remember_premium(premium)
+    if not (cand.get("file_id") or _read_image(cand["id"])):
+        await answer_now(callback, "Без картинки не публикую — фото должно быть в одном посте с текстом. Нажми «Нарисовать картинку»", alert=True)
+        return
     from .. import screen as screen_mod
 
     ok, _, wait = feed.publish_gate(respect_schedule=False)
@@ -370,7 +398,7 @@ async def cb_publish(callback: CallbackQuery) -> None:
                                    f"пока платный пост наверху ленты ({feed.human_wait(wait)}).", ttl=7200)
         return
     try:
-        _, post_id = await publish_candidate(callback.bot, cand, premium=premium)
+        _, post_id = await publish_candidate(callback.bot, cand)
     except Exception as exc:
         logger.exception("vacancy_feed: публикация %s не вышла", cand["id"])
         await answer_now(callback, f"Не вышло: {str(exc)[:150]}", alert=True)
@@ -379,6 +407,36 @@ async def cb_publish(callback: CallbackQuery) -> None:
     await _delete_card(callback.bot, cand)
     link = _post_link(post_id)
     await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+
+
+@router.callback_query(F.data.startswith("vf:fwd:"))
+async def cb_forward(callback: CallbackQuery) -> None:
+    """Telegram не пускает премиум-эмодзи от бота в канал (проверено 07.10: в личку бот их ставит, в канал — нет, и через copyMessage тоже).
+    Поэтому второй путь: бот присылает ему готовый пост — фото и текст одним сообщением, без кнопок, с премиум-эмодзи, — а в канал
+    его пересылает он сам (у пересылки Premium-аккаунта эмодзи сохраняются)."""
+    cand = feed.get_candidate(callback.data.split(":", 2)[2])
+    if cand is None or cand.get("status") in {"published", "scheduled"}:
+        await answer_now(callback, "Эта вакансия уже обработана или стоит в очереди", alert=True)
+        return
+    image = cand.get("file_id") or _read_image(cand["id"])
+    if image is None:
+        await answer_now(callback, "Без картинки не делаю — нажми «Нарисовать картинку»", alert=True)
+        return
+    post, _, _ = _post_html(cand)
+    chat_id = cand.get("chat_id") or callback.from_user.id
+    try:
+        await _send_post(callback.bot, chat_id, post, image, None)
+    except Exception as exc:
+        logger.exception("vacancy_feed: чистый пост %s не отправился", cand["id"])
+        await answer_now(callback, f"Не вышло: {str(exc)[:150]}", alert=True)
+        return
+    await answer_now(callback, "Готовый пост — выше")
+    await _delete_card(callback.bot, cand)
+    feed.mark_handled(cand, "published")                       # раз он взял его себе — такую же вакансию больше не предлагаем
+    from .. import screen as screen_mod
+
+    await screen_mod.send_note(callback.bot, chat_id, "📤 Готовый пост выше: перешли его в канал (при пересылке выбери «Скрыть отправителя») — "
+                               "премиум-эмодзи сохранятся.", ttl=3600)
 
 
 async def publish_due(bot: Bot) -> int:
@@ -397,7 +455,7 @@ async def publish_due(bot: Bot) -> int:
             feed.save()
             continue
         try:
-            _, post_id = await publish_candidate(bot, cand, premium=bool(feed.load().get("premium")))
+            _, post_id = await publish_candidate(bot, cand)
         except Exception:
             logger.exception("vacancy_feed: отложенная публикация %s не вышла", cand["id"])
             cand["publish_at"] = now + 600
@@ -409,53 +467,6 @@ async def publish_due(bot: Bot) -> int:
             await screen_mod.send_note(bot, owner, "⏰ Опубликовал отложенную вакансию" + (f": {link}" if link else ""), ttl=3600)
         return 1
     return 0
-
-
-async def auto_publish(bot: Bot, owner: int, cand: dict[str, Any]) -> bool:
-    """Режим «сам размещает»: картинка → публикация → заметка с кнопкой «Удалить пост». Картинка не вышла или не прошла проверку —
-    сами не публикуем, а спрашиваем карточкой (лучше спросить, чем выпустить неточный баннер). True — опубликовано."""
-    from .. import screen as screen_mod
-
-    if not settings.vacancy_channel:
-        return False
-    if feed.cfg("images"):
-        image, warning = await _make_image(cand)
-        cand["image_warning"] = warning
-        if image is None or warning:
-            await send_card(bot, owner, cand)
-            return False
-    try:
-        _, post_id = await publish_candidate(bot, cand, premium=bool(feed.load().get("premium")))
-    except Exception:
-        logger.exception("vacancy_feed: автопубликация %s не вышла", cand["id"])
-        return False
-    feed.note_card_sent()
-    link = _post_link(post_id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[_btn("🗑 Удалить пост из канала", f"vf:undo:{cand['id']}")]])
-    await screen_mod.send_note(bot, owner, f"🤖 Опубликовал вакансию «{h(str(cand['data'].get('headline') or ''))}» из @{cand['source']}"
-                               + (f": {link}" if link else ""), kb, ttl=6 * 3600, sticky=True)
-    return True
-
-
-@router.callback_query(F.data.startswith("vf:undo:"))
-async def cb_undo(callback: CallbackQuery) -> None:
-    entry = feed.load().get("undo", {}).pop(callback.data.split(":", 2)[2], None)
-    if not entry:
-        await answer_now(callback, "Этот пост уже нельзя удалить из бота", alert=True)
-        return
-    gone = 0
-    for mid in entry["ids"]:
-        try:
-            await callback.bot.delete_message(settings.vacancy_channel, mid)
-            gone += 1
-        except Exception:
-            logger.warning("vacancy_feed: не удалил пост %s", mid, exc_info=True)
-    feed.save()
-    await answer_now(callback, "Удалил из канала" if gone else "Не получилось удалить", alert=not gone)
-    try:
-        await callback.message.edit_text("🗑 Пост удалён из канала." if gone else "⚠️ Не смог удалить пост — проверь права бота в канале.", reply_markup=None)
-    except Exception:
-        pass
 
 
 @router.callback_query(F.data.startswith("vf:skip:"))
@@ -475,7 +486,7 @@ async def cb_new_image(callback: CallbackQuery) -> None:
     if cand is None:
         await answer_now(callback, "Уже обработано", alert=True)
         return
-    if int(cand.get("regen") or 0) >= 2:
+    if int(cand.get("regen") or 0) >= 2 and cand.get("has_image"):
         await answer_now(callback, "Больше двух перерисовок не делаю — можно опубликовать как есть или пропустить", alert=True)
         return
     await answer_now(callback, "Рисую заново, около 15 секунд…")
@@ -495,6 +506,7 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
         out["note"] = "выключен"
         return out
     async with _busy:
+        feed.ensure_favorites()
         if feed.sources("approved"):
             if caller.user_client() is None:
                 out["note"] = "аккаунт JES не в сети"
@@ -516,12 +528,9 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
         cand = feed.next_card(now, ignore_hours=manual)
         if cand is not None:
             try:
-                if feed.cfg("mode") == "auto" and not manual:
-                    if feed.publish_gate(now)[0]:
-                        out["card"] = await auto_publish(bot, owner, cand)
-                else:
-                    await send_card(bot, owner, cand)
-                    out["card"] = True
+                out["card"] = await send_card(bot, owner, cand)
+                if not out["card"]:
+                    out["note"] = out["note"] or "картинка пока не получилась — попробую ещё раз в следующий круг"
             except Exception:
                 logger.exception("vacancy_feed: вакансия %s не отправилась", cand["id"])
     return out
@@ -530,7 +539,6 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
 @router.callback_query(F.data == "vf:now")
 async def cb_now(callback: CallbackQuery) -> None:
     await answer_now(callback, "Проверяю каналы…")
-    feed.remember_premium(bool(getattr(callback.from_user, "is_premium", False)))
     await safe_edit(callback, panel_text() + "\n\n⏳ Читаю каналы и оформляю вакансии — минуту…", None)
     res = await tick(callback.bot, manual=True)
     pulled = res.get("pulled") or {}

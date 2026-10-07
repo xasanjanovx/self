@@ -79,10 +79,13 @@ async def cmd_vacancy(message: Message, state: FSMContext) -> None:
     await open_panel(message, state, profile)
 
 
-def _card_markup(contact_url: str | None, regen: int) -> InlineKeyboardMarkup:
+def _card_markup(contact_url: str | None, regen: int, *, can_publish: bool = True) -> InlineKeyboardMarkup:
+    """Без баннера «Опубликовать» нет: фото обязательно в одном посте с текстом — сначала «Нарисовать баннер»."""
     channel_kb = vacancy_channel_keyboard("uz", contact_url)
     rows = [
-        [_btn("✅ Опубликовать в канал", "vacancy:publish", style="success"), _btn("🔄 Другой дизайн", "vacancy:img")],
+        [_btn("✅ Опубликовать в канал", "vacancy:publish", style="success"), _btn("🔄 Другой дизайн", "vacancy:img")] if can_publish
+        else [_btn("🎨 Нарисовать баннер", "vacancy:img", style="primary")],
+        *([[_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", "vacancy:fwd")]] if can_publish else []),
         [_btn("🎨 Промпт (ChatGPT)", "vacancy:prompt"), _btn("📝 Новая вакансия", "vacancy:again")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=(channel_kb.inline_keyboard if channel_kb else []) + rows)
@@ -107,19 +110,21 @@ async def _send_card(message_or_cb, state: FSMContext, chat_id: int, bot, banner
             await bot.delete_message(chat_id, mid)
         except Exception:
             pass
-    premium = bool(feed.load().get("premium"))
     vdata = feed.data_from_dict(data["vacancy_data"])
-    post = vac.format_vacancy_post(vdata, premium=premium, footer_url=settings.vacancy_footer_url)
-    note = "" if banner else "\n\n⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другой дизайн»."
+    post, trimmed = vac.fit_post(vdata, premium=True, footer_url=settings.vacancy_footer_url)
+    note = "" if banner else "\n\n⚠️ Картинка не получилась — без неё публиковать нельзя. Нажми «Нарисовать баннер»."
     head = f"📥 {h(vdata.headline)}"
     ids, file_id, _ = await _send_post(bot, chat_id, post + note, banner.image if banner else None,
-                                       _card_markup(data.get("vacancy_contact_url"), int(data.get("vacancy_regen") or 0)), head=head)
+                                       _card_markup(data.get("vacancy_contact_url"), int(data.get("vacancy_regen") or 0),
+                                                    can_publish=banner is not None), head=head)
     await state.update_data(vacancy_card_ids=ids, vacancy_chat_id=chat_id, vacancy_file_id=file_id,
                             vacancy_design=(banner.design if banner else data.get("vacancy_design")))
-    if banner and banner.warning:
+    notes = [n for n in ((banner.warning if banner else None),
+                         "✂️ Текст сокращён до лимита подписи (1024 знака), чтобы фото и текст шли одним постом." if trimmed else None) if n]
+    if notes:
         from .. import screen as screen_mod
 
-        await screen_mod.send_note(bot, chat_id, banner.warning, ttl=3600)
+        await screen_mod.send_note(bot, chat_id, "\n".join(notes), ttl=3600)
 
 
 async def process_vacancy(message: Message, state: FSMContext, profile: Profile, raw_text: str) -> None:
@@ -128,8 +133,6 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
         return
     lang = profile.lang
     photo_id = message.photo[-1].file_id if message.photo else None
-    premium = bool(getattr(message.from_user, "is_premium", False))
-    feed.remember_premium(premium)
     await safe_delete(message)
 
     if len(raw_text) < 40 and not vac.looks_like_vacancy(raw_text):
@@ -148,7 +151,7 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
         data = await ai.rewrite_vacancy(raw_text, default_region_tag=vac.VACANCY_DEFAULT_REGION_TAG)
         scene = data.image_prompt                  # короткое описание фона — до того, как finalize заменит его полным промптом
         data = vac.finalize(data, raw_text)
-        post = vac.format_vacancy_post(data, premium=premium, footer_url=settings.vacancy_footer_url)
+        post, _ = vac.fit_post(data, premium=True, footer_url=settings.vacancy_footer_url)
         contact_url = vac.build_contact_url(data.telegram)
     except Exception as exc:
         logger.exception("Vacancy rewrite failed")
@@ -163,8 +166,8 @@ async def process_vacancy(message: Message, state: FSMContext, profile: Profile,
     await state.update_data(vacancy_post=post, vacancy_contact_url=contact_url, vacancy_photo_id=photo_id, vacancy_prompt=data.image_prompt,
                             vacancy_data=feed.data_to_dict(data), vacancy_scene=scene, vacancy_design=None, vacancy_regen=0,
                             vacancy_file_id=None, vacancy_card_ids=[])
-    if photo_id or not feed.cfg("images"):
-        # его фото или картинки выключены в настройках — как раньше: пост на экране и кнопка «Опубликовать»
+    if photo_id:
+        # его собственное фото — как раньше: пост на экране и кнопка «Опубликовать» (фото уйдёт в одном посте с текстом)
         kb = vacancy_result_keyboard(lang, contact_url, can_publish=bool(settings.vacancy_channel))
         await show_panel(message, state, post, kb)
         return
@@ -252,6 +255,44 @@ async def cb_prompt(callback: CallbackQuery, state: FSMContext) -> None:
                                     f"🎨 <b>Промпт для ChatGPT</b> — нажми на блок, чтобы скопировать\n<pre>{h(prompt)}</pre>", keep_previous=True)
 
 
+@router.callback_query(F.data == "vacancy:fwd")
+async def cb_forward(callback: CallbackQuery, state: FSMContext) -> None:
+    """Бот не может поставить премиум-эмодзи в канал (Telegram их отбрасывает, проверено 07.10), а в личку — может. Присылаем готовый пост
+    (фото и текст одним сообщением, без кнопок) — владелец пересылает его в канал сам, и эмодзи остаются премиум."""
+    if not _owner_only(callback.from_user.id):
+        await answer_now(callback, "Раздел недоступен", alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("vacancy_data"):
+        await answer_now(callback, "Нет данных для публикации", alert=True)
+        return
+    image = data.get("vacancy_photo_id") or data.get("vacancy_file_id")
+    if image is None:
+        await answer_now(callback, "Без картинки не делаю — нажми «Нарисовать баннер»", alert=True)
+        return
+    from .vacancy_feed import _send_post
+
+    post, _ = vac.fit_post(feed.data_from_dict(data["vacancy_data"]), premium=True, footer_url=settings.vacancy_footer_url)
+    chat_id = int(data.get("vacancy_chat_id") or callback.from_user.id)
+    try:
+        await _send_post(callback.bot, chat_id, post, image, None)
+    except Exception as exc:
+        logger.exception("Vacancy clean copy failed")
+        await answer_now(callback, f"Ошибка: {str(exc)[:150]}", alert=True)
+        return
+    for mid in data.get("vacancy_card_ids") or []:
+        try:
+            await callback.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    await state.update_data(vacancy_card_ids=[])
+    await answer_now(callback, "Готовый пост — выше")
+    from .. import screen as screen_mod
+
+    await screen_mod.send_note(callback.bot, chat_id, "📤 Готовый пост выше: перешли его в канал (при пересылке выбери «Скрыть отправителя») — "
+                               "премиум-эмодзи сохранятся.", ttl=3600)
+
+
 @router.callback_query(F.data == "vacancy:publish")
 async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
     if not _owner_only(callback.from_user.id):
@@ -264,15 +305,16 @@ async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
         return
     from .vacancy_feed import _send_post
 
-    premium = bool(getattr(callback.from_user, "is_premium", False))
-    feed.remember_premium(premium)
     vdata = feed.data_from_dict(data["vacancy_data"])
-    post = vac.format_vacancy_post(vdata, premium=premium, footer_url=settings.vacancy_footer_url)
+    post, _ = vac.fit_post(vdata, premium=True, footer_url=settings.vacancy_footer_url)
     contact_url = vac.build_contact_url(vdata.telegram)
     markup = vacancy_channel_keyboard("uz", contact_url)
     channel = settings.vacancy_channel
     target = channel or callback.message.chat.id
-    image = data.get("vacancy_photo_id") or (data.get("vacancy_file_id") if feed.cfg("images") else None)
+    image = data.get("vacancy_photo_id") or data.get("vacancy_file_id")
+    if image is None:
+        await answer_now(callback, "Без картинки не публикую — фото должно быть в одном посте с текстом. Нажми «Нарисовать баннер»", alert=True)
+        return
     try:
         ids, _, post_id = await _send_post(callback.bot, target, post, image, markup)
     except Exception as exc:

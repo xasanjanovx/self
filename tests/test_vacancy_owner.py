@@ -1,4 +1,5 @@
-"""07.10: раздел вакансий — только у владельца; ручное оформление с баннером; защита платного поста; авто-режим; настройки (без сети)."""
+"""07.10: раздел вакансий — только у владельца; ручное оформление с баннером; защита платного поста; каждый пост спрашивается у него;
+фото в одном посте с текстом; настройки (без сети)."""
 import asyncio
 import dataclasses
 import time
@@ -209,14 +210,73 @@ def test_manual_vacancy_gets_a_banner_card_immediately(monkeypatch):
     assert data["vacancy_file_id"] == f"FID{bot.photos[0]['id']}" and data["vacancy_design"] == _env.designs[0]
 
 
-def test_manual_with_his_own_photo_or_images_off_keeps_the_old_flow(monkeypatch):
+def test_manual_with_his_own_photo_keeps_the_old_flow_and_publishes_one_post(monkeypatch):
     shown = _patch_screen(monkeypatch)
-    bot = FakeBot()
-    asyncio.run(vac_h.process_vacancy(_message(bot, RAW, photo=[SimpleNamespace(file_id="HIS")]), _state(), _profile(), RAW))
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW, photo=[SimpleNamespace(file_id="HIS")]), state, _profile(), RAW))
     assert bot.photos == [] and _env.designs == [] and "Barista kerak" in shown[-1][0]          # его фото — генерировать не надо
-    feed.set_cfg("images", False)
-    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), _state(), _profile(), RAW))
-    assert bot.photos == [] and _env.designs == []
+    asyncio.run(vac_h.cb_publish(FakeCb("vacancy:publish", bot), state))
+    posted = bot.photos[-1]
+    assert posted["chat"] == CHANNEL and posted["photo"] == "HIS" and "Barista kerak" in posted["caption"] and bot.messages == []
+
+
+def test_manual_forward_button_sends_a_clean_post_with_premium_emoji_to_him(monkeypatch):
+    _patch_screen(monkeypatch)
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    card_id = bot.photos[0]["id"]
+    assert "vacancy:fwd" in _buttons(bot.photos[0]["markup"]).values()
+    asyncio.run(vac_h.cb_forward(FakeCb("vacancy:fwd", bot), state))
+    clean = bot.photos[-1]
+    assert clean["chat"] == OWNER and clean["markup"] is None and 'emoji-id="5389061359403039918"' in clean["caption"]
+    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and (OWNER, card_id) in bot.deleted
+    assert any("перешли его в канал" in text for text, _ in _env.notes)
+    guest = FakeCb("vacancy:fwd", bot, uid=GUEST)
+    asyncio.run(vac_h.cb_forward(guest, _state(GUEST)))
+    assert guest.answers[-1][1] is True and len(bot.photos) == 2
+
+
+def test_manual_without_a_banner_cannot_be_published(monkeypatch):
+    """Фото обязательно в одном посте с текстом: баннер не нарисовался → «Опубликовать» нет, а старая кнопка отвечает отказом."""
+    _patch_screen(monkeypatch)
+
+    async def broken(data, scene=None, *, design=None):
+        raise image_gen.ImageError("503")
+
+    monkeypatch.setattr(image_gen, "vacancy_image", broken)
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    assert bot.photos == [] and "Картинка не получилась" in bot.messages[0]["text"]
+    labels = _buttons(bot.messages[0]["markup"])
+    assert "✅ Опубликовать в канал" not in labels and labels["🎨 Нарисовать баннер"] == "vacancy:img"
+    cb = FakeCb("vacancy:publish", bot)
+    asyncio.run(vac_h.cb_publish(cb, state))
+    assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0]
+    assert [m for m in bot.messages if m["chat"] == CHANNEL] == [] and [p for p in bot.photos if p["chat"] == CHANNEL] == []
+
+
+def test_manual_long_vacancy_is_one_photo_post_with_premium_emoji(monkeypatch):
+    from bot import vacancy as vac
+
+    _patch_screen(monkeypatch)
+
+    class LongAI(FakeAI):
+        async def rewrite_vacancy(self, text, *, default_region_tag="#TOSHKENT"):
+            data = await super().rewrite_vacancy(text, default_region_tag=default_region_tag)
+            data.requirements = [f"Talab {i}: " + "x" * 50 for i in range(25)]
+            data.duties = [f"Vazifa {i}: " + "y" * 50 for i in range(25)]
+            data.intro = "Katta kompaniya yangi xodimlarni ishga taklif qiladi. " * 3
+            return data
+
+    monkeypatch.setattr(vac_h, "ai", LongAI())
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    assert any("Текст сокращён" in text for text, _ in _env.notes)
+    asyncio.run(vac_h.cb_publish(FakeCb("vacancy:publish", bot, premium=False), state))
+    posted = bot.photos[-1]
+    assert posted["chat"] == CHANNEL and vac.visible_len(posted["caption"]) <= vac.CAPTION_LIMIT
+    assert "+998901234567" in posted["caption"] and 'emoji-id="5389061359403039918"' in posted["caption"]
+    assert [m for m in bot.messages if m["chat"] == CHANNEL] == []
 
 
 def test_redraw_switches_the_design_and_has_a_limit(monkeypatch):
@@ -288,7 +348,7 @@ def test_scheduled_publication_waits_again_if_a_new_paid_post_appears():
     assert asyncio.run(ui.publish_due(bot)) == 0 and cand["publish_at"] > time.time() + 2.9 * 3600
 
 
-# ------------------------------------------------------------------ авто-режим
+# ------------------------------------------------------------------ каждый пост спрашиваем у него
 class FeedClient:
     def __init__(self, text):
         self.text = text
@@ -304,50 +364,30 @@ POST = ("Kafega barista kerak. Maosh: 4 000 000 so'm. Ish vaqti: 9:00-18:00, 6/1
         "Aloqa: +998 90 123 45 67, @cafe_hr")
 
 
-def _auto_setup(monkeypatch):
+def _feed_setup(monkeypatch):
     monkeypatch.setattr(caller, "user_client", lambda: FeedClient(POST))
+    monkeypatch.setattr(feed, "FAVORITE_SOURCES", ())
     feed.add_pending("jobs_uz", {"title": "Jobs"})
     feed.set_source_status("jobs_uz", "approved")
     feed.load()["last_discovery"] = time.time()
-    feed.set_cfg("mode", "auto")
 
 
-def test_auto_mode_publishes_by_itself_and_offers_undo(monkeypatch):
-    _auto_setup(monkeypatch)
+def test_feed_only_asks_he_decides_every_post(monkeypatch):
+    """Его требование: каждый пост спрашивать у него обязательно — сама лента в канал не публикует никогда."""
+    _feed_setup(monkeypatch)
     bot = FakeBot()
     out = asyncio.run(ui.tick(bot))
     assert out["card"] is True
-    posted = [p for p in bot.photos if p["chat"] == CHANNEL]
-    assert len(posted) == 1 and "Barista kerak" in posted[0]["caption"] and feed.is_own(posted[0]["id"])
-    assert feed.cards_today() == 1 and feed.load()["last_feed_post"] > 0
-    text, markup = _env.notes[-1]
-    assert "Опубликовал вакансию" in text and any("vf:undo:" in v for v in _buttons(markup).values())
-    cid = next(iter(feed.load()["undo"]))
-    asyncio.run(ui.cb_undo(FakeCb(f"vf:undo:{cid}", bot, message=SimpleNamespace(chat=SimpleNamespace(id=OWNER), message_id=3, edit_text=_async_noop))))
-    assert (CHANNEL, posted[0]["id"]) in bot.deleted
+    assert [p["chat"] for p in bot.photos] == [OWNER] and "vf:pub:" in "".join(_buttons(bot.photos[0]["markup"]).values())
+    assert feed.cards_today() == 1 and feed.load()["last_feed_post"] == 0                           # ничего не опубликовано
+    feed.load()["last_discovery"] = time.time()
+    for _ in range(3):                                                                             # сколько бы кругов ни прошло
+        asyncio.run(ui.tick(bot))
+    assert [p for p in bot.photos if p["chat"] == CHANNEL] == []
 
 
-async def _async_noop(*a, **k):
-    return None
-
-
-def test_auto_mode_respects_the_paid_post_and_the_gap(monkeypatch):
-    _auto_setup(monkeypatch)
-    bot = FakeBot()
-    feed.note_manual_post(time.time() - 600, 1)                                                    # платный пост 10 минут назад
-    out = asyncio.run(ui.tick(bot))
-    assert out["card"] is False and [p for p in bot.photos if p["chat"] == CHANNEL] == []
-    feed.load()["hold_until"] = 0.0
-    asyncio.run(ui.tick(bot))
-    assert len([p for p in bot.photos if p["chat"] == CHANNEL]) == 1
-    cand2 = _cand("c2", headline="Oshpaz kerak")
-    cand2["key"] = "other"
-    asyncio.run(ui.tick(bot))
-    assert len([p for p in bot.photos if p["chat"] == CHANNEL]) == 1                               # интервал между постами не прошёл
-
-
-def test_auto_mode_asks_instead_of_publishing_an_unverified_banner(monkeypatch):
-    _auto_setup(monkeypatch)
+def test_unverified_banner_goes_to_him_as_a_card_with_a_warning(monkeypatch):
+    _feed_setup(monkeypatch)
 
     async def doubtful(data, scene=None, *, design=None):
         return image_gen.Banner(b"JPEGDATA", "⚠️ Проверь картинку: телефон не совпал", design["id"])
@@ -355,17 +395,18 @@ def test_auto_mode_asks_instead_of_publishing_an_unverified_banner(monkeypatch):
     monkeypatch.setattr(image_gen, "vacancy_image", doubtful)
     bot = FakeBot()
     out = asyncio.run(ui.tick(bot))
-    assert out["card"] is False
-    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and [p for p in bot.photos if p["chat"] == OWNER]    # ушла карточка ему
-    assert "vf:pub:" in "".join(_buttons([p for p in bot.photos if p["chat"] == OWNER][0]["markup"]).values())
+    assert out["card"] is True and [p["chat"] for p in bot.photos] == [OWNER]
+    assert any("телефон не совпал" in text for text, _ in _env.notes)
 
 
-def test_confirm_mode_still_sends_cards(monkeypatch):
-    _auto_setup(monkeypatch)
-    feed.set_cfg("mode", "confirm")
+def test_paid_post_protection_holds_his_publish_not_the_cards(monkeypatch):
+    _feed_setup(monkeypatch)
     bot = FakeBot()
-    assert asyncio.run(ui.tick(bot))["card"] is True
-    assert [p["chat"] for p in bot.photos] == [OWNER]
+    feed.note_manual_post(time.time() - 600, 1)                                                    # платный пост 10 минут назад
+    assert asyncio.run(ui.tick(bot))["card"] is True                                               # карточку он увидеть может
+    cb = FakeCb("vf:pub:" + feed.candidates("carded")[0]["id"], bot)
+    asyncio.run(ui.cb_publish(cb))
+    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and "в очередь" in cb.answers[-1][0]    # а в канал — только после защиты
 
 
 # ------------------------------------------------------------------ настройки
@@ -382,10 +423,10 @@ class ScreenCapture:
 def test_settings_screen_cycles_values_and_protection_never_drops_below_three(monkeypatch):
     cap = ScreenCapture(monkeypatch, sett)
     bot = FakeBot()
-    for key in ("mode", "cap", "wf", "wt", "gap", "prot", "imgs", "sal"):
+    for key in ("cap", "wf", "wt", "gap", "prot", "sal"):
         asyncio.run(sett.cb_setting(FakeCb(f"vf:s:{key}", bot)))
-    assert feed.cfg("mode") == "auto" and feed.load()["cap"] == 10 and feed.window() == (5, 15)          # в тесте окно 0–24: следующие по кругу значения
-    assert feed.cfg("images") is False and feed.cfg("require_salary") is False and feed.cfg("gap_min") == 120
+    assert feed.load()["cap"] == 10 and feed.window() == (5, 15)                                         # в тесте окно 0–24: следующие по кругу значения
+    assert feed.cfg("require_salary") is False and feed.cfg("gap_min") == 120
     assert feed.protect_seconds() == 4 * 3600
     for _ in range(6):
         asyncio.run(sett.cb_setting(FakeCb("vf:s:prot", bot)))
@@ -432,16 +473,15 @@ def test_ads_screen_toggles_and_shows_the_log(monkeypatch):
     text, markup = cap.shown[-1]
     assert "Удалено рекламы: 1" in text and "Кредиты и займы" in text and "Tez kredit" in text
     for key in ("on", "mode", "c:bank", "c:credit"):
-        asyncio.run(sett.cb_ads_setting(FakeCb(f"vf:a:{key}", bot)))
+        asyncio.run(sett.cb_ads_setting(FakeCb(f"vf:a:{key}", bot)))   # (это режим ФИЛЬТРА РЕКЛАМЫ: удалять/сообщать — он остаётся)
     assert feed.cfg("ads_on") is False and feed.cfg("ads_mode") == "notify"
     assert feed.cfg("ads_cats")["bank"] is True and feed.cfg("ads_cats")["credit"] is False
 
 
-def test_panel_shows_mode_protection_and_ads():
-    feed.set_cfg("mode", "auto")
+def test_panel_shows_ask_mode_protection_and_ads():
     feed.note_manual_post(time.time(), 1)
     text = ui.panel_text()
-    assert "сам размещает" in text and "Платный пост наверху" in text and "Реклама: фильтр включён" in text
+    assert "решаешь ты" in text and "Платный пост наверху" in text and "Реклама: фильтр включён" in text
     assert {"vf:cfg", "vf:ads"} <= set(_buttons(ui.panel_keyboard()).values())
 
 

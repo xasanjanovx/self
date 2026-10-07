@@ -1,6 +1,7 @@
 """Вакансии: детект, нормализация данных от AI и сборка поста для канала."""
 from __future__ import annotations
 
+import copy
 import html
 import re
 from urllib.parse import quote
@@ -811,6 +812,66 @@ def format_vacancy_post(data: VacancyData, *, premium: bool = True, footer_url: 
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines)
+
+
+# 07.10, его требование: фото ВСЕГДА в одном сообщении с текстом вакансии. У бота подпись к фото — не больше 1024 знаков
+# (длиннее — только отдельным сообщением), поэтому длинную вакансию сокращаем до лимита: сначала второстепенное, а зарплата,
+# график, условия, контакты и юридический блок остаются.
+CAPTION_LIMIT = 1024
+
+
+def visible_len(post_html: str) -> int:
+    """Длина поста для лимита Telegram: без тегов, эмодзи считаем по UTF-16 (как считает сам Telegram)."""
+    plain = html.unescape(re.sub(r"<[^>]+>", "", post_html or ""))
+    return len(plain.encode("utf-16-le")) // 2
+
+
+def _cap_lists(count: int):
+    def step(data: VacancyData) -> None:
+        data.requirements = data.requirements[:count]
+        data.duties = data.duties[:count]
+        data.benefits = data.benefits[:count]
+    return step
+
+
+def _drop_extra(data: VacancyData) -> None:
+    data.extra_sections = []
+
+
+def _drop_intro(data: VacancyData) -> None:
+    data.intro = None
+
+
+def _drop_duties(data: VacancyData) -> None:
+    data.duties = []
+
+
+def _shorten_texts(data: VacancyData) -> None:
+    data.salary = _short(data.salary, 110)
+    data.schedule = _short(data.schedule, 90)
+    data.address = _short(data.address, 80)
+    data.requirements = [_short(item, 80) or item for item in data.requirements]
+    data.benefits = [_short(item, 80) or item for item in data.benefits]
+
+
+_TRIM_STEPS = (_drop_extra, _cap_lists(5), _cap_lists(4), _drop_intro, _cap_lists(3), _drop_duties, _shorten_texts,
+               _cap_lists(2), _cap_lists(1))
+
+
+def fit_post(data: VacancyData, *, premium: bool = True, footer_url: str = "https://t.me/ishdasiz",
+             limit: int = CAPTION_LIMIT) -> tuple[str, bool]:
+    """Пост для канала, который влезает в подпись к фото. → (html, сокращён ли). Если и после всех сокращений длиннее лимита
+    (почти невозможно), отдаём как есть — отправка тогда пойдёт двумя сообщениями."""
+    post = format_vacancy_post(data, premium=premium, footer_url=footer_url)
+    if visible_len(post) <= limit:
+        return post, False
+    work = copy.deepcopy(data)
+    for step in _TRIM_STEPS:
+        step(work)
+        post = format_vacancy_post(work, premium=premium, footer_url=footer_url)
+        if visible_len(post) <= limit:
+            break
+    return post, True
 
 
 # ------------------------------------------------------------------ detect
