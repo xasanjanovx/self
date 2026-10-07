@@ -62,17 +62,17 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setattr(feed, "SOURCE_PAUSE_S", 0)
     monkeypatch.setattr(feed, "SEND_FROM", 0)
     monkeypatch.setattr(feed, "SEND_TO", 24)
-    ephemerals: list = []
+    notes: list = []
 
-    async def fake_ephemeral(bot, chat_id, text, reply_markup=None, **kw):
-        ephemerals.append(text)
+    async def fake_note(bot, chat_id, text, reply_markup=None, **kw):
+        notes.append(text)
         return 1
 
-    monkeypatch.setattr(screen, "send_ephemeral", fake_ephemeral)
-    monkeypatch.setattr(ui, "_ephemerals", ephemerals, raising=False)
+    monkeypatch.setattr(screen, "send_note", fake_note)
+    monkeypatch.setattr(ui, "_notes", notes, raising=False)
 
-    async def fake_image(headline, scene=None, company=None):
-        return b"JPEGDATA"
+    async def fake_image(data, scene=None):
+        return image_gen.Banner(b"JPEGDATA")
 
     monkeypatch.setattr(image_gen, "vacancy_image", fake_image)
     yield
@@ -299,3 +299,19 @@ def test_vacancy_panel_shows_feed_button_only_to_the_owner():
 
     assert "vf:panel" in _buttons(vacancy_panel_keyboard("ru", feed=True)).values()
     assert "vf:panel" not in _buttons(vacancy_panel_keyboard("ru")).values()
+
+
+def test_unverified_banner_is_posted_with_a_warning_note(monkeypatch):
+    async def doubtful(data, scene=None):
+        return image_gen.Banner(b"JPEGDATA", "⚠️ Проверь картинку: телефон на картинке не совпал с вакансией. Если неверно — «Другая картинка».")
+
+    monkeypatch.setattr(image_gen, "vacancy_image", doubtful)
+    bot, cand = FakeBot(), _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    assert len(bot.photos) == 1 and any("телефон на картинке не совпал" in n for n in ui._notes)
+
+
+def test_checked_banner_has_no_warning_note():
+    bot, cand = FakeBot(), _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    assert ui._notes == []

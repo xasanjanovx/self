@@ -242,34 +242,41 @@ def _read_image(cid: str) -> bytes | None:
         return None
 
 
-async def _make_image(cand: dict[str, Any]) -> bytes | None:
+async def _make_image(cand: dict[str, Any]) -> tuple[bytes | None, str | None]:
+    """→ (картинка или None, предупреждение, если проверка баннера не прошла и после перерисовок)."""
     try:
-        image = await image_gen.vacancy_image(str(cand["data"].get("headline") or ""), cand.get("scene"), cand["data"].get("company"))
+        banner = await image_gen.vacancy_image(feed.data_from_dict(cand["data"]), cand.get("scene"))
     except image_gen.ImageError as exc:
         logger.warning("vacancy_feed: картинка %s не вышла: %s", cand["id"], exc)
-        return None
+        return None, None
     except Exception:
         logger.exception("vacancy_feed: картинка %s сломалась", cand["id"])
-        return None
+        return None, None
     try:
-        feed.image_path(cand["id"]).write_bytes(image)
+        feed.image_path(cand["id"]).write_bytes(banner.image)
     except OSError:
         logger.warning("vacancy_feed: не сохранил картинку %s", cand["id"], exc_info=True)
-    return image
+    return banner.image, banner.warning
 
 
 async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate: bool = False) -> None:
     """Карточка вакансии владельцу. Картинка рисуется здесь (только для тех, кого показываем — деньги не тратим зря)."""
     image = None if regenerate else _read_image(cand["id"])
+    warning = cand.get("image_warning") if image else None
     if image is None:
-        image = await _make_image(cand)
+        image, warning = await _make_image(cand)
+        cand["image_warning"] = warning
     post, contact_url = _post_html(cand, bool(feed.load().get("premium")))
-    shown = post if image else post + "\n\n⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."
+    shown = post if image else post + '\n\n' + "⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."
     head = f"📥 {h(str(cand['data'].get('headline') or 'Вакансия'))} · из @{cand['source']}"
     ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url), head=head)
     cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image)})
     feed.note_card_sent()
     feed.save()
+    if warning:
+        from .. import screen as screen_mod
+
+        await screen_mod.send_note(bot, chat_id, warning, ttl=3600)
 
 
 async def _delete_card(bot: Bot, cand: dict[str, Any]) -> None:
@@ -307,8 +314,7 @@ async def cb_publish(callback: CallbackQuery) -> None:
     link = f"https://t.me/{channel.lstrip('@')}/{post_id}" if str(channel).startswith("@") else ""
     from .. import screen as screen_mod
 
-    await screen_mod.send_ephemeral(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""),
-                                    keep_previous=True, ttl=20)
+    await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
 
 
 @router.callback_query(F.data.startswith("vf:skip:"))

@@ -228,8 +228,11 @@ def build_image_prompt(data: VacancyData, *, scene: str | None = None, max_len: 
     return text
 
 
-def build_full_prompt(data: VacancyData, *, scene: str | None = None) -> str:
+def build_full_prompt(data: VacancyData, *, scene: str | None = None, for_logo: bool = False) -> str:
     """Полный промпт для картинки: ВСЯ вакансия (контекст) + внизу задача на баннер.
+
+    for_logo (07.10, автоподбор): баннер рисует Nano Banana, логотип канала потом ставится в левый нижний угол — угол оставляем
+    пустым, а «@ishdasiz» на баннер не пишем (он уже в логотипе).
 
     Отдаётся отдельным сообщением-блоком (копируется целиком нажатием), поэтому без
     лимита кнопки в 256 символов. На сам баннер модель выносит только главное.
@@ -259,10 +262,10 @@ def build_full_prompt(data: VacancyData, *, scene: str | None = None) -> str:
 
     must = ["крупно — должность", "зарплата" if data.salary else None, "место" if place else None,
             "график" if data.schedule else None, "1–2 самых сильных преимущества" if data.benefits else None,
-            "телефон" if data.phone else None, "@ishdasiz"]
+            "телефон" if data.phone else None, None if for_logo else "@ishdasiz"]
     task = [
         "",
-        "ЗАДАЧА: сделай ГОРИЗОНТАЛЬНЫЙ баннер 16:9 для этой вакансии в Telegram-канал @ishdasiz.",
+        "ЗАДАЧА: сделай ГОРИЗОНТАЛЬНЫЙ баннер 16:9 для этой вакансии в Telegram-канал " + ("вакансий." if for_logo else "@ishdasiz."),
         "На баннер вынеси ТОЛЬКО самое важное, текстом на узбекской латинице — ровно как в данных, без ошибок: "
         + ", ".join(m for m in must if m) + ".",
         "Остальные данные — только для понимания контекста, на баннер их не выписывай.",
@@ -271,6 +274,11 @@ def build_full_prompt(data: VacancyData, *, scene: str | None = None) -> str:
         f"Фон: {scene.strip()}." if scene and scene.strip() else "Фон: реалистичная сцена по теме профессии, люди в работе.",
         "Без водяных знаков, логотипов брендов и лишнего текста.",
     ]
+    if for_logo:
+        task.append("КОМПОЗИЦИЯ: весь текст размести в верхних 75% высоты кадра, телефон и Telegram — тоже выше этой зоны. "
+                    "Нижние 25% кадра — только фон, без текста, плашек и значков; особенно Левый нижний угол (треть ширины) "
+                    "должен быть пустым — туда добавят логотип. Фон в нижней зоне — естественное продолжение сцены до самого края "
+                    "кадра, а не белая или однотонная полоса.")
     return "\n".join(lines + task)
 
 

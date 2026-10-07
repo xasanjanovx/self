@@ -4,13 +4,16 @@
 Расход — с кредита Google Cloud ($300). AI Studio для картинок НЕ используем никогда («AI Studio вообще не надо»): Vertex не ответил —
 картинки не будет, карточка уйдёт к нему без неё, с кнопкой «Другая картинка». Работает независимо от переключателя «Gemini через…»
 в настройках и не трогает его состояние (пауза ключа и «модели нет» относятся к текстовым запросам).
-Картинка без текста: надписи на узбекском модели искажают, а название канала и слоган уже в логотипе; данные вакансии — в подписи поста.
+На баннере — текст вакансии на узбекской латинице (должность, зарплата, место, график, плюс, телефон) по его промпту
+vacancy.build_full_prompt; левый нижний угол оставлен под логотип.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
+import re
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,8 @@ from typing import Any
 import httpx
 
 from . import billing, gcloud
+from . import vacancy as vac
+from .ai import VacancyData
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +46,10 @@ def _http() -> Any:
     return _client
 
 
-def build_prompt(headline: str, scene: str | None = None, company: str | None = None) -> str:
-    """Промпт для модели (по-английски — так она рисует точнее). scene — короткое описание фона по-русски от разбора вакансии."""
-    scene = (scene or "").strip().rstrip(".")
-    job = (headline or "").strip()
-    lines = [
-        "Create a premium, eye-catching illustration for a job vacancy post in a Telegram channel in Uzbekistan.",
-        f"Job: {job}." if job else "",
-        f"Scene: {scene}." if scene else "Scene: a realistic workplace for this profession, people at work.",
-        "Style: modern, vivid, warm natural light, rich contrasting colours, clean polished flat-3D illustration with depth; "
-        "friendly confident people of Central Asian appearance, realistic hands and faces, professional environment in Uzbekistan.",
-        f"Wide {ASPECT} composition. Keep the bottom-left corner calm and uncluttered (a logo will be placed there).",
-        "Absolutely no text, no letters, no numbers, no signs with writing, no logos, no watermarks.",
-    ]
-    return "\n".join(line for line in lines if line)
+def build_prompt(data: VacancyData, scene: str | None = None) -> str:
+    """Его промпт баннера 16:9 (vacancy.build_full_prompt): вся вакансия + задача — на картинке крупно должность, зарплата, место, график,
+    плюс и телефон на узбекской латинице. for_logo: левый нижний угол пустой под логотип, «@ishdasiz» не пишем (он в логотипе)."""
+    return vac.build_full_prompt(data, scene=scene, for_logo=True)
 
 
 def _extract(data: dict[str, Any]) -> bytes | None:
@@ -90,7 +85,7 @@ async def _try(client: Any, url: str, headers: dict[str, str], payload: dict[str
             if status not in _RETRY:
                 break
         if attempt == 1:
-            await asyncio.sleep(3)
+            await asyncio.sleep(10 if status == 429 else 3)
     return status, None, text
 
 
@@ -132,16 +127,86 @@ def add_logo(image: bytes, *, logo_path: Path | None = None) -> bytes:
     return out.getvalue()
 
 
-async def vacancy_image(headline: str, scene: str | None = None, company: str | None = None) -> bytes:
-    """Готовая картинка для поста: модель + логотип. Бросает ImageError."""
-    raw, model = await generate(build_prompt(headline, scene, company))
+ATTEMPTS = 3                          # столько раз перерисовываем, если проверка баннера не прошла
+_INSPECT_PROMPT = (
+    "Это рекламный баннер вакансии. Прочитай ВЕСЬ текст на нём дословно, ничего не исправляя и не додумывая. "
+    'Ответь ТОЛЬКО JSON: {"lines":["строка 1","строка 2"],"text_in_bottom_left":false}. '
+    "text_in_bottom_left — true, если в левом нижнем углу (левая треть ширины, нижние 20% высоты) есть любой текст, цифры, значок или плашка."
+)
+
+
+@dataclass
+class Banner:
+    image: bytes
+    warning: str | None = None        # проверка не прошла и после перерисовок — владельцу скажем, что сверить
+
+
+def _salary_numbers(salary: str | None) -> list[str]:
+    """Числа из зарплаты вакансии цифрами без пробелов: «4 000 000 so'mdan» → ['4000000']. Короткие (до 3 цифр) не сверяем."""
+    return [d for chunk in re.findall(r"\d[\d\s.,]*\d", salary or "") if len(d := re.sub(r"\D", "", chunk)) >= 4]
+
+
+async def inspect(raw: bytes, data: VacancyData) -> tuple[bool | None, str]:
+    """Нейросеть (Vertex) читает текст с готового баннера: телефон и сумма зарплаты должны совпасть до цифры, а угол под логотип —
+    быть пустым. Модель путает цифры («4 000 010») и садит текст в угол, поэтому неточный баннер без перерисовки не отпускаем.
+    → (True, "") всё сошлось | (False, причина) | (None, "") проверить не вышло (лимит Vertex): баннер уйдёт с предупреждением."""
+    from PIL import Image
+
+    from .ai import extract_json, vertex_only
+    from .context import ai
+
+    answer = None
+    buf = BytesIO()
+    Image.open(BytesIO(raw)).convert("RGB").save(buf, "JPEG", quality=85)
+    parts = [{"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(buf.getvalue()).decode()}}, {"text": _INSPECT_PROMPT}]
+    for attempt in (1, 2, 3):
+        try:
+            with vertex_only():
+                answer = extract_json(await ai.generate(parts, temperature=0.0, json_mode=True, thinking_budget=0, max_tokens=800))
+            if isinstance(answer, dict):
+                break
+            answer = None
+        except Exception as exc:
+            logger.warning("image_gen: проверка баннера, попытка %d: %s", attempt, exc)
+        if attempt < 3:
+            await asyncio.sleep(8)    # чаще всего 429: общий лимит запросов Vertex в минуту
+    if answer is None:
+        return None, ""
+    problems = []
+    if answer.get("text_in_bottom_left"):
+        problems.append("в левом нижнем углу есть текст — там ляжет логотип")
+    seen = re.sub(r"\D", "", " ".join(str(x) for x in answer.get("lines") or []))
+    first_phone = re.sub(r"\D", "", (data.phone or "").split("|")[0])[-9:]
+    if len(first_phone) == 9 and first_phone not in seen:
+        problems.append("телефон на картинке не совпал с вакансией")
+    if any(number not in seen for number in _salary_numbers(data.salary)):
+        problems.append("сумма зарплаты на картинке не совпала с вакансией")
+    return not problems, "; ".join(problems)
+
+
+async def vacancy_image(data: VacancyData, scene: str | None = None) -> Banner:
+    """Готовый баннер для поста: модель (с текстом вакансии) → проверка → логотип. До ATTEMPTS попыток; не вышло чисто —
+    отдаём последнюю с предупреждением. Бросает ImageError, если Vertex картинку не дал вовсе."""
+    prompt = build_prompt(data, scene)
+    raw, ok, why = b"", False, ""
+    for attempt in range(1, ATTEMPTS + 1):
+        raw, model = await generate(prompt)
+        ok, why = await inspect(raw, data)
+        logger.info("image_gen: %s, попытка %d: %s", model, attempt, {True: "принят", None: "не проверен"}.get(ok, why))
+        if ok is not False:
+            break
     try:
         final = await asyncio.to_thread(add_logo, raw)
     except Exception as exc:  # логотип не лёг — лучше без него, чем без картинки
         logger.warning("image_gen: логотип не добавился (%s)", exc)
         final = raw
-    logger.info("image_gen: %s, %d КБ", model, len(final) // 1024)
-    return final
+    if ok is None:
+        warning = "⚠️ Текст на картинке не удалось проверить автоматически: сверь телефон и сумму. Если неверно — «Другая картинка»."
+    elif ok is False:
+        warning = f"⚠️ Проверь картинку: {why}. Если неверно — «Другая картинка»."
+    else:
+        warning = None
+    return Banner(final, warning)
 
 
-__all__ = ["vacancy_image", "generate", "add_logo", "build_prompt", "ImageError", "MODELS"]
+__all__ = ["vacancy_image", "inspect", "generate", "add_logo", "build_prompt", "Banner", "ImageError", "MODELS"]

@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from bot import billing, gcloud, image_gen
+from bot.ai import VacancyData
 
 
 def _png(color=(30, 60, 160), size=(1280, 720)) -> bytes:
@@ -41,10 +42,27 @@ def setup(monkeypatch, tmp_path):
     return install, recorded
 
 
-def test_prompt_has_job_scene_and_no_text_rules():
-    prompt = image_gen.build_prompt("Barista kerak", "уютное кафе, бариста за стойкой")
-    assert "Barista kerak" in prompt and "уютное кафе" in prompt
-    assert "bottom-left" in prompt and "no text" in prompt.lower() and "16:9" in prompt
+def _data():
+    return VacancyData(headline="Barista kerak", intro=None, company="Bahor Coffee", region_tag="#TOSHKENT", address="Chilonzor",
+                       salary="4 000 000 so'm", schedule="9:00-18:00", requirements=["18 yosh"], duties=[], benefits=["Bepul tushlik"],
+                       phone="+998901234567", telegram="@hr_ish")
+
+
+def test_prompt_is_his_banner_prompt_with_text_and_a_free_corner_for_the_logo():
+    prompt = image_gen.build_prompt(_data(), "уютная кофейня, бариста готовит кофе")
+    # вся вакансия + задача: баннер 16:9 с текстом на узбекской латинице
+    assert "Lavozim: Barista kerak" in prompt and "Maosh: 4 000 000 so'm" in prompt and "+998901234567" in prompt
+    assert "ГОРИЗОНТАЛЬНЫЙ баннер 16:9" in prompt and "узбекской латинице" in prompt and "уютная кофейня" in prompt
+    assert "крупно — должность" in prompt and "зарплата" in prompt and "телефон" in prompt
+    # логотип ставим сами: угол свободен, канал на баннере не пишем
+    assert "Левый нижний угол" in prompt and "@ishdasiz" not in prompt
+
+
+def test_manual_prompt_for_chatgpt_is_unchanged():
+    from bot.vacancy import build_full_prompt
+
+    manual = build_full_prompt(_data(), scene="кофейня")
+    assert "@ishdasiz" in manual and "Левый нижний угол" not in manual
 
 
 def test_only_vertex_even_when_ai_studio_is_selected_in_settings(setup):
@@ -162,16 +180,139 @@ def test_logo_lands_bottom_left_and_result_is_jpeg():
     assert abs(b - blue[2]) < 12
 
 
-def test_vacancy_image_is_model_picture_with_logo(setup):
+def test_vacancy_image_is_model_picture_with_logo(setup, monkeypatch):
     install, _ = setup
     install(lambda request: httpx.Response(200, json=_ok(_png())))
-    out = asyncio.run(image_gen.vacancy_image("Barista kerak", "кафе"))
-    assert Image.open(BytesIO(out)).format == "JPEG"
+
+    async def good(raw, data):
+        return True, ""
+
+    monkeypatch.setattr(image_gen, "inspect", good)
+    banner = asyncio.run(image_gen.vacancy_image(_data(), "кафе"))
+    assert Image.open(BytesIO(banner.image)).format == "JPEG" and banner.warning is None
 
 
 def test_missing_logo_still_gives_the_picture(setup, monkeypatch):
     install, _ = setup
     install(lambda request: httpx.Response(200, json=_ok(_png())))
+
+    async def good(raw, data):
+        return True, ""
+
+    monkeypatch.setattr(image_gen, "inspect", good)
     monkeypatch.setattr(image_gen, "LOGO", image_gen.LOGO.with_name("nope.png"))
-    out = asyncio.run(image_gen.vacancy_image("Barista kerak"))
-    assert out[:4] == b"\x89PNG"                                           # без логотипа, но с картинкой
+    banner = asyncio.run(image_gen.vacancy_image(_data()))
+    assert banner.image[:4] == b"\x89PNG"                                  # без логотипа, но с картинкой
+
+
+def test_banner_is_redrawn_until_the_check_passes(setup, monkeypatch):
+    install, _ = setup
+    drawn = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        drawn.append(1)
+        return httpx.Response(200, json=_ok(_png()))
+
+    install(handler)
+    verdicts = iter([(False, "в левом нижнем углу есть текст — там ляжет логотип"), (False, "телефон на картинке не совпал с вакансией"), (True, "")])
+
+    async def check(raw, data):
+        return next(verdicts)
+
+    monkeypatch.setattr(image_gen, "inspect", check)
+    banner = asyncio.run(image_gen.vacancy_image(_data()))
+    assert len(drawn) == 3 and banner.warning is None
+
+
+def test_after_three_failed_checks_the_last_banner_goes_out_with_a_warning(setup, monkeypatch):
+    install, _ = setup
+    drawn = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        drawn.append(1)
+        return httpx.Response(200, json=_ok(_png()))
+
+    install(handler)
+
+    async def bad(raw, data):
+        return False, "телефон на картинке не совпал с вакансией"
+
+    monkeypatch.setattr(image_gen, "inspect", bad)
+    banner = asyncio.run(image_gen.vacancy_image(_data()))
+    assert len(drawn) == image_gen.ATTEMPTS and banner.image and "телефон на картинке не совпал" in banner.warning
+
+
+# ------------------------------------------------------------------ проверка текста на баннере
+class _FakeAI:
+    def __init__(self, answer=None, boom=False):
+        self.answer, self.boom, self.seen_vertex_only = answer, boom, []
+
+    async def generate(self, parts, **kw):
+        from bot.ai import _vertex_only
+
+        self.seen_vertex_only.append(_vertex_only.get())
+        if self.boom:
+            raise RuntimeError("503")
+        assert parts[0]["inline_data"]["mime_type"] == "image/jpeg"
+        import json
+
+        return json.dumps(self.answer)
+
+
+def _inspect(monkeypatch, answer=None, boom=False):
+    from bot.context import ai
+
+    fake = _FakeAI(answer, boom)
+    monkeypatch.setattr(ai, "generate", fake.generate)
+    return asyncio.run(image_gen.inspect(_png(), _data())), fake
+
+
+def test_inspect_accepts_exact_phone_and_empty_corner(monkeypatch):
+    (ok, why), fake = _inspect(monkeypatch, {"lines": ["BARISTA KERAK", "MAOSH: 4 000 000 SO'M", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert ok and why == "" and fake.seen_vertex_only == [True]          # проверка тоже только через Vertex
+
+
+def test_inspect_rejects_a_wrong_digit_in_the_phone(monkeypatch):
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["4 000 000", "Tel: +998 90 123 45 68"], "text_in_bottom_left": False})
+    assert not ok and "телефон" in why
+
+
+def test_inspect_rejects_text_in_the_logo_corner(monkeypatch):
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["4 000 000", "Tel: +998901234567"], "text_in_bottom_left": True})
+    assert not ok and "левом нижнем углу" in why
+
+
+def test_inspect_rejects_a_wrong_digit_in_the_salary(monkeypatch):
+    (ok, why), _ = _inspect(monkeypatch, {"lines": ["MAOSH: 4 000 010 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert not ok and "зарплаты" in why
+    (ok, _), _ = _inspect(monkeypatch, {"lines": ["MAOSH: 4 000 000 so'm", "Tel: +998 90 123 45 67"], "text_in_bottom_left": False})
+    assert ok
+
+
+def test_salary_numbers_ignore_short_numbers_and_split_ranges():
+    assert image_gen._salary_numbers("4 000 000 so'mdan + KPI") == ["4000000"]
+    assert image_gen._salary_numbers("3 000 000 - 5 000 000 so'm") == ["3000000", "5000000"]
+    assert image_gen._salary_numbers("400$ - 800$, haftada 6 kun") == []
+    assert image_gen._salary_numbers(None) == []
+
+
+def test_inspect_retries_when_vertex_is_busy_then_gives_up_as_unchecked(monkeypatch):
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(image_gen.asyncio, "sleep", no_sleep)
+    (ok, why), fake = _inspect(monkeypatch, boom=True)
+    assert ok is None and why == "" and len(fake.seen_vertex_only) == 3
+
+
+def test_unchecked_banner_goes_out_with_a_warning_after_a_single_drawing(setup, monkeypatch):
+    install, _ = setup
+    drawn = []
+    install(lambda request: drawn.append(1) or httpx.Response(200, json=_ok(_png())))
+
+    async def unknown(raw, data):
+        return None, ""
+
+    monkeypatch.setattr(image_gen, "inspect", unknown)
+    banner = asyncio.run(image_gen.vacancy_image(_data()))
+    assert len(drawn) == 1 and "не удалось проверить" in banner.warning
