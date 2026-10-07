@@ -394,17 +394,30 @@ async def alert(bot, profile, data: dict[str, Any]) -> dict[str, Any]:  # noqa: 
             await bot.delete_message(uid, int(old))
     except Exception:
         pass
-    try:
-        sent = await bot.send_message(uid, "\n".join(lines), reply_markup=markup, disable_notification=False)
-        st["alert_msg"] = sent.message_id
-    except Exception:
-        logger.warning("screentime: подробности не отправились", exc_info=True)
+    from . import screen as screen_mod
+
+    # 07.10: детали — заметка: исчезает при нажатии кнопки и сама через 30 минут (он их удалял руками)
+    mid = await screen_mod.send_note(bot, uid, "\n".join(lines), markup, ttl=30 * 60, disable_notification=False)
+    if mid is not None:
+        st["alert_msg"] = mid
+    else:
+        logger.warning("screentime: подробности не отправились")
     save(uid, st)
     logger.info("screentime %s: %s %s ур.%s (%s, сегодня %.0f мин, подряд %.0f мин)", uid, kind, cat, data.get("level"), app, today_min, streak_min)
     return {"speak": True}
 
 
 # ------------------------------------------------------------------ вечерняя сводка
+def today_total(profile) -> float | None:  # noqa: ANN001
+    """Сколько минут сегодня в телефоне (без рабочих приложений и исключённых) — или None, если данных с телефона нет."""
+    st = load(profile.telegram_id)
+    today = (st.get("days") or {}).get(profile.today.isoformat())
+    if not today or not today.get("apps"):
+        return None
+    excluded = set(st.get("excluded") or [])
+    return sum(float(a.get("min") or 0) for a in today["apps"] if category(str(a.get("pkg"))) != "work" and a.get("pkg") not in excluded)
+
+
 def brief_lines(profile) -> list[str]:  # noqa: ANN001
     """Строка в вечернюю сводку: сколько в телефоне сегодня, топ приложений, сколько раз брал, сравнение со вчера."""
     st = load(profile.telegram_id)
@@ -430,5 +443,5 @@ def brief_lines(profile) -> list[str]:  # noqa: ANN001
     return [line]
 
 
-__all__ = ["category", "rules", "record_usage", "propose", "alert", "brief_lines", "set_busy", "adjust", "set_enabled",
+__all__ = ["category", "rules", "record_usage", "propose", "alert", "brief_lines", "today_total", "fmt_min", "set_busy", "adjust", "set_enabled",
            "settings_text", "settings_keyboard", "proposal_text", "important_open", "load"]

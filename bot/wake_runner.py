@@ -20,6 +20,7 @@ from . import caller
 from . import prayer
 from . import services
 from . import voice
+from . import screen as screen_mod_
 from . import wake as wake_mod
 from . import wake_dialog
 from .context import ai
@@ -286,6 +287,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
         await _drop_wake_message(bot, uid)  # прошлая попытка — не копим «Пора вставать» в чате
         sent = await bot.send_message(uid, text, reply_markup=wake_keyboard(profile.lang), disable_notification=False)
         _wake_msg[uid] = sent.message_id
+        screen_mod_.track_ephemeral(uid, sent.message_id, ttl=3 * 3600)   # 07.10: не висит, если он так и не нажал кнопку
     except Exception:
         logger.exception("wake message failed for %s", uid)
 
@@ -306,7 +308,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
             # 26.09 будильник звонил 20 раз, а он не слышал: без приложения громкость — только его настройки телефона
             try:
                 tip = LOUD_TIP.get(profile.lang, LOUD_TIP["ru"]).format(n=attempts)
-                await bot.send_message(uid, tip, disable_notification=False)
+                await screen_mod_.send_note(bot, uid, tip, ttl=12 * 3600, disable_notification=False)
             except Exception:
                 logger.warning("wake loud tip failed for %s", uid, exc_info=True)
     if confirmed:

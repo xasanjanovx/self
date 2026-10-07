@@ -140,16 +140,19 @@ async def _deliver(uid: int, card_html: str, extra: str) -> bool:
     parts = chunks(card_html)
     if extra:
         parts.append(extra)
+    from . import screen as screen_mod
+
     for part in parts:
         try:
-            await bot.send_message(uid, part, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
+            sent = await bot.send_message(uid, part, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
         except Exception:
             try:  # разметка не прошла — отправим простым текстом, лучше без жирного, чем без ответа
-                await bot.send_message(uid, re.sub(r"<[^>]+>", "", html.unescape(part)), parse_mode=None,
-                                       link_preview_options=LinkPreviewOptions(is_disabled=True))
+                sent = await bot.send_message(uid, re.sub(r"<[^>]+>", "", html.unescape(part)), parse_mode=None,
+                                              link_preview_options=LinkPreviewOptions(is_disabled=True))
             except Exception:
                 logger.warning("research: в чат не ушло", exc_info=True)
                 return False
+        screen_mod.track_sent(uid, sent.message_id)   # 07.10: карточка живёт до нажатия любой кнопки (или 6 часов)
     return True
 
 

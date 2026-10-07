@@ -14,11 +14,12 @@ from . import cache
 from . import services
 from .context import db, settings
 from .handlers.common import profile_by_id
-from .keyboards import back_to_menu_keyboard
 from .profile import h
-from .reports import build_summary
+from .reports import build_digest
 
 logger = logging.getLogger(__name__)
+
+NOTE_MIN_AGE_S = 600   # свежее напоминание нельзя стереть нажатием кнопки в первые 10 минут — чтобы он успел его увидеть
 
 
 def _due_key(local_now: datetime, frequency: str) -> str | None:
@@ -38,12 +39,14 @@ async def _send_report(bot: Bot, telegram_id: int, frequency: str, due_key: str)
         "📊 <b>Месячный отчёт</b>" if frequency == "monthly" else "📊 <b>Недельный отчёт</b>",
         "📊 <b>Oylik hisobot</b>" if frequency == "monthly" else "📊 <b>Haftalik hisobot</b>",
     )
-    summary = build_summary(profile, days=days, entries=payload["all_finance_entries"], logs=payload["calorie_logs"], nutrition_profile=nutrition_profile, title=title)
-    text = summary.text
-    # 02.10: отчёт не копится в чате — исчезает при следующем действии, как остальное в боте
+    text = build_digest(profile, days=days, entries=payload["all_finance_entries"], logs=payload["calorie_logs"],
+                        nutrition_profile=nutrition_profile, title=title)
+    # 07.10: короткий отчёт с выводами вместо простыни цифр; заметка — исчезает при нажатии любой кнопки и сама через сутки.
+    # Данных нет — не пишем (но неделя засчитана)
     from . import screen as screen_mod
 
-    await screen_mod.send_ephemeral(bot, telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang), keep_previous=True)
+    if text:
+        await screen_mod.send_note(bot, telegram_id, text, ttl=24 * 3600)
     await db.save_report_preferences(telegram_id, enabled=True, frequency=frequency, last_sent_key=due_key)
     cache.invalidate(telegram_id, "report_prefs")
 
@@ -68,7 +71,13 @@ async def report_worker(bot: Bot) -> None:
                 due_key = _due_key(local_now, frequency)
                 if prefs.get("enabled", True) and due_key is not None and prefs.get("last_sent_key") != due_key:
                     try:
-                        await _send_report(bot, telegram_id, frequency, due_key)
+                        if frequency == "weekly" and access.is_owner(telegram_id):
+                            # владельцу в воскресенье приходят «Итоги недели» (bot/weekly.py) — отдельный отчёт за те же 7 дней
+                            # был бы вторым сообщением о том же (07.10)
+                            await db.save_report_preferences(telegram_id, enabled=True, frequency=frequency, last_sent_key=due_key)
+                            cache.invalidate(telegram_id, "report_prefs")
+                        else:
+                            await _send_report(bot, telegram_id, frequency, due_key)
                     except TelegramForbiddenError:
                         logger.info("Report skipped: user %s blocked the bot", telegram_id)
                     except TelegramRetryAfter as exc:
@@ -113,13 +122,13 @@ async def send_morning(bot: Bot, profile, us: dict | None = None, *, late_ok: bo
     await services.save_user_settings(telegram_id, {"last_morning_key": today_key})
     if us.get("brief_morning", True) and late_ok:
         try:
-            text = await briefs.morning_brief(profile)
+            text = await briefs.morning_brief(profile)   # None — сегодня нечего сказать, молчим (07.10)
             p = await services.persona(telegram_id)
             from . import voice_brief
 
             # «Утро голосом» — Джарвис рассказывает сам; не вышло — обычный текст
-            if not (p.morning_voice and await voice_brief.send(bot, profile, p, text)):
-                await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+            if text and not (p.morning_voice and await voice_brief.send(bot, profile, p, text)):
+                await screen_mod.send_note(bot, telegram_id, text, ttl=10 * 3600)
         except TelegramForbiddenError:
             logger.info("morning brief skipped: user %s blocked the bot", telegram_id)  # не ошибка — он заблокировал бота
         except Exception:
@@ -190,9 +199,9 @@ async def _brief_tick(bot: Bot) -> None:
             await services.save_user_settings(telegram_id, {"last_evening_key": today_key})
             if us.get("brief_evening", True) and minutes_now - (e_h * 60 + e_m) <= 120:
                 try:
-                    text = await briefs.evening_brief(profile)
+                    text = await briefs.evening_brief(profile)   # None — ничего важного, молчим (07.10)
                     if text:
-                        await screen_mod.send_ephemeral(bot, telegram_id, text, keep_previous=True)
+                        await screen_mod.send_note(bot, telegram_id, text, ttl=9 * 3600)   # к утру сама исчезнет
                 except TelegramForbiddenError:
                     logger.info("evening brief skipped: user %s blocked the bot", telegram_id)
                 except Exception:
@@ -220,7 +229,6 @@ async def brief_worker(bot: Bot) -> None:
 async def _reminder_tick(bot: Bot) -> None:
     """Напоминания (в т.ч. видео-уроки): раз в минуту, по локальному времени пользователя."""
     from . import reminders as rem
-    from .keyboards import back_to_menu_keyboard
 
     now_utc = datetime.now(timezone.utc)
     try:
@@ -254,10 +262,12 @@ async def _reminder_tick(bot: Bot) -> None:
                 await db.update_reminder(telegram_id, row["id"], {"last_sent_key": today_key})
             continue
         text, next_idx = rem.message(row)
-        try:
-            await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang), link_preview_options=LinkPreviewOptions(is_disabled=False, prefer_large_media=True))
-        except Exception:
-            logger.exception("reminder send failed for %s", telegram_id)
+        # 07.10: напоминание — заметка (он стирал их руками): исчезает при нажатии кнопки (не раньше чем через 10 минут) и через 10 часов
+        from . import screen as screen_mod
+
+        if await screen_mod.send_note(bot, telegram_id, text, ttl=10 * 3600, min_age=NOTE_MIN_AGE_S,
+                                      link_preview_options=LinkPreviewOptions(is_disabled=False, prefer_large_media=True)) is None:
+            logger.error("reminder send failed for %s", telegram_id)
             continue
         fields: dict = {"last_sent_key": today_key}
         payload["idx"] = next_idx
@@ -271,7 +281,6 @@ async def _reminder_tick(bot: Bot) -> None:
 async def _task_tick(bot: Bot) -> None:
     """Задачи со временем («позвонить маме в 18:00») — напоминание в срок."""
     from . import proactive
-    from .keyboards import back_to_menu_keyboard
 
     if not db.available("tasks"):
         return
@@ -290,10 +299,10 @@ async def _task_tick(bot: Bot) -> None:
         now = datetime.now(timezone.utc).astimezone(profile.tz)
         for t in proactive.due_tasks(tasks, now):
             text = f"📝 <b>{profile.tr('Напоминание', 'Eslatma')}:</b> {h(t.get('text'))}"
-            try:
-                await bot.send_message(telegram_id, text, reply_markup=back_to_menu_keyboard(profile.lang))
-            except Exception:
-                logger.exception("task reminder failed for %s", telegram_id)
+            from . import screen as screen_mod
+
+            if await screen_mod.send_note(bot, telegram_id, text, ttl=10 * 3600, min_age=NOTE_MIN_AGE_S) is None:
+                logger.error("task reminder failed for %s", telegram_id)
                 continue
             await db.update_task(telegram_id, t["id"], {"notified_key": now.date().isoformat()})
         services.invalidate(telegram_id, "tasks")
@@ -347,9 +356,9 @@ async def _proactive_tick(bot: Bot) -> None:
                 else:
                     kb = back_to_menu_keyboard(profile.lang)
                 if alert.persistent:
-                    await bot.send_message(telegram_id, text, reply_markup=kb)
+                    await bot.send_message(telegram_id, text, reply_markup=kb)   # долг со сроком — действие, не заметка
                 else:
-                    await screen_mod.send_ephemeral(bot, telegram_id, text, reply_markup=kb, keep_previous=True)
+                    await screen_mod.send_note(bot, telegram_id, text, kb, ttl=8 * 3600)
                 logger.info("proactive alert %s sent to %s", alert.key, telegram_id)
             except Exception:
                 logger.exception("proactive alert %s failed for %s", alert.key, telegram_id)

@@ -164,13 +164,13 @@ def test_advice_rules_limit_and_gap(monkeypatch, tmp_path):
     st = advice._state(1, "2026-09-30")
     st["last_at"] = 0
     advice._save(1, st)
-    assert asyncio.run(advice.maybe_send(FakeBot(), profile)) is True           # второй (питание)
+    assert asyncio.run(advice.maybe_send(FakeBot(), profile)) is False          # 07.10: в день — один совет (он удалял их, не читая)
     for _ in range(3):
         st = advice._state(1, "2026-09-30")
         st["last_at"] = 0
         advice._save(1, st)
         asyncio.run(advice.maybe_send(FakeBot(), profile))
-    assert len(advice._state(1, "2026-09-30")["keys"]) <= advice.MAX_PER_DAY     # не больше 3 в день
+    assert len(advice._state(1, "2026-09-30")["keys"]) <= advice.MAX_PER_DAY == 1  # не больше одного в день
     night = datetime(2026, 9, 30, 23, 0, tzinfo=timezone(timedelta(hours=5)))
     monkeypatch.setattr(Profile, "now", property(lambda self: night))
     assert asyncio.run(advice.maybe_send(FakeBot(), profile)) is False           # ночью не тревожим

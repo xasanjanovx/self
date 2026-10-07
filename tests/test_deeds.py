@@ -97,10 +97,11 @@ def test_weekly_text_and_voice(monkeypatch):
     monkeypatch.setattr(ai, "synthesize", synth)
     monkeypatch.setattr(weekly.voice_mod, "available", lambda: True)
     monkeypatch.setattr(weekly.voice_mod, "pcm_to_ogg", ogg)
-    assert asyncio.run(weekly.send(FakeBot(), _profile(), Persona(voice="Sulafat"))) is True
+    assert asyncio.run(weekly.send(FakeBot(), _profile(), Persona(voice="Sulafat"), voice=True)) is True
     kind, caption = sent[0]
-    assert kind == "voice" and "Итоги недели" in caption and "+25%" in caption and "сделано 5" in caption
-    assert "English lesson 12" in caption and "до такбира" in caption and "JES: дел 31" in caption
+    assert kind == "voice" and "Итоги недели" in caption and "▲25%" in caption and "5 сделано" in caption
+    assert "English lesson 12" in caption and "до такбира" in caption
+    assert "Расходы выросли 25%" in caption and "JES: дел" not in caption             # вывод недели есть, статистики самого JES — нет (07.10)
 
 
 def test_weekly_lessons_skip_music_and_barely_opened(monkeypatch, tmp_path):

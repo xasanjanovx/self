@@ -1057,7 +1057,10 @@ async def evening_guard(bot, profile) -> bool:  # noqa: ANN001
     if not text:
         return False
     try:
-        await bot.send_message(uid, text, disable_notification=False)
+        from . import screen as screen_mod
+
+        if await screen_mod.send_note(bot, uid, text, ttl=12 * 3600, disable_notification=False) is None:
+            return False
     except Exception:
         logger.warning("watch guard: не отправилось", exc_info=True)
         return False
