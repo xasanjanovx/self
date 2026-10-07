@@ -297,7 +297,30 @@ def test_cards_only_in_daytime_unless_forced():
     _cand("a", 50)
     night = NOON.replace(hour=2)
     assert feed.next_card(night) is None
-    assert feed.next_card(night, ignore_hours=True)["id"] == "a"
+    assert feed.next_card(night, force=True)["id"] == "a"
+
+
+def test_one_card_at_a_time_and_not_too_often():
+    """«Бот без остановки шлёт вакансии» → по одной и редко: интервал между карточками, одна открытая, не пока платный пост на топе."""
+    assert feed.MAX_OPEN_CARDS == 1 and feed.cfg("card_gap_min") == 120
+    _cand("a", 50)
+    _cand("b", 40)
+    ts = NOON.timestamp()
+    feed.note_card_sent()
+    feed.load()["last_card"] = ts - 30 * 60                                   # только что показали карточку
+    assert feed.next_card(NOON) is None and 89 * 60 < feed.card_wait_seconds(ts) <= 90 * 60
+    feed.load()["last_card"] = ts - 121 * 60                                  # прошло больше двух часов
+    assert feed.next_card(NOON)["id"] == "a"
+    _cand("open", 10, status="carded")                                         # одна карточка ещё без ответа
+    assert feed.next_card(NOON) is None
+    assert feed.next_card(NOON, force=True)["id"] == "a"                      # «Следующая вакансия» — всё это снимает
+    feed.drop_candidate("open")
+    feed.note_manual_post(ts - 600)                                            # платный пост на топе — карточек нет
+    assert feed.next_card(NOON) is None and feed.next_card(NOON, force=True)["id"] == "a"
+    feed.set_cfg("card_gap_min", 60)
+    feed.clear_hold()
+    feed.load()["last_card"] = ts - 61 * 60
+    assert feed.next_card(NOON)["id"] == "a"
 
 
 def test_no_pile_up_when_he_does_not_answer():
@@ -385,6 +408,19 @@ def test_vacancy_already_in_our_channel_is_not_offered_again():
     feed.note_channel_phones(GOOD, ts=time.time() - 30 * 86400)                 # месяц назад — уже не считается
     assert not feed.in_channel(GOOD)
     assert asyncio.run(feed.consider(GOOD, source="jobs_uz", msg_id=7, ai=ai))[0] == "queued"
+
+
+def test_old_guessed_protection_is_dropped_once_after_the_update():
+    """До 07.10 вечера защиту включал любой чужой пост (и бесплатный). После обновления такие «платные» отметки сбрасываются один раз."""
+    import json
+
+    (feed._file()).write_text(json.dumps({"hold_until": time.time() + 3 * 3600, "hold_post": 984}), encoding="utf-8")
+    feed.reset_cache()
+    assert feed.hold_left() == 0 and feed.load()["hold_v2"] is True
+    feed.note_manual_post(time.time(), 5)                                       # его настоящая отметка после обновления — сохраняется
+    feed.save()
+    feed.reset_cache()
+    assert feed.hold_left() > 2.9 * 3600
 
 
 def test_search_keywords_cover_the_channels_he_named():

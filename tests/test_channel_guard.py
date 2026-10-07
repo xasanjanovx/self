@@ -116,7 +116,7 @@ def test_harmless_ad_and_bank_ad_stay():
 
 def test_his_own_vacancy_about_a_bank_is_never_deleted_even_with_reklama():
     bot = FakeBot()
-    assert asyncio.run(guard.handle_post(bot, _post(105, OUR_VACANCY + "\n#reklama"))) == "hold"
+    assert asyncio.run(guard.handle_post(bot, _post(105, OUR_VACANCY + "\n#reklama"))) == "manual"
     assert bot.deleted == []
 
 
@@ -157,13 +157,23 @@ def test_llm_second_opinion_only_for_unmarked_paraphrases():
 
 
 # ------------------------------------------------------------------ защита платного поста
-def test_manual_post_holds_the_top_for_three_hours():
+def test_a_manual_post_in_the_channel_does_not_start_the_protection():
+    """Его жалоба 07.10: бот принимал за платные и бесплатные посты. Теперь чужой/ручной пост защиту НЕ включает — только его отметка."""
     bot = FakeBot()
-    assert asyncio.run(guard.handle_post(bot, _post(200, MANUAL_POST, hours_ago=1.0))) == "hold"
+    assert asyncio.run(guard.handle_post(bot, _post(200, MANUAL_POST, hours_ago=1.0))) == "manual"
+    assert asyncio.run(guard.handle_post(bot, _post(201, OUR_VACANCY, hours_ago=0.1))) == "manual"      # даже в нашем шаблоне
+    assert feed.hold_left() == 0
+    assert feed.publish_gate(respect_schedule=False)[0] is True
+
+
+def test_the_paid_mark_starts_the_protection_for_three_hours_and_can_be_cleared():
+    assert feed.note_manual_post(time.time(), 0) is True
     left = feed.hold_left()
-    assert 1.9 * 3600 < left <= 2.0 * 3600 + 5
+    assert 2.99 * 3600 < left <= 3 * 3600 + 5
     ok, why, wait = feed.publish_gate(respect_schedule=False)
     assert (ok, why) == (False, "hold") and abs(wait - left) < 5
+    feed.clear_hold()
+    assert feed.hold_left() == 0 and feed.load()["hold_post"] == 0
 
 
 def test_hold_never_goes_below_three_hours_and_only_extends():
@@ -232,14 +242,14 @@ class FakeClient:
                 yield SimpleNamespace(id=p["id"], message=p["text"], date=datetime.fromtimestamp(p["ts"], timezone.utc))
 
 
-def test_poll_first_run_sets_the_hold_but_never_deletes_history(monkeypatch):
+def test_poll_first_run_never_deletes_history_and_starts_no_protection(monkeypatch):
     posts = [_post(1, CREDIT_AD, hours_ago=2), _post(2, MANUAL_POST, hours_ago=1), _post(3, SHOES_AD, hours_ago=0.5),
              _post(4, MANUAL_POST, hours_ago=30)]
     monkeypatch.setattr(caller, "user_client", lambda: FakeClient(posts))
     bot = FakeBot()
     result = asyncio.run(guard.poll(bot))
-    assert result["hold"] == 1 and result["deleted"] == 0 and bot.deleted == []   # историю не трогаем
-    assert 1.9 * 3600 < feed.hold_left() <= 2.0 * 3600 + 5
+    assert result["manual"] == 1 and result["deleted"] == 0 and bot.deleted == []   # историю не трогаем
+    assert feed.hold_left() == 0                                                     # и защиту от ручных постов не включаем
     assert feed.load()["guard_cursor"] == 4
 
 

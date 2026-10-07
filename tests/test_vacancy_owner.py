@@ -204,7 +204,7 @@ def test_manual_vacancy_gets_a_banner_card_immediately(monkeypatch):
     asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
     assert len(bot.photos) == 1 and "Barista kerak" in bot.photos[0]["caption"]
     labels = _buttons(bot.photos[0]["markup"])
-    assert labels["✅ Опубликовать в канал"] == "vacancy:publish" and labels["🔄 Другой дизайн"] == "vacancy:img"
+    assert labels["✅ Опубликовать сейчас"] == "vacancy:publish" and labels["🔄 Другой дизайн"] == "vacancy:img"
     assert len(_env.designs) == 1 and any("баннер ниже" in text for text, _ in shown)
     data = asyncio.run(state.get_data())
     assert data["vacancy_file_id"] == f"FID{bot.photos[0]['id']}" and data["vacancy_design"] == _env.designs[0]
@@ -248,7 +248,7 @@ def test_manual_without_a_banner_cannot_be_published(monkeypatch):
     asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
     assert bot.photos == [] and "Картинка не получилась" in bot.messages[0]["text"]
     labels = _buttons(bot.messages[0]["markup"])
-    assert "✅ Опубликовать в канал" not in labels and labels["🎨 Нарисовать баннер"] == "vacancy:img"
+    assert "✅ Опубликовать сейчас" not in labels and labels["🎨 Нарисовать баннер"] == "vacancy:img"
     cb = FakeCb("vacancy:publish", bot)
     asyncio.run(vac_h.cb_publish(cb, state))
     assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0]
@@ -293,20 +293,49 @@ def test_redraw_switches_the_design_and_has_a_limit(monkeypatch):
     assert len(_env.designs) == len(set(_env.designs))                                            # ни один дизайн не повторился
 
 
-def test_publishing_his_own_post_starts_the_three_hour_protection(monkeypatch):
+def test_publish_now_is_a_free_post_without_protection(monkeypatch):
+    """Раньше любая публикация из бота считалась платной (включала защиту на 3 часа). Теперь «Опубликовать сейчас» — обычный пост."""
     _patch_screen(monkeypatch)
     bot, state = FakeBot(), _state()
     asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
-    cb = FakeCb("vacancy:publish", bot)
-    asyncio.run(vac_h.cb_publish(cb, state))
+    asyncio.run(vac_h.cb_publish(FakeCb("vacancy:publish", bot), state))
     posted = bot.photos[-1]
     assert posted["chat"] == CHANNEL and posted["photo"].startswith("FID") and "Barista kerak" in posted["caption"]
     assert feed.is_own(posted["id"])                                                              # свой пост — не «чужой»
+    assert feed.hold_left() == 0                                                                  # защиту не включали
+    assert not any("Лента под защитой" in text for text, _ in _env.notes)
+
+
+def test_paid_button_publishes_and_starts_the_three_hour_protection(monkeypatch):
+    _patch_screen(monkeypatch)
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    assert _buttons(bot.photos[0]["markup"])["💰 Платный пост"] == "vacancy:paid"
+    asyncio.run(vac_h.cb_publish_paid(FakeCb("vacancy:paid", bot), state))
+    posted = bot.photos[-1]
+    assert posted["chat"] == CHANNEL and "Barista kerak" in posted["caption"] and feed.is_own(posted["id"])
     left = feed.hold_left()
     assert 2.99 * 3600 < left <= 3 * 3600 + 5                                                     # ≥ 3 часов наверху
     ok, why, _ = feed.publish_gate(respect_schedule=False)
     assert (ok, why) == (False, "hold")
     assert any("Лента под защитой" in text for text, _ in _env.notes)
+
+
+def test_channel_post_has_two_blue_buttons_contact_and_ad_request(monkeypatch):
+    """Под постом в канале: «Bog'lanish» (работодателю) и «E'lon joylash» (админу канала с готовым текстом) — обе синие."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    _patch_screen(monkeypatch)
+    bot, state = FakeBot(), _state()
+    asyncio.run(vac_h.process_vacancy(_message(bot, RAW), state, _profile(), RAW))
+    asyncio.run(vac_h.cb_publish(FakeCb("vacancy:publish", bot), state))
+    row = bot.photos[-1]["markup"].inline_keyboard[0]
+    assert [b.text for b in row] == ["📩 Bog'lanish", "📢 E'lon joylash"] and all(b.style == "primary" for b in row)
+    assert row[0].url.startswith("tg://resolve?domain=cafe_hr&text=")
+    ad = urlparse(row[1].url)
+    assert ad.scheme == "tg" and parse_qs(ad.query)["domain"] == ["ishdasiz_admin"]
+    text = unquote(parse_qs(ad.query)["text"][0])
+    assert "e'lon joylashtirmoqchiman" in text and "narxlari" in text and "https://t.me/ishdasiz" in text      # ссылка на канал и вопрос о ценах
 
 
 # ------------------------------------------------------------------ защита и отложенная публикация
@@ -319,16 +348,27 @@ def _cand(cid="c1", headline="Barista kerak"):
     return cand
 
 
-def test_publish_during_protection_is_queued_and_goes_out_when_it_ends():
+def test_publish_now_does_not_wait_for_the_paid_post_but_warns():
+    """«Опубликовать сейчас» — сразу, без очереди (раньше при платном посте наверху вакансия уходила в очередь)."""
     bot = FakeBot()
     cand = _cand()
     asyncio.run(ui.send_card(bot, OWNER, cand))
     feed.note_manual_post(time.time() - 3600, 1)                                                   # платный пост час назад → ещё ~2 часа
     cb = FakeCb("vf:pub:c1", bot)
     asyncio.run(ui.cb_publish(cb))
-    assert cand["status"] == "scheduled" and cb.answers[-1][1] is True and "в очередь" in cb.answers[-1][0]
-    assert [p for p in bot.photos if p["chat"] == CHANNEL] == []                                   # в канал ничего не ушло
-    assert 1.9 * 3600 < cand["publish_at"] - time.time() < 2.1 * 3600
+    assert cand["status"] == "published" and cb.answers[-1] == ("Опубликовано ✅", False)
+    assert [p["chat"] for p in bot.photos][-1] == CHANNEL and feed.is_own(bot.photos[-1]["id"])
+    assert any("встала выше него" in text for text, _ in _env.notes)                                # предупреждение — после публикации
+    assert feed.get_candidate("c1")["status"] != "scheduled"
+
+
+def test_a_leftover_scheduled_vacancy_goes_out_when_protection_ends():
+    """Очередь больше не создаётся, но то, что уже стояло в ней до обновления, выходит само, когда защита кончилась."""
+    bot = FakeBot()
+    cand = _cand()
+    asyncio.run(ui.send_card(bot, OWNER, cand))
+    cand.update({"status": "scheduled", "publish_at": time.time() + 7200})
+    feed.note_manual_post(time.time() - 3600, 1)
     assert asyncio.run(ui.publish_due(bot)) == 0                                                   # рано
     feed.load()["hold_until"] = 0.0                                                                # защита кончилась
     cand["publish_at"] = time.time() - 1
@@ -337,14 +377,12 @@ def test_publish_during_protection_is_queued_and_goes_out_when_it_ends():
     assert feed.hold_left() == 0 and feed.is_own(bot.photos[-1]["id"])                            # свой пост защиту не включает
 
 
-def test_scheduled_publication_waits_again_if_a_new_paid_post_appears():
+def test_a_leftover_scheduled_vacancy_waits_again_if_a_new_paid_post_appears():
     bot = FakeBot()
     cand = _cand()
     asyncio.run(ui.send_card(bot, OWNER, cand))
-    feed.note_manual_post(time.time() - 3600, 1)
-    asyncio.run(ui.cb_publish(FakeCb("vf:pub:c1", bot)))
-    cand["publish_at"] = time.time() - 1
-    feed.note_manual_post(time.time(), 2)                                                          # пока ждали, он разместил ещё один платный
+    cand.update({"status": "scheduled", "publish_at": time.time() - 1})
+    feed.note_manual_post(time.time(), 2)                                                          # пока ждали, он разместил платный
     assert asyncio.run(ui.publish_due(bot)) == 0 and cand["publish_at"] > time.time() + 2.9 * 3600
 
 
@@ -399,14 +437,16 @@ def test_unverified_banner_goes_to_him_as_a_card_with_a_warning(monkeypatch):
     assert any("телефон не совпал" in text for text, _ in _env.notes)
 
 
-def test_paid_post_protection_holds_his_publish_not_the_cards(monkeypatch):
+def test_no_new_cards_during_protection_but_next_button_and_publish_now_work(monkeypatch):
     _feed_setup(monkeypatch)
     bot = FakeBot()
     feed.note_manual_post(time.time() - 600, 1)                                                    # платный пост 10 минут назад
-    assert asyncio.run(ui.tick(bot))["card"] is True                                               # карточку он увидеть может
+    out = asyncio.run(ui.tick(bot))
+    assert out["card"] is False and bot.photos == [] and len(feed.candidates("new")) == 1          # платный пост на топе — сам не шлю, вакансия ждёт
+    assert asyncio.run(ui.tick(bot, manual=True))["card"] is True                                   # «Следующая вакансия» — по его просьбе показываю
     cb = FakeCb("vf:pub:" + feed.candidates("carded")[0]["id"], bot)
     asyncio.run(ui.cb_publish(cb))
-    assert [p for p in bot.photos if p["chat"] == CHANNEL] == [] and "в очередь" in cb.answers[-1][0]    # а в канал — только после защиты
+    assert [p["chat"] for p in bot.photos][-1] == CHANNEL                                          # а «опубликовать сейчас» — сразу
 
 
 # ------------------------------------------------------------------ настройки
@@ -426,7 +466,7 @@ def test_settings_screen_cycles_values_and_protection_never_drops_below_three(mo
     for key in ("cap", "wf", "wt", "gap", "prot", "sal"):
         asyncio.run(sett.cb_setting(FakeCb(f"vf:s:{key}", bot)))
     assert feed.load()["cap"] == 10 and feed.window() == (5, 15)                                         # в тесте окно 0–24: следующие по кругу значения
-    assert feed.cfg("require_salary") is False and feed.cfg("gap_min") == 120
+    assert feed.cfg("require_salary") is False and feed.cfg("card_gap_min") == 180               # по умолчанию 2 ч → следующее по кругу
     assert feed.protect_seconds() == 4 * 3600
     for _ in range(6):
         asyncio.run(sett.cb_setting(FakeCb("vf:s:prot", bot)))
@@ -463,6 +503,20 @@ def test_banner_never_uses_a_switched_off_design(monkeypatch):
     for i in range(3):
         asyncio.run(ui.send_card(bot, OWNER, _cand(f"d{i}", headline=f"Vakansiya {i} kerak"), regenerate=True))
     assert set(_env.designs) == {"neon_green"}
+
+
+def test_paid_mark_buttons_start_and_clear_the_protection(monkeypatch):
+    cap = ScreenCapture(monkeypatch, sett)
+    bot = FakeBot()
+    assert feed.hold_left() == 0
+    asyncio.run(sett.cb_paid(FakeCb("vf:paid", bot)))
+    assert 2.99 * 3600 < feed.hold_left() <= 3 * 3600 + 5
+    text, markup = cap.shown[-1]
+    assert "Сейчас защита: ещё" in text and "vf:unpaid" in _buttons(markup).values()
+    asyncio.run(sett.cb_unpaid(FakeCb("vf:unpaid", bot)))
+    assert feed.hold_left() == 0 and "vf:paid" in _buttons(cap.shown[-1][1]).values()
+    assert {"vf:now", "vf:paid"} <= set(_buttons(ui.panel_keyboard()).values())
+    assert "▶️ Следующая вакансия" in _buttons(ui.panel_keyboard())
 
 
 def test_ads_screen_toggles_and_shows_the_log(monkeypatch):

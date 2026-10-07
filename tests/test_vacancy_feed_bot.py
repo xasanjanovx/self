@@ -136,7 +136,7 @@ def test_short_post_goes_as_one_photo_with_buttons():
     photo = bot.photos[0]
     assert photo["chat"] == OWNER and "Barista kerak" in photo["caption"]
     buttons = _buttons(photo["markup"])
-    assert buttons["✅ Опубликовать"] == "vf:pub:c1" and buttons["⏭ Пропустить"] == "vf:skip:c1" and buttons["🔄 Другая картинка"] == "vf:img:c1"
+    assert buttons["✅ Опубликовать сейчас"] == "vf:pub:c1" and buttons["⏭ Пропустить"] == "vf:skip:c1" and buttons["🔄 Другая картинка"] == "vf:img:c1"
     assert buttons["🔗 Источник"] == "https://t.me/jobs_uz/7"
     assert cand["status"] == "carded" and cand["file_id"] == f"FID{photo['id']}" and feed.cards_today() == 1
     assert feed.image_path("c1").read_bytes() == b"JPEGDATA"
@@ -152,7 +152,7 @@ def test_long_post_is_trimmed_into_one_photo_caption():
     photo = bot.photos[0]
     assert vac.visible_len(photo["caption"]) <= vac.CAPTION_LIMIT
     assert "Barista kerak" in photo["caption"] and "+998901234567" in photo["caption"] and "@cafe_hr" in photo["caption"]
-    assert "✅ Опубликовать" in _buttons(photo["markup"]) and cand["card_ids"] == [photo["id"]]
+    assert "✅ Опубликовать сейчас" in _buttons(photo["markup"]) and cand["card_ids"] == [photo["id"]]
     assert any("Текст сокращён" in note for note in ui._notes)
 
 
@@ -169,7 +169,7 @@ def test_picture_failure_is_retried_and_then_shown_without_publish(monkeypatch):
     assert asyncio.run(ui.send_card(bot, OWNER, cand)) is True
     buttons = _buttons(bot.messages[0]["markup"])
     assert "Картинка не получилась" in bot.messages[0]["text"]
-    assert "✅ Опубликовать" not in buttons and buttons["🎨 Нарисовать картинку"] == "vf:img:c1"
+    assert "✅ Опубликовать сейчас" not in buttons and buttons["🎨 Нарисовать картинку"] == "vf:img:c1"
     cb = FakeCb("vf:pub:c1", bot)                                                          # старая кнопка тоже не пропустит без картинки
     asyncio.run(ui.cb_publish(cb))
     assert cb.answers[-1][1] is True and "Без картинки" in cb.answers[-1][0]
@@ -191,7 +191,7 @@ def test_redraw_after_failure_gets_the_publish_button_back(monkeypatch):
         asyncio.run(ui.send_card(bot, OWNER, cand))
     assert bot.photos == []
     asyncio.run(ui.cb_new_image(FakeCb("vf:img:c1", bot)))
-    assert len(bot.photos) == 1 and "✅ Опубликовать" in _buttons(bot.photos[0]["markup"]) and cand["has_image"] is True
+    assert len(bot.photos) == 1 and "✅ Опубликовать сейчас" in _buttons(bot.photos[0]["markup"]) and cand["has_image"] is True
 
 
 # ------------------------------------------------------------------ кнопки карточки

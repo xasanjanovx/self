@@ -6,11 +6,12 @@
 
 Как работает: аккаунт JES (Telethon) каждые пару минут читает публичный канал, бот сверяет посты со своими (id записаны при публикации):
   • свой пост — пропускаем;
-  • пост в нашем шаблоне (подвал «Tez va oson ish toping», дисклеймер) — это он разместил сам: включаем защиту ленты на protect_hours (≥ 3);
+  • пост в нашем шаблоне (подвал «Tez va oson ish toping», дисклеймер) или любой другой не-рекламный пост — его, ручной: ТОЛЬКО запоминаем
+    телефоны (антидубли). Защита ленты от них НЕ включается: платным пост считается только по его отметке («💰 Платный пост» в боте или
+    кнопка в разделе защиты) — раньше бот принимал за платные и его бесплатные посты (его жалоба 07.10);
   • пост с #reklama не в нашем шаблоне — реклама: тема из включённых (кредиты/займы, банки, ставки/крипта, страхование) → удаляем и присылаем
-    ему текст удалённого; другая тема — не трогаем;
-  • любой другой чужой пост — тоже ручной: защита ленты.
-Реклама никогда не «держит» ленту. Свои вакансии в шаблоне канала (даже про банк: «Kredit menejer kerak») не удаляются — шаблон их защищает.
+    ему текст удалённого; другая тема — не трогаем.
+Свои вакансии в шаблоне канала (даже про банк: «Kredit menejer kerak») не удаляются — шаблон их защищает.
 """
 from __future__ import annotations
 
@@ -68,7 +69,7 @@ def ad_topics(text: str, enabled: dict[str, bool] | None = None) -> list[str]:
 
 
 def classify(text: str, mid: int) -> str:
-    """own | manual (его пост — защита ленты) | ad (реклама #reklama)."""
+    """own | manual (его ручной пост — только запоминаем телефоны) | ad (реклама #reklama)."""
     if feed.is_own(mid):
         return "own"
     if is_our_template(text or ""):
@@ -124,8 +125,8 @@ async def _tell(bot: Any, text: str) -> None:
 
 
 async def handle_post(bot: Any, post: dict[str, Any], *, ai: Any | None = None, history: bool = False) -> str:
-    """Один пост канала: {id, text, ts}. → own | seen | hold | deleted | notified | ad_ok.
-    history — старый пост (первый запуск): защиту ленты можем включить, но ничего не удаляем."""
+    """Один пост канала: {id, text, ts}. → own | seen | manual | deleted | notified | ad_ok.
+    history — старый пост (первый запуск): ничего не удаляем."""
     st = feed.load()
     mid = int(post["id"])
     done = st.setdefault("guard_done", [])
@@ -141,9 +142,8 @@ async def handle_post(bot: Any, post: dict[str, Any], *, ai: Any | None = None, 
         feed.save()
         return "own"
     if kind == "manual":
-        feed.note_manual_post(float(post["ts"]), mid)
         feed.save()
-        return "hold"
+        return "manual"
     # реклама
     if not feed.cfg("ads_on") or history:
         feed.save()
@@ -202,7 +202,7 @@ async def poll(bot: Any, *, ai: Any | None = None) -> dict[str, Any]:
                 pass
         logger.warning("channel_guard: канал не прочитался: %s: %s", type(exc).__name__, exc)
         return {"error": type(exc).__name__}
-    counts = {"posts": len(posts), "hold": 0, "deleted": 0, "notified": 0, "ad_ok": 0, "own": 0}
+    counts = {"posts": len(posts), "manual": 0, "deleted": 0, "notified": 0, "ad_ok": 0, "own": 0}
     horizon = time.time() - FIRST_RUN_LOOKBACK_H * 3600
     for post in sorted(posts, key=lambda p: p["id"]):
         if first and post["ts"] < horizon:

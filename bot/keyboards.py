@@ -771,7 +771,8 @@ def vacancy_result_keyboard(
     publish_key = "vacancy_publish" if can_publish else "vacancy_copy"
     rows.append([_btn(t(lang, publish_key), "vacancy:publish", style="success", icon=_pe.ID_SAVE)])
     if can_publish:
-        rows.append([_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", "vacancy:fwd")])
+        rows.append([_btn("💰 Платный пост", "vacancy:paid")])
+        rows.append([_btn("📤 Премиум-эмодзи: пришли, перешлю сам", "vacancy:fwd")])
     if image_prompt:
         # нажатие копирует промпт в буфер — сам текст в чате не показываем
         rows.append([_btn(t(lang, "vacancy_prompt"), icon=_pe.ID_STAR, copy_text=image_prompt)])
@@ -780,10 +781,18 @@ def vacancy_result_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def vacancy_channel_keyboard(lang: str = "ru", contact_url: str | None = None) -> InlineKeyboardMarkup | None:
-    if not contact_url:
-        return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t(lang, "vacancy_contact"), url=contact_url)]])
+AD_BUTTON_TEXT = "📢 E'lon joylash"
+
+
+def vacancy_channel_keyboard(lang: str = "ru", contact_url: str | None = None, ad_url: str | None = None) -> InlineKeyboardMarkup | None:
+    """Кнопки под постом в канале — обе СИНИЕ (style=primary): «Bog'lanish» — написать работодателю, «E'lon joylash» — написать админу канала
+    про размещение (ad_url). Нет ни той ни другой — без кнопок."""
+    row: list[InlineKeyboardButton] = []
+    if contact_url:
+        row.append(_btn(t(lang, "vacancy_contact"), url=contact_url, style="primary"))
+    if ad_url:
+        row.append(_btn(AD_BUTTON_TEXT, url=ad_url, style="primary"))
+    return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
 
 
 # ------------------------------------------------------------------ analytics

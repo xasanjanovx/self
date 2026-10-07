@@ -14,6 +14,22 @@ VACANCY_CONTACT_TEMPLATE = (
     "Menga to'liqroq ma'lumot bera olasizmi ?"
 )
 
+# Кнопка «E'lon joylash» под постом: открывает личку админа канала с готовым сообщением (узбекский, латиница) — про размещение
+# объявления в канале и цены. Админ канала по его слову — @ishdasiz_admin.
+AD_ADMIN_USERNAME = "ishdasiz_admin"
+AD_REQUEST_TEMPLATE = (
+    "Assalomu alaykum! Men sizning kanalingizda ({channel}) e'lon joylashtirmoqchiman. "
+    "Joylashtirish narxlari, shartlari va tartibi haqida ma'lumot bera olasizmi?"
+)
+
+
+def build_ad_url(channel_url: str = "https://t.me/ishdasiz") -> str:
+    """tg://resolve?domain=ishdasiz_admin&text=… — чат с админом и в поле ввода уже написано, что хочу разместить объявление в канале,
+    со ссылкой на канал и вопросом о ценах."""
+    text = AD_REQUEST_TEMPLATE.format(channel=channel_url or "https://t.me/ishdasiz")
+    return f"tg://resolve?domain={AD_ADMIN_USERNAME}&text={quote(text, safe='')}"
+
+
 _EMOJI_META = {
     "top": ("✅", "5389061359403039918"),
     "intro": ("💬", "5877301185639091664"),

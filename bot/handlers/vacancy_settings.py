@@ -18,7 +18,7 @@ from .. import vacancy_feed as feed
 from ..keyboards import _btn
 from ..profile import h
 from .common import answer_now, safe_edit
-from .vacancy_feed import owner_filter
+from .vacancy_feed import gap_label, owner_filter
 
 router = Router(name="vacancy_settings")
 logger = logging.getLogger(__name__)
@@ -45,8 +45,8 @@ def settings_text() -> str:
         "Публикация: <b>только после твоего «Опубликовать»</b> — каждую вакансию бот сначала показывает карточкой",
         f"В день (карточек): <b>{feed.load()['cap']}</b>",
         f"Время карточек: <b>{start:02d}:00–{end:02d}:00</b> (Ташкент)",
-        f"Интервал между постами: <b>{feed.cfg('gap_min')} мин</b>",
-        f"Защита платного поста наверху: <b>{feed.protect_seconds() / 3600:.0f} ч</b> (меньше 3 нельзя)",
+        f"Между карточками: <b>{gap_label(int(feed.cfg('card_gap_min')))}</b> · одна карточка за раз, следующая — после твоего решения",
+        f"Защита платного поста наверху: <b>{feed.protect_seconds() / 3600:.0f} ч</b> (меньше 3 нельзя) — включается только твоей отметкой",
         f"Зарплата обязательна: <b>{'да («по собеседованию» подходит)' if feed.cfg('require_salary') else 'нет'}</b>",
         f"Дизайны: <b>{designs} из {len(vac.DESIGNS)}</b>",
         "",
@@ -59,7 +59,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     start, end = feed.window()
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn(f"📥 В день: {feed.load()['cap']}", "vf:s:cap"), _btn(f"🕗 С {start:02d}:00", "vf:s:wf"), _btn(f"🕘 До {end:02d}:00", "vf:s:wt")],
-        [_btn(f"⏱ Интервал: {feed.cfg('gap_min')} мин", "vf:s:gap"), _btn(f"🛡 Защита: {feed.protect_seconds() / 3600:.0f} ч", "vf:s:prot")],
+        [_btn(f"⏱ Между карточками: {gap_label(int(feed.cfg('card_gap_min')))}", "vf:s:gap"), _btn(f"🛡 Защита: {feed.protect_seconds() / 3600:.0f} ч", "vf:s:prot")],
         [_btn(f"💰 Зарплата обязательна: {'да' if feed.cfg('require_salary') else 'нет'}", "vf:s:sal")],
         [_btn(f"🎨 Дизайны ({len(feed.allowed_designs())}/{len(vac.DESIGNS)})", "vf:ds"), _btn("🛡 Реклама и защита", "vf:ads")],
         [_btn("⬅️ Назад", "vf:panel")],
@@ -87,7 +87,7 @@ async def cb_setting(callback: CallbackQuery) -> None:
     elif key == "wt":
         feed.set_cfg("window_to", _next(WINDOW_TO, feed.window()[1]))
     elif key == "gap":
-        feed.set_cfg("gap_min", _next(feed.GAP_CHOICES, int(feed.cfg("gap_min"))))
+        feed.set_cfg("card_gap_min", _next(feed.CARD_GAP_CHOICES, int(feed.cfg("card_gap_min"))))
     elif key == "prot":
         feed.set_cfg("protect_hours", _next(feed.PROTECT_CHOICES, int(feed.protect_seconds() // 3600)))
     elif key == "sal":
@@ -139,8 +139,9 @@ def ads_text() -> str:
         "🛡 <b>Защита ленты и реклама</b>",
         "",
         f"<b>Платный пост наверху.</b> {('Сейчас защита: ещё ' + feed.human_wait(feed.hold_left())) if feed.hold_left() > 0 else 'Сейчас платного поста наверху нет.'}",
-        f"Если ты сам разместил пост (заказ на размещение), бот {feed.protect_seconds() / 3600:.0f} ч ничего не публикует, чтобы он постоял на топе. "
-        "Отложенные вакансии выйдут сами, когда защита кончится.",
+        f"Платным пост считается только по твоей отметке: кнопка «💰 Платный пост» при публикации из бота или кнопка ниже, если разместил "
+        f"сам. Тогда {feed.protect_seconds() / 3600:.0f} ч бот не шлёт новые карточки, чтобы пост постоял на топе. Все остальные посты в канале — "
+        "бесплатные, защиты от них нет.",
         "",
         f"<b>Реклама (#reklama).</b> Фильтр: {'включён' if feed.cfg('ads_on') else 'выключен'} · "
         f"режим: {'удалять сразу' if feed.cfg('ads_mode') == 'delete' else 'только сообщать'}",
@@ -163,6 +164,8 @@ def ads_keyboard() -> InlineKeyboardMarkup:
          _btn("🗑 Режим: удалять" if feed.cfg("ads_mode") == "delete" else "🔔 Режим: сообщать", "vf:a:mode")],
     ]
     rows += [[_btn(f"{'✅' if cats.get(key) else '⛔'} {label}", f"vf:a:c:{key}")] for key, label in feed.AD_CATEGORIES.items()]
+    rows.insert(0, [_btn("✖️ Снять защиту" if feed.hold_left() > 0 else "💰 Платный пост размещён", "vf:unpaid" if feed.hold_left() > 0 else "vf:paid",
+                         style=None if feed.hold_left() > 0 else "success")])
     rows.append([_btn("🔄 Проверить канал сейчас", "vf:a:poll")])
     rows.append([_btn("⬅️ Назад", "vf:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -175,6 +178,21 @@ async def _show_ads(callback: CallbackQuery, note: str = "") -> None:
 @router.callback_query(F.data == "vf:ads")
 async def cb_ads(callback: CallbackQuery) -> None:
     await answer_now(callback)
+    await _show_ads(callback)
+
+
+@router.callback_query(F.data == "vf:paid")
+async def cb_paid(callback: CallbackQuery) -> None:
+    """Отметка: «я разместил платный пост» — защита ленты на protect_hours (≥ 3 ч) от сейчас."""
+    feed.note_manual_post(time.time(), 0)
+    await answer_now(callback, f"Защита включена на {feed.protect_seconds() / 3600:.0f} ч")
+    await _show_ads(callback)
+
+
+@router.callback_query(F.data == "vf:unpaid")
+async def cb_unpaid(callback: CallbackQuery) -> None:
+    feed.clear_hold()
+    await answer_now(callback, "Защита снята")
     await _show_ads(callback)
 
 
@@ -196,7 +214,7 @@ async def cb_ads_setting(callback: CallbackQuery) -> None:
         if result.get("error"):
             note = f"ℹ️ Канал не прочитался: {h(str(result['error']))}."
         else:
-            note = (f"Прочитано постов: {result['posts']} · защита от платных: {result['hold']} · рекламы удалено: {result['deleted']} · "
+            note = (f"Прочитано постов: {result['posts']} · твоих ручных: {result['manual']} · рекламы удалено: {result['deleted']} · "
                     f"не тронуто: {result['ad_ok']}")
         await _show_ads(callback, note)
         return

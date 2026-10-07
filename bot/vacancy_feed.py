@@ -35,7 +35,7 @@ SEEN_DAYS = 30
 NEW_HOURS = 36                   # не показанная вовремя вакансия протухает
 CARD_DAYS = 7
 SEND_FROM, SEND_TO = 8, 21       # карточки шлём только днём (Ташкент)
-MAX_OPEN_CARDS = 3               # не завалить чат, если он не отвечает
+MAX_OPEN_CARDS = 1               # 07.10 («бот без остановки шлёт вакансии»): по одной — следующая только после его решения по открытой
 PULL_LIMIT = 40
 SOURCE_PAUSE_S = 2.0
 SEARCH_PAUSE_S = 1.0
@@ -78,9 +78,12 @@ def load() -> dict[str, Any]:
             _state = {}
         for key, default in (("enabled", True), ("cap", DEFAULT_CAP), ("sources", {}), ("seen", {}),
                              ("published", {}), ("queue", {}), ("daily", {}), ("designs", []), ("flood_until", 0.0), ("last_discovery", 0.0),
-                             ("cfg", {}), ("own", []), ("hold_until", 0.0), ("hold_post", 0), ("last_feed_post", 0.0), ("guard_cursor", 0),
+                             ("cfg", {}), ("own", []), ("hold_until", 0.0), ("hold_post", 0), ("last_feed_post", 0.0), ("last_card", 0.0), ("guard_cursor", 0),
                              ("ads_log", [])):
             _state.setdefault(key, default)
+        if not _state.get("hold_v2"):
+            # 07.10: раньше защиту включал любой чужой пост в канале (и бесплатный) — прежние «платные» отметки недействительны
+            _state["hold_until"], _state["hold_post"], _state["hold_v2"] = 0.0, 0, True
     return _state
 
 
@@ -391,20 +394,32 @@ def cards_today() -> int:
 def note_card_sent() -> None:
     daily = load()["daily"]
     daily[_today()] = cards_today() + 1
+    load()["last_card"] = time.time()
     for day in [d for d in daily if d < (datetime.now(TZ) - timedelta(days=10)).date().isoformat()]:
         daily.pop(day)
     save()
 
 
-def next_card(now: datetime | None = None, *, ignore_hours: bool = False) -> dict[str, Any] | None:
-    """Лучший не показанный кандидат — если сейчас можно слать карточку (включено, день, лимит, нет завала без ответа)."""
+def card_wait_seconds(now_ts: float | None = None) -> float:
+    """Сколько ещё ждать до следующей карточки по интервалу (card_gap_min)."""
+    now_ts = now_ts if now_ts is not None else time.time()
+    return max(0.0, float(cfg("card_gap_min")) * 60 - (now_ts - float(load()["last_card"])))
+
+
+def next_card(now: datetime | None = None, *, force: bool = False) -> dict[str, Any] | None:
+    """Лучший не показанный кандидат — если сейчас можно слать карточку. Правила «по одной и редко» (его просьба 07.10):
+    включено, дневное окно, не чаще раза в card_gap_min минут, нет открытой карточки без ответа, лимит в день, не пока платный пост на топе.
+    force — он сам нажал «Следующая вакансия»: все эти ограничения снимаются."""
     st = load()
     now = now or datetime.now(TZ)
-    if not st["enabled"] or not (ignore_hours or in_window(now)):
+    if not st["enabled"]:
         return None
-    if cards_today() >= int(st["cap"]) or len(candidates("carded")) >= MAX_OPEN_CARDS:
-        return None
-    fresh = sorted(candidates("new"), key=lambda c: (-(int(c.get("score") or 0) + views_bonus(c.get("views"))), str(c.get("created") or "")))
+    if not force:
+        if not in_window(now) or hold_left(now.timestamp()) > 0 or card_wait_seconds(now.timestamp()) > 0:
+            return None
+        if cards_today() >= int(st["cap"]) or len(candidates("carded")) >= MAX_OPEN_CARDS:
+            return None
+    fresh =sorted(candidates("new"), key=lambda c: (-(int(c.get("score") or 0) + views_bonus(c.get("views"))), str(c.get("created") or "")))
     return fresh[0] if fresh else None
 
 
@@ -447,6 +462,7 @@ def mark_handled(cand: dict[str, Any], status: str) -> None:
 # минимум 3 часа — пока он наверху, автоподбор ничего не публикует; реклама на запрещённые темы удаляется из канала.
 PROTECT_MIN_HOURS = 3            # меньше нельзя — это условие, не пожелание
 GAP_CHOICES = (60, 90, 120, 180)
+CARD_GAP_CHOICES = (60, 120, 180, 240)   # минут между карточками
 PROTECT_CHOICES = (3, 4, 5, 6)
 AD_CATEGORIES = {
     "credit": "Кредиты и займы",
@@ -458,7 +474,7 @@ AD_CATEGORIES = {
 
 def _defaults() -> dict[str, Any]:
     # режима «сам размещает» нет: он потребовал, чтобы каждый пост спрашивали у него; картинка — всегда (фото обязательно с текстом)
-    return {"window_from": SEND_FROM, "window_to": SEND_TO, "gap_min": 90, "protect_hours": PROTECT_MIN_HOURS,
+    return {"window_from": SEND_FROM, "window_to": SEND_TO, "gap_min": 90, "card_gap_min": 120, "protect_hours": PROTECT_MIN_HOURS,
             "require_salary": REQUIRE_SALARY, "off_designs": [], "ads_on": True, "ads_mode": "delete",
             "ads_cats": {"credit": True, "bank": False, "bets": True, "insure": True}}
 
@@ -530,8 +546,9 @@ def hold_left(now_ts: float | None = None) -> float:
 
 
 def note_manual_post(post_ts: float, mid: int = 0) -> bool:
-    """В канале появился пост, который опубликовал он сам (заказ на размещение, ручной пост) — он должен постоять наверху
-    не меньше защитного срока. True — защита продлена."""
+    """Платный пост (заказ на размещение), который он разместил, — он должен постоять наверху не меньше защитного срока: пока он там,
+    новые карточки не шлём. Платным пост считается ТОЛЬКО по его отметке (07.10: раньше бот принимал за платный любой чужой пост в канале,
+    и бесплатные тоже): кнопка «💰 Платный пост» в боте или «💰 Платный пост размещён» в разделе защиты. True — защита продлена."""
     until = post_ts + protect_seconds()
     st = load()
     if until > float(st["hold_until"]):
@@ -539,6 +556,13 @@ def note_manual_post(post_ts: float, mid: int = 0) -> bool:
         save()
         return True
     return False
+
+
+def clear_hold() -> None:
+    """Снять защиту (отметил платным по ошибке)."""
+    st = load()
+    st["hold_until"], st["hold_post"] = 0.0, 0
+    save()
 
 
 def note_feed_post(now_ts: float | None = None) -> None:

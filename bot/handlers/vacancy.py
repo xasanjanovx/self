@@ -1,8 +1,9 @@
 """Вакансии — только владелец (07.10): текст/форвард/фото/голос → пост для канала и СРАЗУ баннер (дизайн под профессию, каждый раз другой).
 
-Его просьбы: раздел «Вакансии» — только у админа бота (кнопка в главном меню); фото генерируется сразу и в стиле вакансии; вакансию, которую
-он разместил сам (заказ на размещение), канал держит наверху не меньше 3 часов — после публикации здесь включается защита ленты
-(bot/vacancy_feed.py: publish_gate), и автоподбор до её конца молчит. У приглашённых раздела нет.
+Его просьбы: раздел «Вакансии» — только у админа бота (кнопка в главном меню); фото генерируется сразу и в стиле вакансии; платную вакансию
+(заказ на размещение) канал держит наверху не меньше 3 часов — её он публикует кнопкой «💰 Платный пост», тогда включается защита ленты
+(bot/vacancy_feed.py: hold), и автоподбор до её конца молчит. «Опубликовать сейчас» — обычный пост без защиты (бесплатные посты платными не считаем).
+У приглашённых раздела нет.
 """
 from __future__ import annotations
 
@@ -20,10 +21,11 @@ from .. import emoji as pe
 from .. import vacancy as vac
 from .. import vacancy_feed as feed
 from ..context import ai, settings
-from ..keyboards import _btn, vacancy_channel_keyboard, vacancy_panel_keyboard, vacancy_result_keyboard
+from ..keyboards import _btn, vacancy_panel_keyboard, vacancy_result_keyboard
 from ..profile import Profile, h
 from ..states import BotStates
 from .common import answer_now, get_profile, message_text, remember_panel, safe_delete, safe_edit, show_panel, show_progress, transcribe_audio
+from .vacancy_feed import channel_markup
 
 router = Router(name="vacancy")
 logger = logging.getLogger(__name__)
@@ -81,13 +83,19 @@ async def cmd_vacancy(message: Message, state: FSMContext) -> None:
 
 def _card_markup(contact_url: str | None, regen: int, *, can_publish: bool = True) -> InlineKeyboardMarkup:
     """Без баннера «Опубликовать» нет: фото обязательно в одном посте с текстом — сначала «Нарисовать баннер»."""
-    channel_kb = vacancy_channel_keyboard("uz", contact_url)
-    rows = [
-        [_btn("✅ Опубликовать в канал", "vacancy:publish", style="success"), _btn("🔄 Другой дизайн", "vacancy:img")] if can_publish
-        else [_btn("🎨 Нарисовать баннер", "vacancy:img", style="primary")],
-        *([[_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", "vacancy:fwd")]] if can_publish else []),
-        [_btn("🎨 Промпт (ChatGPT)", "vacancy:prompt"), _btn("📝 Новая вакансия", "vacancy:again")],
-    ]
+    channel_kb = channel_markup(contact_url)
+    if can_publish:
+        rows = [
+            [_btn("✅ Опубликовать сейчас", "vacancy:publish", style="success"), _btn("💰 Платный пост", "vacancy:paid")],
+            [_btn("📤 Премиум-эмодзи: пришли, перешлю сам", "vacancy:fwd")],
+            [_btn("🔄 Другой дизайн", "vacancy:img"), _btn("🎨 Промпт (ChatGPT)", "vacancy:prompt")],
+            [_btn("📝 Новая вакансия", "vacancy:again")],
+        ]
+    else:
+        rows = [
+            [_btn("🎨 Нарисовать баннер", "vacancy:img", style="primary")],
+            [_btn("🎨 Промпт (ChatGPT)", "vacancy:prompt"), _btn("📝 Новая вакансия", "vacancy:again")],
+        ]
     return InlineKeyboardMarkup(inline_keyboard=(channel_kb.inline_keyboard if channel_kb else []) + rows)
 
 
@@ -295,6 +303,17 @@ async def cb_forward(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "vacancy:publish")
 async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Опубликовать сейчас»: обычный (бесплатный) пост — защита ленты НЕ включается (раньше любая публикация считалась платной)."""
+    await _publish(callback, state, paid=False)
+
+
+@router.callback_query(F.data == "vacancy:paid")
+async def cb_publish_paid(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Платный пост» (заказ на размещение): публикуем и держим наверху ≥ 3 часов — автоподбор молчит."""
+    await _publish(callback, state, paid=True)
+
+
+async def _publish(callback: CallbackQuery, state: FSMContext, *, paid: bool) -> None:
     if not _owner_only(callback.from_user.id):
         await answer_now(callback, "Раздел недоступен", alert=True)
         return
@@ -308,7 +327,7 @@ async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
     vdata = feed.data_from_dict(data["vacancy_data"])
     post, _ = vac.fit_post(vdata, premium=True, footer_url=settings.vacancy_footer_url)
     contact_url = vac.build_contact_url(vdata.telegram)
-    markup = vacancy_channel_keyboard("uz", contact_url)
+    markup = channel_markup(contact_url)
     channel = settings.vacancy_channel
     target = channel or callback.message.chat.id
     image = data.get("vacancy_photo_id") or data.get("vacancy_file_id")
@@ -330,15 +349,20 @@ async def cb_publish(callback: CallbackQuery, state: FSMContext) -> None:
     if not channel:
         await answer_now(callback, profile.tr("Чистая копия отправлена — перешли её в канал.", "Toza nusxa yuborildi — kanalga forward qiling."))
         return
-    # он сам разместил (заказ или своя вакансия): пост должен постоять наверху — автоподбор до конца защиты молчит
     feed.mark_own(ids)
-    feed.note_manual_post(time.time(), post_id)
-    until = datetime.fromtimestamp(time.time() + feed.hold_left(), feed.TZ)
-    await answer_now(callback, "Опубликовано в канал ✅")
+    feed.note_feed_post()
+    link = f"https://t.me/{str(channel).lstrip('@')}/{post_id}" if str(channel).startswith("@") else ""
     from .. import screen as screen_mod
 
-    link = f"https://t.me/{str(channel).lstrip('@')}/{post_id}" if str(channel).startswith("@") else ""
+    if not paid:
+        await answer_now(callback, "Опубликовано в канал ✅")
+        await screen_mod.send_note(callback.bot, callback.from_user.id, "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+        return
+    # заказ на размещение: пост должен постоять наверху — автоподбор до конца защиты молчит
+    feed.note_manual_post(time.time(), post_id)
+    until = datetime.fromtimestamp(time.time() + feed.hold_left(), feed.TZ)
+    await answer_now(callback, "Опубликовано как платный ✅")
     await screen_mod.send_note(callback.bot, callback.from_user.id,
-                               "✅ Опубликовано в канал" + (f": {link}" if link else "")
+                               "✅ Платный пост опубликован" + (f": {link}" if link else "")
                                + f"\n🛡 Лента под защитой до {until:%H:%M} ({feed.human_wait(feed.hold_left())}): "
                                  "автоподбор ничего не публикует, пока твой пост наверху.", ttl=3 * 3600)

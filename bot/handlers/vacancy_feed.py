@@ -55,10 +55,14 @@ def _spawn(coro: Any) -> None:
 
 
 # ------------------------------------------------------------------ экран
+def gap_label(minutes: int) -> str:
+    return f"{minutes // 60} ч" if minutes % 60 == 0 else f"{minutes} мин"
+
+
 def guard_line() -> str:
     left = feed.hold_left()
     if left > 0:
-        return f"🛡 Платный пост наверху ленты: автоподбор молчит ещё {feed.human_wait(left)}"
+        return f"🛡 Платный пост наверху ленты: новые карточки не шлю ещё {feed.human_wait(left)}"
     return "🛡 Лента свободна: платного поста наверху нет"
 
 
@@ -69,7 +73,8 @@ def panel_text() -> str:
     lines = [
         "🤖 <b>Автоподбор вакансий</b>",
         "",
-        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · каждую вакансию решаешь ты (карточка)",
+        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · каждую вакансию решаешь ты (карточка), по одной, "
+        f"не чаще раза в {gap_label(int(feed.cfg('card_gap_min')))}",
         f"Каналы: {s['approved']} в работе · {s['pending']} ждут твоего решения",
         f"Сегодня {s['today']} из {s['cap']} · окно {start:02d}:00–{end:02d}:00 · в очереди {s['new']} · ждут ответа {s['carded']}"
         + (f" · отложено {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
@@ -89,8 +94,9 @@ def panel_text() -> str:
 def panel_keyboard() -> InlineKeyboardMarkup:
     s = feed.status()
     return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("▶️ Следующая вакансия", "vf:now", style="success")],
         [_btn("🔍 Найти каналы", "vf:find", style="primary"), _btn(f"📡 Каналы ({s['approved']}+{s['pending']})", "vf:srcs")],
-        [_btn("🔄 Проверить сейчас", "vf:now")],
+        [_btn("💰 Платный пост размещён", "vf:paid")],
         [_btn("⏸ Выключить" if s["enabled"] else "▶️ Включить", "vf:toggle"), _btn("⚙️ Настройки", "vf:cfg", style="primary")],
         [_btn("🛡 Защита ленты и реклама", "vf:ads")],
         [_btn("⬅️ Назад", "menu:vacancy")],
@@ -238,6 +244,11 @@ async def _send_post(bot: Bot, chat_id: int | str, post: str, image: bytes | str
     return [first.message_id, second.message_id], first.photo[-1].file_id, second.message_id
 
 
+def channel_markup(contact_url: str | None) -> InlineKeyboardMarkup | None:
+    """Кнопки под постом в канале: «Bog'lanish» (работодателю) и «E'lon joylash» (админу канала), обе синие."""
+    return vacancy_channel_keyboard("uz", contact_url, ad_url=vac.build_ad_url(settings.vacancy_footer_url))
+
+
 def _views_label(views: Any) -> str:
     """« · 👁 12.4к» — сколько просмотров у исходного поста (в подписи места нет, поэтому в кнопке «Источник»)."""
     try:
@@ -255,8 +266,8 @@ def _card_markup(cand: dict[str, Any], contact_url: str | None, *, can_publish: 
     source = _btn("🔗 Источник" + _views_label(cand.get("views")), url=cand["url"])
     if can_publish:
         rows = [
-            [_btn("✅ Опубликовать", f"vf:pub:{cid}", style="success"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
-            [_btn("📤 С премиум-эмодзи: пришли мне, перешлю сам", f"vf:fwd:{cid}")],
+            [_btn("✅ Опубликовать сейчас", f"vf:pub:{cid}", style="success"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
+            [_btn("📤 Премиум-эмодзи: пришли, перешлю сам", f"vf:fwd:{cid}")],
             [_btn("🔄 Другая картинка", f"vf:img:{cid}"), source],
         ]
     else:
@@ -264,7 +275,7 @@ def _card_markup(cand: dict[str, Any], contact_url: str | None, *, can_publish: 
             [_btn("🎨 Нарисовать картинку", f"vf:img:{cid}", style="primary"), _btn("⏭ Пропустить", f"vf:skip:{cid}")],
             [source],
         ]
-    channel_kb = vacancy_channel_keyboard("uz", contact_url)
+    channel_kb = channel_markup(contact_url)
     return InlineKeyboardMarkup(inline_keyboard=(channel_kb.inline_keyboard if channel_kb else []) + rows)
 
 
@@ -355,7 +366,7 @@ async def publish_candidate(bot: Bot, cand: dict[str, Any]) -> tuple[list[int], 
     image: bytes | str | None = cand.get("file_id") or _read_image(cand["id"])
     if image is None:
         raise RuntimeError("нет картинки — сначала нарисуй её кнопкой «Другая картинка»")
-    ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, vacancy_channel_keyboard("uz", contact_url))
+    ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, channel_markup(contact_url))
     feed.mark_own(ids)
     feed.note_feed_post()
     feed.mark_handled(cand, "published")
@@ -386,17 +397,9 @@ async def cb_publish(callback: CallbackQuery) -> None:
         return
     from .. import screen as screen_mod
 
-    ok, _, wait = feed.publish_gate(respect_schedule=False)
-    if not ok:
-        # платный пост наверху: публиковать нельзя — ставим в очередь, выйдет сама, как только защита кончится
-        cand["publish_at"] = time.time() + wait + 30
-        cand["status"] = "scheduled"
-        feed.save()
-        await answer_now(callback, f"Платный пост ещё {feed.human_wait(wait)} на топе — поставил в очередь на {_clock(cand['publish_at'])}", alert=True)
-        await _delete_card(callback.bot, cand)
-        await screen_mod.send_note(callback.bot, cand["chat_id"], f"⏰ Вакансия «{h(str(cand['data'].get('headline') or ''))}» выйдет в {_clock(cand['publish_at'])}: "
-                                   f"пока платный пост наверху ленты ({feed.human_wait(wait)}).", ttl=7200)
-        return
+    # 07.10: «Опубликовать сейчас» — сразу, без очереди (он сам решает; раньше при платном посте наверху вакансия уходила в очередь, а бот
+    # принимал за платные и его бесплатные посты). Про платный пост наверху — только предупреждение после публикации.
+    left = feed.hold_left()
     try:
         _, post_id = await publish_candidate(callback.bot, cand)
     except Exception as exc:
@@ -406,7 +409,8 @@ async def cb_publish(callback: CallbackQuery) -> None:
     await answer_now(callback, "Опубликовано ✅")
     await _delete_card(callback.bot, cand)
     link = _post_link(post_id)
-    await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+    warn = f"\n⚠️ Платный пост наверху был ещё {feed.human_wait(left)} — эта вакансия встала выше него." if left > 0 else ""
+    await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else "") + warn, ttl=60 if warn else 20)
 
 
 @router.callback_query(F.data.startswith("vf:fwd:"))
@@ -507,7 +511,8 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
         return out
     async with _busy:
         feed.ensure_favorites()
-        if feed.sources("approved"):
+        ready_now = manual and feed.next_card(datetime.now(feed.TZ), force=True) is not None   # «Следующая вакансия»: есть готовая — без чтения каналов
+        if feed.sources("approved") and not ready_now:
             if caller.user_client() is None:
                 out["note"] = "аккаунт JES не в сети"
             else:
@@ -525,7 +530,7 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
             feed.load()["last_discovery"] = time.time()  # сначала отметка: упадёт — не будем долбить каждые полчаса
             feed.save()
             _spawn(_discover_and_report(bot, owner))
-        cand = feed.next_card(now, ignore_hours=manual)
+        cand = feed.next_card(now, force=manual)
         if cand is not None:
             try:
                 out["card"] = await send_card(bot, owner, cand)
@@ -538,8 +543,8 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
 
 @router.callback_query(F.data == "vf:now")
 async def cb_now(callback: CallbackQuery) -> None:
-    await answer_now(callback, "Проверяю каналы…")
-    await safe_edit(callback, panel_text() + "\n\n⏳ Читаю каналы и оформляю вакансии — минуту…", None)
+    await answer_now(callback, "Ищу следующую вакансию…")
+    await safe_edit(callback, panel_text() + "\n\n⏳ Готовлю следующую вакансию и картинку — до минуты…", None)
     res = await tick(callback.bot, manual=True)
     pulled = res.get("pulled") or {}
     if res.get("note"):
@@ -547,7 +552,7 @@ async def cb_now(callback: CallbackQuery) -> None:
     elif not feed.sources("approved"):
         note = "Каналов в работе пока нет — нажми «Найти каналы»."
     else:
-        note = (f"Прочитано каналов: {pulled.get('sources', 0)} · в очередь добавлено: {pulled.get('queued', 0)} · "
-                f"отброшено: {pulled.get('rejected', 0)}" + (f" · карточка отправлена ниже" if res.get("card") else
-                                                              " · подходящих новых вакансий для карточки нет"))
+        read = (f"Прочитано каналов: {pulled.get('sources', 0)} · в очередь добавлено: {pulled.get('queued', 0)} · "
+                f"отброшено: {pulled.get('rejected', 0)} · ") if pulled else ""
+        note = read + ("карточка отправлена ниже" if res.get("card") else "подходящих новых вакансий для карточки нет")
     await _show_panel(callback, note)
