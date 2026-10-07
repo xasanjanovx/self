@@ -19,7 +19,7 @@ from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
 from .middlewares import AccessMiddleware, DedupeMiddleware, SecretsMiddleware, TidyMiddleware, global_error_handler
-from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, wake_worker
+from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, vacancy_feed_worker, wake_worker
 
 logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
@@ -124,6 +124,7 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(reminder_worker(bot), name="reminder-worker"))
     background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
     background_tasks.append(asyncio.create_task(wake_worker(bot), name="wake-worker"))
+    background_tasks.append(asyncio.create_task(vacancy_feed_worker(bot), name="vacancy-feed-worker"))
     try:
         from . import phone_api
 

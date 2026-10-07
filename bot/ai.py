@@ -1029,6 +1029,35 @@ class AIService:
         return (await self.generate([{"text": prompt}], temperature=temperature, json_mode=False, max_tokens=max_tokens)).strip()
 
     # ------------------------------------------------------------- vacancy
+    async def assess_vacancy(self, raw_text: str) -> dict[str, Any]:
+        """07.10: надёжна ли вакансия из чужого канала (автоподбор, bot/vacancy_feed.py). Дёшево: без размышлений.
+        Ответ — только факты из текста; решение «брать/нет» принимает код (vacancy_feed.judge)."""
+        prompt = (
+            "Ты проверяешь объявления для Telegram-канала вакансий Узбекистана. Прочитай текст (русский/узбекский) и ответь "
+            "ТОЛЬКО JSON, опираясь строго на текст, ничего не додумывай.\n"
+            '{"is_vacancy":true,"employer_type":"company|individual|agency|unknown","abroad":false,"pay_upfront":false,'
+            '"scam_signals":[],"salary":"amount|negotiable|none","has_conditions":false,"salary_unrealistic":false,'
+            '"contact_kind":"employer|admin_or_ad|none","reason":""}\n'
+            "- is_vacancy: это предложение работы от работодателя (не резюме, не курсы, не реклама услуг, не поиск работы).\n"
+            "- abroad: работа за пределами Узбекистана (Корея, Россия, Польша, ОАЭ, Турция, Казахстан и т.д.), вахта, виза, «через посредника».\n"
+            "- pay_upfront: кандидат должен что-то заплатить или вложить: залог, взнос, оплата оформления/обучения/формы, покупка товара, "
+            "платный курс.\n"
+            "- scam_signals: список признаков обмана: mlm, пирамида, крипта/форекс/ставки, аренда банковской карты/дропперство, "
+            "«быстрые деньги без усилий», фейковые гарантии. Пусто, если нет.\n"
+            "- salary: amount — названа сумма, диапазон или процент; negotiable — «по договорённости/по собеседованию/kelishiladi/suhbat asosida»; "
+            "none — оплата не упомянута вовсе.\n"
+            "- has_conditions: указаны график ИЛИ обязанности ИЛИ требования (хотя бы что-то конкретное о работе).\n"
+            "- salary_unrealistic: обещана нереальная для Узбекистана оплата без опыта (например $500+ в день, 20 млн сум в неделю новичку).\n"
+            "- contact_kind: employer — есть телефон или @ник работодателя/HR; admin_or_ad — контакт только админа канала/рекламы; none — контактов нет.\n"
+            "- reason: 3–8 слов по-русски: главное, что решило оценку.\n\n"
+            f"ТЕКСТ:\n{raw_text[:3500]}"
+        )
+        text = await self.generate([{"text": prompt}], temperature=0.1, json_mode=True, thinking_budget=0, max_tokens=500)
+        data = extract_json(text)
+        if not isinstance(data, dict):
+            raise ValueError("Vacancy assessment is not a JSON object")
+        return data
+
     async def rewrite_vacancy(self, raw_text: str, *, default_region_tag: str = "#TOSHKENT") -> VacancyData:
         prompt = (
             "Ты — редактор Telegram-канала вакансий по Узбекистану. Из сырого текста вакансии сделай "

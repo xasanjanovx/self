@@ -505,6 +505,22 @@ async def proactive_worker(bot: Bot) -> None:
         await asyncio.sleep(600)
 
 
+async def vacancy_feed_worker(bot: Bot) -> None:
+    """07.10: автоподбор вакансий — раз в 30 минут читаем одобренные каналы, раз в день-два показываем карточки владельцу."""
+    from .handlers import vacancy_feed as feed_ui
+
+    logger.info("Vacancy feed worker started")
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await feed_ui.tick(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Vacancy feed iteration failed")
+        await asyncio.sleep(1800)
+
+
 async def _daily_tick(bot: Bot) -> None:
     """Каждый день (29.09): в срок — «🔁 Урок английского» с кнопками [✅ Сделал] [⏭ Не сегодня] и, если есть ссылка или
     он смотрел YouTube, [▶️ Продолжить урок с 12:34] — ролик открывается с той секунды, где остановился."""
@@ -552,4 +568,4 @@ async def reminder_worker(bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
-__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker", "wake_worker"]
+__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker", "wake_worker", "vacancy_feed_worker"]

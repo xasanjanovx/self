@@ -751,8 +751,10 @@ def finance_add_confirm_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 # ------------------------------------------------------------------ vacancy
-def vacancy_panel_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[_back(lang)]])
+def vacancy_panel_keyboard(lang: str = "ru", *, feed: bool = False) -> InlineKeyboardMarkup:
+    """feed — владельцу показываем «Автоподбор» (вакансии из чужих каналов, bot/vacancy_feed.py)."""
+    rows = [[_btn("🤖 Автоподбор из каналов", "vf:panel", style="primary")]] if feed else []
+    return InlineKeyboardMarkup(inline_keyboard=rows + [[_back(lang)]])
 
 
 def vacancy_result_keyboard(

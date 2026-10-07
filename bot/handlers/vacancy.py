@@ -39,11 +39,14 @@ def panel_text(lang: str) -> str:
 async def open_panel(target: Message | CallbackQuery, state: FSMContext, profile: Profile) -> None:
     await state.set_state(BotStates.waiting_vacancy_input)
     await state.update_data(vacancy_post=None, vacancy_contact_url=None, vacancy_photo_id=None, vacancy_prompt=None)
+    from .. import access
+
+    kb = vacancy_panel_keyboard(profile.lang, feed=access.is_owner(profile.telegram_id))
     if isinstance(target, CallbackQuery):
         await remember_panel(target, state)
-        await safe_edit(target, panel_text(profile.lang), vacancy_panel_keyboard(profile.lang))
+        await safe_edit(target, panel_text(profile.lang), kb)
     else:
-        await show_panel(target, state, panel_text(profile.lang), vacancy_panel_keyboard(profile.lang))
+        await show_panel(target, state, panel_text(profile.lang), kb)
 
 
 @router.callback_query(F.data.in_({"menu:vacancy", "vacancy:again"}))

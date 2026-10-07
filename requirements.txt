@@ -10,3 +10,5 @@ sherpa-onnx==1.12.40
 numpy>=1.26
 # бесплатный голос Джарвиса (Microsoft Edge), bot/free_voice.py
 edge-tts==7.2.8
+# логотип на картинках вакансий, bot/image_gen.py
+Pillow>=10

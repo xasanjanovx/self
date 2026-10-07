@@ -42,6 +42,10 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-2.5-flash-preview-tts": {"text_in": 0.5, "audio_out": 10.0},
     "gemini-2.5-pro-preview-tts": {"text_in": 1.0, "audio_out": 20.0},
     "gemini-2.5-flash-lite": {"text_in": 0.1, "audio_in": 0.3, "image_in": 0.1, "text_out": 0.4},
+    # картинки (07.10): выход — токены картинки (~1100–1300 на кадр), вход — текст промпта. Цена выхода — оценка: ≈$0.07 за кадр
+    "gemini-nano-banana-2.1": {"text_in": 0.5, "image_in": 0.5, "text_out": 60.0},
+    "gemini-3.1-flash-image": {"text_in": 0.5, "image_in": 0.5, "text_out": 60.0},
+    "gemini-2.5-flash-image": {"text_in": 0.3, "image_in": 0.3, "text_out": 30.0},
     "gemini-2.5-flash": {"text_in": 0.3, "audio_in": 1.0, "image_in": 0.3, "text_out": 2.5},
     # Alibaba Model Studio, Сингапур (alibabacloud.com/help/en/model-studio/model-pricing) — отдельный счёт, не AI Studio
     "qwen3.8-omni-flash-realtime": {"text_in": 0.23, "audio_in": 0.93, "image_in": 0.23, "text_out": 0.70, "audio_out": 1.87},
@@ -398,7 +402,7 @@ def free_today() -> dict[str, Any]:
 # что как называется по-человечески — для отчёта «на что потрачено»
 KIND_NAMES = {"live": "живой голос (Gemini Live: телефон и звонки)", "agent": "чат-агент (сообщения боту, задачи из голоса)",
               "text": "короткие текстовые задачи", "stt": "распознавание голосовых", "tts": "озвучка фраз",
-              "voice": "голосовые ответы", "vision": "фото и камера"}
+              "voice": "голосовые ответы", "vision": "фото и камера", "image": "картинки к вакансиям (Nano Banana)"}
 SESSION_NAMES = {"phone": "JES на телефоне", "call": "звонки Telegram («позвони мне»)", "wake": "будильник (звонок на фаджр)",
                  "incoming": "он сам звонил JES в Telegram"}
 

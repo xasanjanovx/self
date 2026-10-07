@@ -36,6 +36,16 @@ def available() -> bool:
     return configured() and _import_error is None
 
 
+def user_client() -> Any | None:
+    """Telethon-клиент аккаунта JES, если уже подключён (07.10: читаем им публичные каналы с вакансиями — вступать не нужно).
+    Второй клиент на ту же сессию не создаём: Telegram разорвёт обе."""
+    client = _client
+    try:
+        return client if client is not None and client.is_connected() else None
+    except Exception:
+        return None
+
+
 def status() -> dict[str, Any]:
     return {"configured": configured(), "started": _calls is not None, "error": _import_error}
 
