@@ -370,9 +370,8 @@ def test_a_leftover_scheduled_vacancy_goes_out_when_protection_ends():
     cand.update({"status": "scheduled", "publish_at": time.time() + 7200})
     feed.note_manual_post(time.time() - 3600, 1)
     assert asyncio.run(ui.publish_due(bot)) == 0                                                   # рано
-    feed.load()["hold_until"] = 0.0                                                                # защита кончилась
-    cand["publish_at"] = time.time() - 1
-    assert asyncio.run(ui.publish_due(bot)) == 1
+    feed.load()["hold_until"] = 0.0                                                                # защита кончилась (или её сняли)
+    assert asyncio.run(ui.publish_due(bot)) == 1                                                   # назначенного времени уже не ждём
     assert [p["chat"] for p in bot.photos][-1] == CHANNEL and cand["status"] == "published"
     assert feed.hold_left() == 0 and feed.is_own(bot.photos[-1]["id"])                            # свой пост защиту не включает
 

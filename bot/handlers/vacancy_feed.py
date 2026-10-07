@@ -451,8 +451,8 @@ async def publish_due(bot: Bot) -> int:
 
     now = time.time()
     for cand in sorted(feed.candidates("scheduled"), key=lambda c: float(c.get("publish_at") or 0)):
-        if float(cand.get("publish_at") or 0) > now:
-            continue
+        if float(cand.get("publish_at") or 0) > now and feed.hold_left() > 0:
+            continue          # защита ещё идёт; если её уже нет (сняли или была ошибочной) — не ждём назначенного времени
         ok, _, wait = feed.publish_gate(respect_schedule=False)
         if not ok:
             cand["publish_at"] = now + wait + 30
