@@ -33,7 +33,14 @@ MAX_SOURCES_AUTO = 8             # столько каналов в работе
 _tasks: set[asyncio.Task] = set()
 _busy = asyncio.Lock()           # один круг за раз (кнопка «проверить сейчас» и воркер не наступают друг на друга)
 
-router.callback_query.filter(lambda c: bool(c.data) and c.data.startswith("vf:") and access.is_owner(c.from_user.id))
+
+
+def owner_filter(callback: CallbackQuery) -> bool:
+    """Все кнопки автоподбора («vf:…») — только у владельца; остальные нажатия сюда не попадают."""
+    return bool(callback.data) and callback.data.startswith("vf:") and access.is_owner(callback.from_user.id)
+
+
+router.callback_query.filter(owner_filter)
 
 
 def owner_id() -> int | None:
@@ -48,18 +55,31 @@ def _spawn(coro: Any) -> None:
 
 
 # ------------------------------------------------------------------ экран
+def guard_line() -> str:
+    left = feed.hold_left()
+    if left > 0:
+        return f"🛡 Платный пост наверху ленты: автоподбор молчит ещё {feed.human_wait(left)}"
+    return "🛡 Лента свободна: платного поста наверху нет"
+
+
 def panel_text() -> str:
     s = feed.status()
+    mode = "🤖 сам размещает" if feed.cfg("mode") == "auto" else "✋ с подтверждением (карточка)"
+    start, end = feed.window()
+    ads = feed.load()["ads_log"]
     lines = [
         "🤖 <b>Автоподбор вакансий</b>",
         "",
-        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · до {s['cap']} карточек в день",
+        f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'} · режим: {mode}",
         f"Каналы: {s['approved']} в работе · {s['pending']} ждут твоего решения",
-        f"Сегодня показано {s['today']} из {s['cap']} · в очереди {s['new']} · ждут ответа {s['carded']}",
+        f"Сегодня {s['today']} из {s['cap']} · окно {start:02d}:00–{end:02d}:00 · в очереди {s['new']} · ждут ответа {s['carded']}"
+        + (f" · отложено {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
+        guard_line(),
+        f"🚫 Реклама: фильтр {'включён' if feed.cfg('ads_on') else 'выключен'} · удалено {sum(1 for a in ads if a.get('deleted'))}",
         "",
         "JES читает одобренные каналы и отбрасывает ненадёжное: нет контакта работодателя, деньги вперёд, работа за границей, "
-        "нет зарплаты или условий. Остальное оформляет по шаблону канала, рисует картинку (Nano Banana 2.1 только через Vertex, логотип снизу слева) "
-        "и присылает карточку. В канал уходит только после «Опубликовать».",
+        "нет зарплаты или условий. Остальное оформляет по шаблону канала и рисует баннер (Nano Banana 2.1 только через Vertex, "
+        "дизайн каждый раз другой, логотип снизу слева).",
     ]
     if float(s["flood_until"] or 0) > time.time():
         lines += ["", f"⏳ Telegram просит JES подождать до {datetime.fromtimestamp(float(s['flood_until']), feed.TZ):%H:%M}."]
@@ -71,7 +91,8 @@ def panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("🔍 Найти каналы", "vf:find", style="primary"), _btn(f"📡 Каналы ({s['approved']}+{s['pending']})", "vf:srcs")],
         [_btn("🔄 Проверить сейчас", "vf:now")],
-        [_btn("⏸ Выключить" if s["enabled"] else "▶️ Включить", "vf:toggle"), _btn(f"📥 Лимит: {s['cap']} в день", "vf:cap")],
+        [_btn("⏸ Выключить" if s["enabled"] else "▶️ Включить", "vf:toggle"), _btn("⚙️ Настройки", "vf:cfg", style="primary")],
+        [_btn("🛡 Защита ленты и реклама", "vf:ads")],
         [_btn("⬅️ Назад", "menu:vacancy")],
     ])
 
@@ -247,7 +268,8 @@ async def _make_image(cand: dict[str, Any], *, again: bool = False) -> tuple[byt
     Дизайн каждый раз другой (vacancy.pick_design: по профессии, но не из последних); «Другая картинка» — ещё и другой дизайн."""
     data = feed.data_from_dict(cand["data"])
     recent = ([cand["design"]] if again and cand.get("design") else []) + feed.recent_designs()
-    design = vac.pick_design(data, cand.get("scene"), recent=recent, seed=f"{cand['id']}:{cand.get('regen', 0)}")
+    design = vac.pick_design(data, cand.get("scene"), recent=recent, seed=f"{cand['id']}:{cand.get('regen', 0)}",
+                             allowed=feed.allowed_designs())
     try:
         banner = await image_gen.vacancy_image(data, cand.get("scene"), design=design)
     except image_gen.ImageError as exc:
@@ -267,13 +289,14 @@ async def _make_image(cand: dict[str, Any], *, again: bool = False) -> tuple[byt
 
 async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate: bool = False) -> None:
     """Карточка вакансии владельцу. Картинка рисуется здесь (только для тех, кого показываем — деньги не тратим зря)."""
-    image = None if regenerate else _read_image(cand["id"])
+    images_on = bool(feed.cfg("images"))
+    image = None if (regenerate or not images_on) else _read_image(cand["id"])
     warning = cand.get("image_warning") if image else None
-    if image is None:
+    if image is None and images_on:
         image, warning = await _make_image(cand, again=regenerate)
         cand["image_warning"] = warning
     post, contact_url = _post_html(cand, bool(feed.load().get("premium")))
-    shown = post if image else post + '\n\n' + "⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."
+    shown = post if (image or not images_on) else post + '\n\n' + "⚠️ Картинка не получилась — можно опубликовать без неё или нажать «Другая картинка»."
     head = f"📥 {h(str(cand['data'].get('headline') or 'Вакансия'))} · из @{cand['source']}"
     ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url), head=head)
     cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image)})
@@ -294,33 +317,145 @@ async def _delete_card(bot: Bot, cand: dict[str, Any]) -> None:
     cand["card_ids"] = []
 
 
+async def publish_candidate(bot: Bot, cand: dict[str, Any], *, premium: bool) -> tuple[list[int], int]:
+    """Опубликовать вакансию в канал (фото + пост). Свои сообщения записываем — чужими (ручными) их считать нельзя.
+    → (id сообщений в канале, id поста). Бросает исключение, если Telegram отказал."""
+    post, contact_url = _post_html(cand, premium)
+    image: bytes | str | None = None
+    if feed.cfg("images"):
+        image = cand.get("file_id") or _read_image(cand["id"])
+    ids, _, post_id = await _send_post(bot, settings.vacancy_channel, post, image, vacancy_channel_keyboard("uz", contact_url))
+    feed.mark_own(ids)
+    feed.note_feed_post()
+    feed.mark_handled(cand, "published")
+    undo = feed.load().setdefault("undo", {})
+    undo[cand["id"]] = {"ids": ids, "ts": time.time()}
+    for old in sorted(undo, key=lambda k: undo[k]["ts"])[:-20]:
+        undo.pop(old)
+    feed.save()
+    return ids, post_id
+
+
+def _post_link(post_id: int) -> str:
+    channel = str(settings.vacancy_channel or "")
+    return f"https://t.me/{channel.lstrip('@')}/{post_id}" if channel.startswith("@") else ""
+
+
+def _clock(ts: float) -> str:
+    return datetime.fromtimestamp(ts, feed.TZ).strftime("%H:%M")
+
+
 @router.callback_query(F.data.startswith("vf:pub:"))
 async def cb_publish(callback: CallbackQuery) -> None:
     cand = feed.get_candidate(callback.data.split(":", 2)[2])
-    if cand is None or cand.get("status") == "published":
-        await answer_now(callback, "Эта вакансия уже обработана", alert=True)
+    if cand is None or cand.get("status") in {"published", "scheduled"}:
+        await answer_now(callback, "Эта вакансия уже обработана или стоит в очереди", alert=True)
         return
-    channel = settings.vacancy_channel
-    if not channel:
+    if not settings.vacancy_channel:
         await answer_now(callback, "Канал не настроен (VACANCY_CHANNEL)", alert=True)
         return
     premium = bool(getattr(callback.from_user, "is_premium", False))
     feed.remember_premium(premium)
-    post, contact_url = _post_html(cand, premium)
-    image: bytes | str | None = cand.get("file_id") or _read_image(cand["id"])
+    from .. import screen as screen_mod
+
+    ok, _, wait = feed.publish_gate(respect_schedule=False)
+    if not ok:
+        # платный пост наверху: публиковать нельзя — ставим в очередь, выйдет сама, как только защита кончится
+        cand["publish_at"] = time.time() + wait + 30
+        cand["status"] = "scheduled"
+        feed.save()
+        await answer_now(callback, f"Платный пост ещё {feed.human_wait(wait)} на топе — поставил в очередь на {_clock(cand['publish_at'])}", alert=True)
+        await _delete_card(callback.bot, cand)
+        await screen_mod.send_note(callback.bot, cand["chat_id"], f"⏰ Вакансия «{h(str(cand['data'].get('headline') or ''))}» выйдет в {_clock(cand['publish_at'])}: "
+                                   f"пока платный пост наверху ленты ({feed.human_wait(wait)}).", ttl=7200)
+        return
     try:
-        _, _, post_id = await _send_post(callback.bot, channel, post, image, vacancy_channel_keyboard("uz", contact_url))
+        _, post_id = await publish_candidate(callback.bot, cand, premium=premium)
     except Exception as exc:
         logger.exception("vacancy_feed: публикация %s не вышла", cand["id"])
         await answer_now(callback, f"Не вышло: {str(exc)[:150]}", alert=True)
         return
     await answer_now(callback, "Опубликовано ✅")
     await _delete_card(callback.bot, cand)
-    feed.mark_handled(cand, "published")
-    link = f"https://t.me/{channel.lstrip('@')}/{post_id}" if str(channel).startswith("@") else ""
+    link = _post_link(post_id)
+    await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+
+
+async def publish_due(bot: Bot) -> int:
+    """Отложенные (пока был платный пост наверху) — публикуем, когда защита кончилась. По одной за раз: между постами интервал."""
+    if not settings.vacancy_channel:
+        return 0
     from .. import screen as screen_mod
 
-    await screen_mod.send_note(callback.bot, cand["chat_id"], "✅ Опубликовано в канал" + (f": {link}" if link else ""), ttl=20)
+    now = time.time()
+    for cand in sorted(feed.candidates("scheduled"), key=lambda c: float(c.get("publish_at") or 0)):
+        if float(cand.get("publish_at") or 0) > now:
+            continue
+        ok, _, wait = feed.publish_gate(respect_schedule=False)
+        if not ok:
+            cand["publish_at"] = now + wait + 30
+            feed.save()
+            continue
+        try:
+            _, post_id = await publish_candidate(bot, cand, premium=bool(feed.load().get("premium")))
+        except Exception:
+            logger.exception("vacancy_feed: отложенная публикация %s не вышла", cand["id"])
+            cand["publish_at"] = now + 600
+            feed.save()
+            continue
+        owner = owner_id()
+        if owner is not None:
+            link = _post_link(post_id)
+            await screen_mod.send_note(bot, owner, "⏰ Опубликовал отложенную вакансию" + (f": {link}" if link else ""), ttl=3600)
+        return 1
+    return 0
+
+
+async def auto_publish(bot: Bot, owner: int, cand: dict[str, Any]) -> bool:
+    """Режим «сам размещает»: картинка → публикация → заметка с кнопкой «Удалить пост». Картинка не вышла или не прошла проверку —
+    сами не публикуем, а спрашиваем карточкой (лучше спросить, чем выпустить неточный баннер). True — опубликовано."""
+    from .. import screen as screen_mod
+
+    if not settings.vacancy_channel:
+        return False
+    if feed.cfg("images"):
+        image, warning = await _make_image(cand)
+        cand["image_warning"] = warning
+        if image is None or warning:
+            await send_card(bot, owner, cand)
+            return False
+    try:
+        _, post_id = await publish_candidate(bot, cand, premium=bool(feed.load().get("premium")))
+    except Exception:
+        logger.exception("vacancy_feed: автопубликация %s не вышла", cand["id"])
+        return False
+    feed.note_card_sent()
+    link = _post_link(post_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[_btn("🗑 Удалить пост из канала", f"vf:undo:{cand['id']}")]])
+    await screen_mod.send_note(bot, owner, f"🤖 Опубликовал вакансию «{h(str(cand['data'].get('headline') or ''))}» из @{cand['source']}"
+                               + (f": {link}" if link else ""), kb, ttl=6 * 3600, sticky=True)
+    return True
+
+
+@router.callback_query(F.data.startswith("vf:undo:"))
+async def cb_undo(callback: CallbackQuery) -> None:
+    entry = feed.load().get("undo", {}).pop(callback.data.split(":", 2)[2], None)
+    if not entry:
+        await answer_now(callback, "Этот пост уже нельзя удалить из бота", alert=True)
+        return
+    gone = 0
+    for mid in entry["ids"]:
+        try:
+            await callback.bot.delete_message(settings.vacancy_channel, mid)
+            gone += 1
+        except Exception:
+            logger.warning("vacancy_feed: не удалил пост %s", mid, exc_info=True)
+    feed.save()
+    await answer_now(callback, "Удалил из канала" if gone else "Не получилось удалить", alert=not gone)
+    try:
+        await callback.message.edit_text("🗑 Пост удалён из канала." if gone else "⚠️ Не смог удалить пост — проверь права бота в канале.", reply_markup=None)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("vf:skip:"))
@@ -370,7 +505,7 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
                     out["note"] = str(exc)
         feed.cleanup()
         now = datetime.now(feed.TZ)
-        in_hours = feed.SEND_FROM <= now.hour < feed.SEND_TO
+        in_hours = feed.in_window(now)
         discovery_due = (not manual and in_hours and caller.user_client() is not None
                          and len(feed.sources("approved")) < MAX_SOURCES_AUTO and len(feed.sources("pending")) < 6
                          and time.time() - float(feed.load().get("last_discovery") or 0) > DISCOVERY_EVERY_S)
@@ -381,10 +516,14 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
         cand = feed.next_card(now, ignore_hours=manual)
         if cand is not None:
             try:
-                await send_card(bot, owner, cand)
-                out["card"] = True
+                if feed.cfg("mode") == "auto" and not manual:
+                    if feed.publish_gate(now)[0]:
+                        out["card"] = await auto_publish(bot, owner, cand)
+                else:
+                    await send_card(bot, owner, cand)
+                    out["card"] = True
             except Exception:
-                logger.exception("vacancy_feed: карточка %s не отправилась", cand["id"])
+                logger.exception("vacancy_feed: вакансия %s не отправилась", cand["id"])
     return out
 
 

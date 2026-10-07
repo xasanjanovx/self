@@ -9,6 +9,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from .. import access
 from .. import emoji as pe
 from .. import finance as fin
 from .. import nutrition as nutri
@@ -362,7 +363,7 @@ async def handle_text(
 
         if looks_like_command(raw_text) and await handle_command(message, state, profile, raw_text):
             return
-    if reroute and (fin.looks_like_finance(raw_text) or vac.looks_like_vacancy(raw_text)):
+    if reroute and (fin.looks_like_finance(raw_text) or (vac.looks_like_vacancy(raw_text) and access.is_owner(profile.telegram_id))):
         from .inbox import route_text  # локальный импорт: избегаем цикла
 
         if await route_text(message, state, profile, raw_text, transcript=transcript, skip_food=True):
@@ -407,7 +408,7 @@ async def handle_voice(message: Message, state: FSMContext, profile: Profile, tr
 async def msg_input_photo(message: Message, state: FSMContext) -> None:
     profile = await get_profile(message.from_user)
     caption = message_text(message)
-    if caption and vac.looks_like_vacancy(caption):
+    if caption and vac.looks_like_vacancy(caption) and access.is_owner(profile.telegram_id):
         from .vacancy import process_vacancy
 
         await process_vacancy(message, state, profile, caption)

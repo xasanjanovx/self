@@ -418,8 +418,191 @@ DESIGNS: list[dict] = [
                    "contact line at the bottom-right with a vermilion underline; the age badge as a vermilion circle."),
         "photo": ("A natural lifestyle portrait in soft daylight, a relaxed smile, the working environment gently blurred."),
     },
+    {
+        "id": "sky_clean",
+        "fit": ("kassir", "operator", "administrator", "qabulxona", "оператор", "кассир", "секретар", "kotib"),
+        "style": ("Light airy sky-blue (#2E9BFF) and white palette, friendly corporate look; soft cloud-like gradients and gentle shadows; deep navy "
+                  "(#0B2A5B) headline with the second line in sky blue; rounded geometric sans; light rounded cards with thin blue outlines."),
+        "layout": ("A white-to-sky-blue gradient background; headline top-left; the photo of the person on the right inside a soft rounded "
+                   "rectangle with a pale blue shadow; the info cards as white rounded cards with blue circular icons; the contact as a solid "
+                   "blue rounded bar at the bottom of the text column."),
+        "photo": "A cheerful professional in a bright modern office, soft daylight, clean and friendly.",
+    },
+    {
+        "id": "orange_black_bold",
+        "fit": ("haydovchi", "kuryer", "yuk", "dispetcher", "logist", "водител", "курьер", "логист", "ekspeditor"),
+        "style": ("Black background with a bold ORANGE (#FF6A00) accent and diagonal hazard-like stripes; sporty, energetic; white text; heavy "
+                  "condensed italic headline; sharp slanted label shapes; subtle speed lines."),
+        "layout": ("The headline huge at the top-left in white with the second line in orange; slanted orange label for the pill; the salary in a "
+                   "slanted black card with an orange outline; schedule and location as compact rows; the photo of the person bursting out of the "
+                   "right side, overlapping a diagonal orange stripe; the contact card at the bottom-right."),
+        "photo": "A dynamic worker in action with a vehicle or cargo, strong side light, motion feeling.",
+    },
+    {
+        "id": "teal_dark_gradient",
+        "fit": ("marketing", "smm", "dizayner", "дизайн", "reklama xodimi", "kontent"),
+        "style": ("Dark teal (#052B2F) to near-black gradient with fresh MINT (#3CF2C0) accents and soft glows; modern, calm and confident; white "
+                  "text; clean rounded sans; glass cards with mint hairlines."),
+        "layout": ("Text on the left over the dark teal gradient; the photo on the right fading into the gradient with a mint rim light; the "
+                   "headline in white with a mint second line; the pill as a mint outlined capsule; two glass info cards; the contact card with "
+                   "mint icons at the bottom-right."),
+        "photo": "A relaxed smiling creative professional with a laptop in a stylish studio, teal and warm accent lights.",
+    },
+    {
+        "id": "rose_beauty",
+        "fit": ("go'zallik", "salon", "sartarosh", "ustoz", "manikyur", "kosmetolog", "парикмах", "маникюр", "косметолог", "stilist", "massaj"),
+        "style": ("Soft blush pink (#FFD6E0) and rose-gold (#C9847A) with warm cream highlights; elegant and feminine; deep plum (#4A1942) "
+                  "headline; a refined sans with a touch of script for the pill; soft glow, petals or sparkles, rounded cards with rose-gold outlines."),
+        "layout": ("A pastel gradient background; the headline top-left in plum with the second line in rose-gold; the photo on the right inside a "
+                   "tall rounded arch with a soft glow; info cards as white frosted cards with rose-gold icons; the contact as a rose-gold pill "
+                   "at the bottom-right."),
+        "photo": "A smiling stylish person in a bright beauty salon, soft flattering light, shallow depth of field.",
+    },
+    {
+        "id": "forest_natural",
+        "fit": ("fermer", "dehqon", "bog'bon", "issiqxona", "qishloq", "agro", "ферм", "агроном", "chorvachilik", "paxta", "sut"),
+        "style": ("Natural deep forest-green (#14532D) and fresh leaf-green (#7BD35B) with warm earthy beige; organic and trustworthy; cream "
+                  "(#F7F1E1) text and headline with a leaf-green second line; subtle leaf and grain textures; rounded cards."),
+        "layout": ("Text on the left over a textured dark-green panel; the photo on the right with an organic wavy edge; info cards as cream "
+                   "rounded cards with green line icons; the contact in a leaf-green rounded bar bottom-right."),
+        "photo": "A smiling farm or greenhouse worker outdoors in golden light with crops or fresh produce behind.",
+    },
+    {
+        "id": "royal_blue_gold",
+        "fit": ("xavfsizlik", "qo'riqchi", "guard", "охран", "inspektor", "nazoratchi", "yurist", "advokat", "юрист", "kuzatuvchi"),
+        "style": ("Deep ROYAL BLUE (#0A1F5C) with gold (#D4AF37) details; premium, trustworthy, authoritative; white text; a classic strong sans "
+                  "headline; subtle shield / geometric watermark; fine gold lines and corner ornaments."),
+        "layout": ("A centred-left composition: headline top-left in white with a gold second line; the photo on the right in a gold-outlined "
+                   "frame; the info as three equal navy cards with gold icons in a row under the headline; the contact card with a gold border at "
+                   "the bottom-right."),
+        "photo": "A confident, calm professional in a smart uniform or suit, upright posture, serious but friendly look.",
+    },
+    {
+        "id": "mono_red_accent",
+        "fit": (),
+        "style": ("Strict monochrome: pure black and off-white with ONE vivid red (#FF2D2D) accent; large high-contrast grotesque typography; "
+                  "thin rules and grid lines; a stark modern fashion-editorial mood; no gradients except a soft shadow."),
+        "layout": ("A bold half-and-half split: the left half off-white with the huge black headline (second line in red) and the details in a clean "
+                   "grid with thin rules; the right half a grayscale photo of the person with a red circle accent behind; the contact as a black bar "
+                   "with white text and a red icon."),
+        "photo": "A striking black-and-white portrait of a confident person, grainy editorial look, with a small red detail.",
+    },
+    {
+        "id": "lime_sport_dark",
+        "fit": ("sport", "murabbiy", "fitnes", "trener", "тренер", "фитнес", "zal", "basseyn", "uchuvchi"),
+        "style": ("Charcoal-black with electric LIME (#C6FF00) stripes and angular shapes; athletic, high-energy; white text; wide extended "
+                  "italic headline; motion lines and subtle halftone texture."),
+        "layout": ("Angular lime stripes cut across the left side; the headline in white with a lime second line; the salary card as a lime-outlined "
+                   "angular box; the photo of the athlete on the right cut by a diagonal edge; the contact on a lime angular tab at the bottom-right."),
+        "photo": "A fit energetic person in sportswear mid-motion in a gym or stadium, dramatic rim light.",
+    },
+    {
+        "id": "sand_craft",
+        "fit": ("duradgor", "mebel", "stolyar", "bichuvchi", "tikuvchi", "usta", "plotnik", "мебель", "столяр", "швея", "pazanda", "non"),
+        "style": ("Warm sand-beige (#E9D8BD) with terracotta (#C2562E) and dark brown (#3B2A20); handcrafted, honest, cosy; brown headline with a "
+                  "terracotta second line; a sturdy slab-like sans; paper texture, stitched or wood-grain details."),
+        "layout": ("A textured beige background; headline top-left; the photo on the right as a slightly rotated print with a tape piece; info as "
+                   "kraft-paper tags with brown line icons; the contact on a terracotta rounded label at the bottom-right."),
+        "photo": "A proud craftsman or seamstress at work in a warm workshop, golden light, hands in focus.",
+    },
+    {
+        "id": "mint_pharma",
+        "fit": ("farmatsevt", "dorixona", "provizor", "laborant", "фармацевт", "аптек", "hamshira", "tibbiy"),
+        "style": ("Fresh MINT (#BFF2DF) and white with a calm medical green (#1FA37A) accent and deep slate text; clean, caring, hygienic; soft "
+                  "rounded shapes, tiny cross and leaf motifs; light cards with soft shadows."),
+        "layout": ("The left 55% a white panel with soft rounded corners over a mint background; the headline in slate with a green second line; "
+                   "info cards as white pills with green icon circles; the photo on the right in a big rounded square; the contact in a green bar "
+                   "under the photo."),
+        "photo": "A kind smiling healthcare or pharmacy worker in a neat uniform in a bright clean interior.",
+    },
+    {
+        "id": "crimson_guard",
+        "fit": ("qorovul", "navbatchi", "guard", "ombor", "omborchi", "sklad", "склад", "kassa nazorat"),
+        "style": ("Dark graphite with deep CRIMSON (#B00020) and silver details; firm, disciplined; white text; a compact bold condensed headline; "
+                  "brushed-metal textures and thin red lines."),
+        "layout": ("A strong vertical red bar on the left edge; headline top-left in white with a crimson second line; info in silver-outlined dark "
+                   "cards; the photo on the right in a metal-framed panel; the contact card with a red icon at the bottom-right."),
+        "photo": "A calm reliable worker in a uniform in a warehouse or entrance hall, cool light with a red accent.",
+    },
+    {
+        "id": "swiss_yellow_blue",
+        "fit": ("sotuvchi", "kassir", "savdo zali", "supermarket", "market", "магазин", "продавец", "merchandayzer", "tovar"),
+        "style": ("Flat Scandinavian-retail look: bold YELLOW (#FFDA00) and ROYAL BLUE (#0057B8) blocks with white; large friendly rounded sans; "
+                  "geometric flat shapes, no gradients, clear iconography."),
+        "layout": ("A blue left panel with the white headline (second line in yellow) and details in yellow-outlined blue cards; a yellow right "
+                   "panel with the cut-out person standing; the contact on a white pill with a blue icon at the bottom of the yellow panel."),
+        "photo": "A cheerful retail employee in a branded-looking uniform, cut out cleanly, welcoming open posture.",
+    },
+    {
+        "id": "holo_fresh",
+        "fit": ("smm", "tiktok", "blogger", "kontent", "kreator", "контент", "stajyor", "praktikant", "talaba"),
+        "style": ("Trendy pastel holographic gradient (lilac #C9B6FF, peach #FFC9B0, mint #B6F2E0) with white glass shapes and sparkles; youthful "
+                  "social-media aesthetic; dark violet (#2A1B5C) headline; rounded bubbly sans; sticker-like elements."),
+        "layout": ("A soft holographic backdrop; the headline top-left in dark violet with a coloured gradient second line; the photo of the person "
+                   "cut out on the right with a white sticker outline over a big blob shape; info as frosted white bubble cards with sparkle icons; "
+                   "the contact as a white pill at the bottom-right."),
+        "photo": "A young smiling person with a phone, trendy casual outfit, playful pose, cut-out sticker style.",
+    },
+    {
+        "id": "blueprint_engineer",
+        "fit": ("muhandis", "texnolog", "injener", "инженер", "texnik", "konstruktor", "electronik", "dasturchi", "mexanik", "tokar"),
+        "style": ("Deep blueprint blue (#0B3A6E) with a fine white drawing grid and technical line-art (gears, wrenches, circuits) in white and "
+                  "cyan; precise, technical; white monospace-like labels for small text and a bold condensed headline with a cyan second line."),
+        "layout": ("Technical-drawing frame lines around the poster; headline top-left; info as boxes with dimension-line style arrows; the photo "
+                   "of the engineer on the right in a thin white frame overlapping line-art; the contact in a bordered label box bottom-right."),
+        "photo": "A focused smiling engineer or technician in a modern workshop holding a tablet or tool, cool light.",
+    },
+    {
+        "id": "neon_night",
+        "fit": ("kechki", "tungi", "ночн", "kurer kechki", "barmen", "bar", "klub", "dj", "ofitsiant kechki"),
+        "style": ("Night-city cyberpunk: black with neon MAGENTA (#FF2BD6) and CYAN (#18E2FF) glows, wet-street reflections and bokeh lights; "
+                  "white text with subtle neon outlines; bold futuristic sans headline."),
+        "layout": ("The photo of the person fills the right and centre with neon rim lights; the text on the left over a dark gradient; the headline "
+                   "with a magenta-cyan gradient on the second line; info as dark glass cards with neon outlines; the contact in a glowing neon "
+                   "outlined pill at the bottom-right."),
+        "photo": "A confident person at night in a neon-lit city or bar setting, cinematic colour contrast, shallow depth of field.",
+    },
+    {
+        "id": "golden_hour_photo",
+        "fit": (),
+        "style": ("A full-bleed warm golden-hour photograph as the entire background with a soft dark vignette on the left for legibility; big "
+                  "white headline with a golden second line; clean sans; minimal frosted cards."),
+        "layout": ("The photo covers the whole poster; a dark-to-transparent gradient from the left carries the text: headline, pill, two frosted "
+                   "info cards, location; the contact card frosted at the bottom-right; nothing boxed on the right so the person stays visible."),
+        "photo": "A cinematic photo of the person at the workplace in warm low sun, rim-lit hair, lens flare, shallow depth of field.",
+    },
+    {
+        "id": "diagonal_duo",
+        "fit": (),
+        "style": ("A confident two-tone design: white and one strong brand colour split by a big diagonal (choose a vivid tomato red or a deep "
+                  "cobalt blue); black and white typography with the colour as accent; geometric sans; crisp shadows."),
+        "layout": ("The diagonal cuts the poster from the top-centre to the bottom-right: the white side carries the headline (second line in the "
+                   "colour), the pill and the info rows; the coloured side carries the cut-out person overlapping the diagonal; the contact on a "
+                   "black rounded bar at the bottom of the white side, right of the reserved corner."),
+        "photo": "A smiling person cut out with a clean white outline, hands relaxed, standing at an angle toward the camera.",
+    },
+    {
+        "id": "paper_collage",
+        "fit": ("stajyor", "praktikant", "boshlovchi", "yoshlar", "talaba", "promouter", "targ'ibotchi", "animator", "stajer"),
+        "style": ("Playful paper-cut collage: bright colours (tomato, sunshine yellow, teal, pink) on a cream background with torn paper edges, "
+                  "doodled arrows and stars, halftone dots and stickers; chunky friendly display type."),
+        "layout": ("The headline on a torn yellow paper strip top-left, the second line on a teal strip; the photo cut out of paper on the right with a "
+                   "white border and a shadow; info as sticky-note cards with doodled icons; the contact on a pink torn label at the bottom-right."),
+        "photo": "A joyful young person in a casual outfit, laughing, cut out like a paper sticker with a white border.",
+    },
 ]
 _DESIGN_BY_ID = {d["id"]: d for d in DESIGNS}
+
+DESIGN_LABELS = {
+    "gold_black": "Чёрный + золото", "fastfood_red": "Фастфуд красный/жёлтый", "neon_green": "Неон-зелёный", "clean_teal": "Бирюзово-белый (клиника)",
+    "worker_left_dark": "Тёмный industrial", "red_white_bold": "Бело-красный", "navy_cyan_tech": "Синий tech", "sunset_orange": "Закат оранжево-розовый",
+    "emerald_cream": "Изумруд + крем", "purple_glass": "Фиолетовое стекло", "yellow_pop": "Жёлтый pop", "editorial_light": "Светлый editorial",
+    "sky_clean": "Голубой светлый", "orange_black_bold": "Чёрный + оранжевый", "teal_dark_gradient": "Тёмная бирюза + мята", "rose_beauty": "Розовый beauty",
+    "forest_natural": "Лесной зелёный", "royal_blue_gold": "Королевский синий + золото", "mono_red_accent": "Монохром + красный", "lime_sport_dark": "Спорт лайм",
+    "sand_craft": "Песочный крафт", "mint_pharma": "Мятный фарма", "crimson_guard": "Тёмно-красный охрана", "swiss_yellow_blue": "Жёлто-синий ритейл",
+    "holo_fresh": "Голографический", "blueprint_engineer": "Синий чертёж", "neon_night": "Ночной неон", "golden_hour_photo": "Фото золотой час",
+    "diagonal_duo": "Диагональ два цвета", "paper_collage": "Бумажный коллаж",
+}
 RECENT_AVOID = 6                  # столько последних дизайнов не повторяем
 
 
@@ -427,16 +610,18 @@ def _plain(text: str) -> str:
     return text.lower().replace("ʻ", "'").replace("‘", "'").replace("’", "'").replace("ё", "е")
 
 
-def pick_design(data: VacancyData, scene: str | None = None, *, recent: tuple[str, ...] | list[str] = (), seed: str = "") -> dict:
+def pick_design(data: VacancyData, scene: str | None = None, *, recent: tuple[str, ...] | list[str] = (), seed: str = "",
+                allowed: set[str] | list[str] | None = None) -> dict:
     """Дизайн постера: сначала по профессии (fit), но не из последних RECENT_AVOID; нет подходящих — любой из «давно не было».
     seed делает выбор воспроизводимым (id вакансии + номер перерисовки), а перерисовка получает другой дизайн."""
     import hashlib
 
     text = _plain(" ".join(filter(None, [data.headline, data.company, scene])))
     recent = list(recent)
-    fresh = [d for d in DESIGNS if d["id"] not in recent[:RECENT_AVOID]]
+    pool_all = [d for d in DESIGNS if allowed is None or d["id"] in allowed] or DESIGNS      # выключенные в настройках не берём
+    fresh = [d for d in pool_all if d["id"] not in recent[:RECENT_AVOID]]
     fitting = [d for d in fresh if any(word in text for word in d["fit"])]
-    pool = fitting or fresh or [d for d in DESIGNS if d["id"] != (recent[0] if recent else "")] or DESIGNS
+    pool = fitting or fresh or [d for d in pool_all if d["id"] != (recent[0] if recent else "")] or pool_all
     return pool[int(hashlib.sha1(seed.encode("utf-8")).hexdigest(), 16) % len(pool)]
 
 

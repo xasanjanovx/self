@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from . import agent, analytics, assistant, bank, daily, plan, finance, finance_extra, inbox, members, membership, menu, nutrition, screentime, settings, vacancy, vacancy_feed, wake
+from . import agent, analytics, assistant, bank, channel, daily, plan, finance, finance_extra, inbox, members, membership, menu, nutrition, screentime, settings, vacancy, vacancy_feed, vacancy_settings, wake
 
 
 def build_router() -> Router:
@@ -20,6 +20,8 @@ def build_router() -> Router:
     root.include_router(agent.router)
     root.include_router(vacancy.router)
     root.include_router(vacancy_feed.router)  # 07.10: автоподбор вакансий из чужих каналов (только владелец)
+    root.include_router(vacancy_settings.router)  # 07.10: настройки, дизайны, защита ленты и реклама (только владелец)
+    root.include_router(channel.router)  # 07.10: посты канала → охрана ленты (реклама #reklama, платный пост наверху)
     root.include_router(analytics.router)
     root.include_router(bank.router)  # 28.09: «Записать трату из SMS банка?» (до inbox — он последний)
     root.include_router(daily.router)  # 29.09: кнопки «каждый день»

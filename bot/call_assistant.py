@@ -221,7 +221,9 @@ async def show_home(profile: Profile, notice: str | None = None, *, undo: bool =
         text = await build_dashboard(profile)
         if notice:
             text += f"\n\n{notice}"
-        kb = main_menu_keyboard(profile.lang, undo=undo)
+        from . import access
+
+        kb = main_menu_keyboard(profile.lang, undo=undo, owner=access.is_owner(profile.telegram_id))
         if helper_button and caller.helper_id:
             # открыть профиль аккаунта Джарвиса → «Добавить в контакты» (без номера телефона)
             button = _btn("👤 " + profile.tr("Аккаунт JES", "JES akkaunti"), url=f"tg://user?id={caller.helper_id}")

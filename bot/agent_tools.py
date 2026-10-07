@@ -1062,6 +1062,11 @@ async def _hand_off(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     module = (_str(a.get("module")) or "").lower()
     if module not in {"finance", "food", "vacancy"}:
         return {"error": "module must be finance | food | vacancy"}
+    if module == "vacancy":
+        from . import access
+
+        if not access.is_owner(ctx.uid):                      # 07.10: раздел вакансий — только у владельца
+            return {"error": "раздел вакансий недоступен этому пользователю — отвечай как на обычный текст"}
     ctx.handoff = (module, _str(a.get("text")) or ctx.text)
     return {"ok": True, "handed_off_to": module}
 

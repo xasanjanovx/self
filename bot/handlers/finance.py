@@ -11,6 +11,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
+from .. import access
 from .. import categories as cats
 from .. import cache
 from .. import charts as charts_mod
@@ -490,7 +491,7 @@ async def msg_input_photo(message: Message, state: FSMContext) -> None:
     # фото в разделе финансов = чек/квитанция (подпись-вакансия — исключение)
     profile = await get_profile(message.from_user)
     caption = (message.caption or "").strip()
-    if caption and vac.looks_like_vacancy(caption):
+    if caption and vac.looks_like_vacancy(caption) and access.is_owner(profile.telegram_id):
         from .vacancy import process_vacancy
 
         await process_vacancy(message, state, profile, caption)

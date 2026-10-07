@@ -91,10 +91,12 @@ async def route_text(
         # цифры из ссылки не должны уходить в разбор трат/еды
         if await agent.handle_command(message, state, profile, text, voice=voice):
             return True
-    if agent.looks_like_command(text) and not vac.looks_like_vacancy(text):
+    # 07.10: раздел вакансий — только у владельца; у остальных текст про вакансию — обычный текст
+    owner_vacancy = vac.looks_like_vacancy(text) and access.is_owner(profile.telegram_id)
+    if agent.looks_like_command(text) and not owner_vacancy:
         if await agent.handle_command(message, state, profile, text, voice=voice):
             return True
-    if vac.looks_like_vacancy(text):
+    if owner_vacancy:
         await vacancy_h.process_vacancy(message, state, profile, text)
         return True
     # Быстрые пути — только когда локальные правила разбирают фразу сами (мгновенно и без ошибок роутинга).
@@ -118,7 +120,7 @@ async def handle_photo_message(message: Message, state: FSMContext, profile: Pro
     Раньше любое фото считалось едой: пообещал JES «пришли фото челленджа — отмечу», а фото ушло
     в калории. Теперь JES видит фото сам, если есть договорённость, подпись-просьба или на фото не еда."""
     caption = message_text(message)
-    if caption and vac.looks_like_vacancy(caption):
+    if caption and vac.looks_like_vacancy(caption) and access.is_owner(profile.telegram_id):
         await vacancy_h.process_vacancy(message, state, profile, caption)
         return
     await show_progress(message, profile.tr("⏳ Смотрю фото…", "⏳ Rasmni ko'ryapman…"))

@@ -212,7 +212,8 @@ def _back(lang: str, target: str = "menu:open") -> InlineKeyboardButton:
 
 
 # ------------------------------------------------------------------ main
-def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboardMarkup:
+def main_menu_keyboard(lang: str = "ru", *, undo: bool = False, owner: bool = False) -> InlineKeyboardMarkup:
+    """owner — только владелец видит кнопку «Вакансии» (07.10: раздел вакансий — только у админа бота)."""
     P = "primary"
     undo_rows = [[_btn("↩️ " + ("Bekor qilish" if lang == "uz" else "Отменить запись"), "agent:undo", icon=_pe.id_for("🔄"))]] if undo else []
     return InlineKeyboardMarkup(
@@ -233,7 +234,7 @@ def main_menu_keyboard(lang: str = "ru", *, undo: bool = False) -> InlineKeyboar
                 _btn(t(lang, "menu_settings"), "menu:settings", style="danger", icon=_pe.ID_SETTINGS),  # 27.09: красная — синий и зелёный уже заняты
                 _btn(t(lang, "menu_analytics"), "menu:dashboard", style="success", icon=_pe.ID_ANALYTICS),
             ],
-        ]
+        ] + ([[_btn("📣 " + ("Vakansiyalar" if lang == "uz" else "Вакансии"), "menu:vacancy", style="primary")]] if owner else [])
     )
 
 

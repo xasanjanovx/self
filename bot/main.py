@@ -19,7 +19,7 @@ from . import screen as screen_mod
 from .context import ai, db, settings
 from .handlers import build_router
 from .middlewares import AccessMiddleware, DedupeMiddleware, SecretsMiddleware, TidyMiddleware, global_error_handler
-from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, vacancy_feed_worker, wake_worker
+from .workers import brief_worker, proactive_worker, reminder_worker, report_worker, vacancy_feed_worker, vacancy_guard_worker, wake_worker
 
 logger = logging.getLogger(__name__)
 background_tasks: list[asyncio.Task[Any]] = []
@@ -107,16 +107,26 @@ async def on_startup(bot: Bot) -> None:
         await bot.set_my_commands(
             [
                 BotCommand(command="menu", description="Главное меню / Asosiy menyu"),
-                BotCommand(command="vacancy", description="Оформить вакансию / Vakansiya"),
                 BotCommand(command="dashboard", description="Аналитика / Tahlil"),
                 BotCommand(command="help", description="Помощь / Yordam"),
             ]
         )
         await bot.set_my_commands(
-            [BotCommand(command="menu", description="Main menu"), BotCommand(command="vacancy", description="Format a job post"),
+            [BotCommand(command="menu", description="Main menu"),
              BotCommand(command="dashboard", description="Analytics"), BotCommand(command="help", description="Help")],
             language_code="en",
         )
+        # 07.10: /vacancy — только в чате владельца (раздел вакансий у остальных скрыт)
+        from aiogram.types import BotCommandScopeChat
+
+        for owner_id in sorted(settings.allowed_telegram_ids):
+            await bot.set_my_commands(
+                [BotCommand(command="menu", description="Главное меню / Asosiy menyu"),
+                 BotCommand(command="vacancy", description="Вакансии (админ)"),
+                 BotCommand(command="dashboard", description="Аналитика / Tahlil"),
+                 BotCommand(command="help", description="Помощь / Yordam")],
+                scope=BotCommandScopeChat(chat_id=owner_id),
+            )
     except Exception:
         logger.warning("set_my_commands failed", exc_info=True)
     background_tasks.append(asyncio.create_task(report_worker(bot), name="report-worker"))
@@ -125,6 +135,7 @@ async def on_startup(bot: Bot) -> None:
     background_tasks.append(asyncio.create_task(proactive_worker(bot), name="proactive-worker"))
     background_tasks.append(asyncio.create_task(wake_worker(bot), name="wake-worker"))
     background_tasks.append(asyncio.create_task(vacancy_feed_worker(bot), name="vacancy-feed-worker"))
+    background_tasks.append(asyncio.create_task(vacancy_guard_worker(bot), name="vacancy-guard-worker"))
     try:
         from . import phone_api
 

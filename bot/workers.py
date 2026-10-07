@@ -530,6 +530,27 @@ async def vacancy_feed_worker(bot: Bot) -> None:
         await asyncio.sleep(1800)
 
 
+async def vacancy_guard_worker(bot: Bot) -> None:
+    """07.10: охрана ленты канала — раз в пару минут JES читает канал: платный пост, который он разместил сам, держим наверху ≥ 3 ч
+    (автоподбор молчит), реклама #reklama на запрещённые темы удаляется; отложенные вакансии выходят, когда защита кончилась."""
+    from . import channel_guard
+    from .context import ai
+    from .handlers import vacancy_feed as feed_ui
+
+    logger.info("Vacancy guard worker started")
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if settings.vacancy_channel:
+                await channel_guard.poll(bot, ai=ai)
+                await feed_ui.publish_due(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Vacancy guard iteration failed")
+        await asyncio.sleep(120)
+
+
 async def _daily_tick(bot: Bot) -> None:
     """Каждый день (29.09): в срок — «🔁 Урок английского» с кнопками [✅ Сделал] [⏭ Не сегодня] и, если есть ссылка или
     он смотрел YouTube, [▶️ Продолжить урок с 12:34] — ролик открывается с той секунды, где остановился."""
@@ -577,4 +598,4 @@ async def reminder_worker(bot: Bot) -> None:
         await asyncio.sleep(60)
 
 
-__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker", "wake_worker", "vacancy_feed_worker"]
+__all__ = ["report_worker", "brief_worker", "reminder_worker", "proactive_worker", "wake_worker", "vacancy_feed_worker", "vacancy_guard_worker"]

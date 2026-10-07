@@ -10,6 +10,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from .. import access
 from .. import categories as cats
 from .. import emoji as pe
 from .. import finance as fin
@@ -156,7 +157,7 @@ async def render_dashboard(
         text = profile.tr("Не удалось загрузить данные. Попробуй ещё раз.", "Ma'lumot yuklanmadi. Qayta urining.")
     if notice:
         text += f"\n\n{notice}"
-    kb = main_menu_keyboard(profile.lang, undo=undo)
+    kb = main_menu_keyboard(profile.lang, undo=undo, owner=access.is_owner(profile.telegram_id))
     if isinstance(target, CallbackQuery):
         if target.message is not None:
             await screen_mod.drop_chart(target.bot, target.message.chat.id)
@@ -171,7 +172,8 @@ async def send_main_menu(message: Message, profile: Profile, *, force_new: bool 
     except Exception:
         logger.exception("build_dashboard failed")
         text = profile.tr("Бот запущен. Нажми /menu для главного меню.", "Bot ishga tushdi. Asosiy menyu: /menu")
-    await screen_mod.show_screen(message.bot, message.chat.id, text, main_menu_keyboard(profile.lang), force_new=force_new)
+    await screen_mod.show_screen(message.bot, message.chat.id, text, main_menu_keyboard(profile.lang, owner=access.is_owner(profile.telegram_id)),
+                                 force_new=force_new)
 
 
 MENU_WORDS = {"menu", "меню", "menyu", "start", "главная", "bosh sahifa"}
@@ -253,7 +255,7 @@ async def cb_menu_open(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         logger.exception("build_dashboard failed")
         text = profile.tr("Не удалось загрузить данные. Попробуй ещё раз.", "Ma'lumot yuklanmadi. Qayta urining.")
-    await safe_edit(callback, text, main_menu_keyboard(profile.lang))
+    await safe_edit(callback, text, main_menu_keyboard(profile.lang, owner=access.is_owner(profile.telegram_id)))
 
 
 @router.callback_query(F.data == "menu:language")
@@ -276,4 +278,4 @@ async def cb_set_language(callback: CallbackQuery, state: FSMContext) -> None:
     profile.lang = lang
     await state.clear()
     text = await build_dashboard(profile)
-    await safe_edit(callback, text, main_menu_keyboard(lang))
+    await safe_edit(callback, text, main_menu_keyboard(lang, owner=access.is_owner(profile.telegram_id)))

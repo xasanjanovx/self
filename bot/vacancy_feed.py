@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 TZ = timezone(timedelta(hours=5))
 DEFAULT_CAP = 7                  # карточек в день (его выбор 07.10: по 7 вакансий в день)
-CAPS = (3, 5, 7, 10, 15)
+CAPS = (3, 5, 7, 10, 15, 20, 30)
 MIN_MEMBERS = 1500               # совсем маленькие каналы не предлагаем
 MAX_AGE_H = 48                   # вакансии старше — не берём
 SEEN_DAYS = 30
@@ -71,7 +71,9 @@ def load() -> dict[str, Any]:
         except (OSError, ValueError):
             _state = {}
         for key, default in (("enabled", True), ("cap", DEFAULT_CAP), ("premium", False), ("sources", {}), ("seen", {}),
-                             ("published", {}), ("queue", {}), ("daily", {}), ("designs", []), ("flood_until", 0.0), ("last_discovery", 0.0)):
+                             ("published", {}), ("queue", {}), ("daily", {}), ("designs", []), ("flood_until", 0.0), ("last_discovery", 0.0),
+                             ("cfg", {}), ("own", []), ("hold_until", 0.0), ("hold_post", 0), ("last_feed_post", 0.0), ("guard_cursor", 0),
+                             ("ads_log", [])):
             _state.setdefault(key, default)
     return _state
 
@@ -226,7 +228,7 @@ def judge(raw_text: str, assessment: dict[str, Any] | None, source: str = "") ->
     salary = str(a.get("salary") or "").lower()
     if salary not in {"amount", "negotiable"}:
         salary = salary_hint(raw_text)
-    if REQUIRE_SALARY and salary not in {"amount", "negotiable"}:
+    if cfg("require_salary") and salary not in {"amount", "negotiable"}:
         reasons.append("нет зарплаты")
     if not a.get("has_conditions"):
         reasons.append("нет условий (график, обязанности, требования)")
@@ -374,7 +376,7 @@ def next_card(now: datetime | None = None, *, ignore_hours: bool = False) -> dic
     """Лучший не показанный кандидат — если сейчас можно слать карточку (включено, день, лимит, нет завала без ответа)."""
     st = load()
     now = now or datetime.now(TZ)
-    if not st["enabled"] or not (ignore_hours or SEND_FROM <= now.hour < SEND_TO):
+    if not st["enabled"] or not (ignore_hours or in_window(now)):
         return None
     if cards_today() >= int(st["cap"]) or len(candidates("carded")) >= MAX_OPEN_CARDS:
         return None
@@ -404,6 +406,151 @@ def mark_handled(cand: dict[str, Any], status: str) -> None:
     if key:
         st["published"][key] = time.time()
     cand["status"] = status
+    save()
+
+
+# ---------------------------------------------------------------- настройки, защита ленты
+# 07.10, его просьбы: в день сколько и т.д. — настройки; платный пост, который он разместил сам, должен быть наверху ленты
+# минимум 3 часа — пока он наверху, автоподбор ничего не публикует; реклама на запрещённые темы удаляется из канала.
+PROTECT_MIN_HOURS = 3            # меньше нельзя — это условие, не пожелание
+GAP_CHOICES = (60, 90, 120, 180)
+PROTECT_CHOICES = (3, 4, 5, 6)
+AD_CATEGORIES = {
+    "credit": "Кредиты и займы",
+    "bank": "Банки и МФО",
+    "bets": "Ставки, казино, крипта, форекс",
+    "insure": "Страхование и инвестиции",
+}
+
+
+def _defaults() -> dict[str, Any]:
+    return {"mode": "confirm", "window_from": SEND_FROM, "window_to": SEND_TO, "gap_min": 90, "protect_hours": PROTECT_MIN_HOURS,
+            "images": True, "require_salary": REQUIRE_SALARY, "off_designs": [], "ads_on": True, "ads_mode": "delete",
+            "ads_cats": {"credit": True, "bank": False, "bets": True, "insure": True}}
+
+
+def cfg(key: str) -> Any:
+    """Настройка: то, что он менял, иначе значение по умолчанию (оно берётся из констант модуля в момент вызова)."""
+    return load()["cfg"].get(key, _defaults()[key])
+
+
+def set_cfg(key: str, value: Any) -> None:
+    if key == "protect_hours":
+        value = max(PROTECT_MIN_HOURS, int(value))
+    load()["cfg"][key] = value
+    save()
+
+
+def toggle_ad_category(name: str) -> bool:
+    cats = dict(cfg("ads_cats"))
+    cats[name] = not cats.get(name, False)
+    set_cfg("ads_cats", cats)
+    return cats[name]
+
+
+def toggle_design(design_id: str) -> bool:
+    """True — дизайн теперь включён."""
+    off = set(cfg("off_designs"))
+    off.symmetric_difference_update({design_id})
+    set_cfg("off_designs", sorted(off))
+    return design_id not in off
+
+
+def allowed_designs() -> set[str]:
+    from . import vacancy as v
+
+    off = set(cfg("off_designs"))
+    ids = {d["id"] for d in v.DESIGNS} - off
+    return ids or {d["id"] for d in v.DESIGNS}
+
+
+def window() -> tuple[int, int]:
+    return int(cfg("window_from")), int(cfg("window_to"))
+
+
+def in_window(now: datetime) -> bool:
+    start, end = window()
+    return start <= now.hour < end
+
+
+def mark_own(ids: list[int]) -> None:
+    """Сообщения, которые канал получил от нас (автоподбор или оформление вакансии у бота) — их не принимаем за чужие посты."""
+    own = load()["own"]
+    for mid in ids:
+        if mid and mid not in own:
+            own.append(int(mid))
+    del own[:-400]
+    save()
+
+
+def is_own(mid: int) -> bool:
+    return int(mid) in load()["own"]
+
+
+def protect_seconds() -> float:
+    return max(PROTECT_MIN_HOURS, int(cfg("protect_hours"))) * 3600.0
+
+
+def hold_left(now_ts: float | None = None) -> float:
+    return max(0.0, float(load()["hold_until"]) - (now_ts if now_ts is not None else time.time()))
+
+
+def note_manual_post(post_ts: float, mid: int = 0) -> bool:
+    """В канале появился пост, который опубликовал он сам (заказ на размещение, ручной пост) — он должен постоять наверху
+    не меньше защитного срока. True — защита продлена."""
+    until = post_ts + protect_seconds()
+    st = load()
+    if until > float(st["hold_until"]):
+        st["hold_until"], st["hold_post"] = until, int(mid)
+        save()
+        return True
+    return False
+
+
+def note_feed_post(now_ts: float | None = None) -> None:
+    load()["last_feed_post"] = now_ts if now_ts is not None else time.time()
+    save()
+
+
+def seconds_to_window(now: datetime) -> float:
+    start, end = window()
+    if start <= now.hour < end:
+        return 0.0
+    nxt = now.replace(hour=start, minute=0, second=0, microsecond=0)
+    if now.hour >= end:
+        nxt += timedelta(days=1)
+    return max(0.0, (nxt - now).total_seconds())
+
+
+def publish_gate(now: datetime | None = None, *, respect_schedule: bool = True) -> tuple[bool, str, float]:
+    """Можно ли публиковать в канал прямо сейчас. → (можно, причина, сколько секунд ждать).
+    hold — платный пост наверху (всегда); gap/window/cap — расписание автоподбора (respect_schedule=False — для его ручной кнопки)."""
+    now = now or datetime.now(TZ)
+    left = hold_left(now.timestamp())
+    if left > 0:
+        return False, "hold", left
+    if respect_schedule:
+        gap = float(cfg("gap_min")) * 60 - (now.timestamp() - float(load()["last_feed_post"]))
+        if gap > 0:
+            return False, "gap", gap
+        if not in_window(now):
+            return False, "window", seconds_to_window(now)
+        if cards_today() >= int(load()["cap"]):
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            return False, "cap", (tomorrow - now).total_seconds()
+    return True, "", 0.0
+
+
+def human_wait(seconds: float) -> str:
+    minutes = int(seconds // 60) + (1 if seconds % 60 else 0)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+
+
+def log_ad(entry: dict[str, Any]) -> None:
+    log = load()["ads_log"]
+    log.insert(0, entry)
+    del log[30:]
     save()
 
 

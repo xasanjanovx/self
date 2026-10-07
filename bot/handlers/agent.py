@@ -699,7 +699,9 @@ async def cb_undo(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if callback.message is not None:
         await screen_mod.drop_chart(callback.bot, callback.message.chat.id)
-    await safe_edit(callback, await build_dashboard(profile), main_menu_keyboard(profile.lang))
+    from .. import access
+
+    await safe_edit(callback, await build_dashboard(profile), main_menu_keyboard(profile.lang, owner=access.is_owner(profile.telegram_id)))
 
 
 __all__ = ["router", "looks_like_command", "handle_command", "run_agent", "render_reply", "trim_history", "system_prompt", "AgentResult"]
