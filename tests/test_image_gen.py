@@ -23,10 +23,9 @@ def _ok(image: bytes) -> dict:
 
 @pytest.fixture
 def setup(monkeypatch, tmp_path):
-    from bot.context import ai
-
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("VERTEX_API_KEY", "VKEY")
+    monkeypatch.setenv("VERTEX_PROJECT", "123")
     gcloud.reset_cache()
     recorded: list = []
     monkeypatch.setattr(billing, "record", lambda model, usage, **kw: recorded.append((model, kw.get("provider"), kw.get("kind"))) or 0.0)
@@ -37,7 +36,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(image_gen.asyncio, "sleep", no_sleep)
 
     def install(handler):
-        monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "STUDIO"}))
+        monkeypatch.setattr(image_gen, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     return install, recorded
 
@@ -48,45 +47,42 @@ def test_prompt_has_job_scene_and_no_text_rules():
     assert "bottom-left" in prompt and "no text" in prompt.lower() and "16:9" in prompt
 
 
-def test_studio_route_by_default_and_best_model_first(setup):
+def test_only_vertex_even_when_ai_studio_is_selected_in_settings(setup):
     install, recorded = setup
+    assert gcloud.chosen() == "studio"                       # в настройках выбран AI Studio — картинки всё равно только Vertex
     calls: list = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.url.host, request.url.path.split("/")[-1], request.headers["x-goog-api-key"]))
+        calls.append((request.url.host, request.url.path, request.headers["x-goog-api-key"]))
         return httpx.Response(200, json=_ok(_png()))
 
     install(handler)
     image, model = asyncio.run(image_gen.generate("prompt"))
     assert model == "gemini-nano-banana-2.1" and image[:4] == b"\x89PNG"
-    assert calls == [("generativelanguage.googleapis.com", "gemini-nano-banana-2.1:generateContent", "STUDIO")]
-    assert recorded == [("gemini-nano-banana-2.1", "studio", "image")]
+    assert calls == [("aiplatform.googleapis.com", "/v1/projects/123/locations/global/publishers/google/models/gemini-nano-banana-2.1:generateContent", "VKEY")]
+    assert recorded == [("gemini-nano-banana-2.1", "vertex", "image")]
 
 
-def test_vertex_first_when_chosen_then_studio_when_vertex_refuses(setup):
+def test_never_falls_back_to_ai_studio(setup):
     install, recorded = setup
-    gcloud.set_provider("vertex")
     hosts: list = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         hosts.append(request.url.host)
-        if request.url.host == "aiplatform.googleapis.com":
-            return httpx.Response(404, json={"error": {"message": "Publisher model was not found"}})
-        return httpx.Response(200, json=_ok(_png()))
+        return httpx.Response(404, json={"error": {"message": "Publisher model was not found"}})
 
     install(handler)
-    _, model = asyncio.run(image_gen.generate("prompt"))
-    assert hosts == ["aiplatform.googleapis.com", "generativelanguage.googleapis.com"] and model == "gemini-nano-banana-2.1"
-    assert recorded == [("gemini-nano-banana-2.1", "studio", "image")]
-    assert "gemini-nano-banana-2.1" in gcloud.status()["bad_models"]        # в Vertex этой модели нет — дальше сразу в Studio
+    with pytest.raises(image_gen.ImageError):
+        asyncio.run(image_gen.generate("prompt"))
+    assert set(hosts) == {"aiplatform.googleapis.com"} and recorded == []     # обе модели — только Vertex, платить AI Studio не пытались
 
 
-def test_vertex_credit_is_counted_as_vertex(setup):
-    install, recorded = setup
-    gcloud.set_provider("vertex")
-    install(lambda request: httpx.Response(200, json=_ok(_png())))
-    asyncio.run(image_gen.generate("prompt"))
-    assert recorded == [("gemini-nano-banana-2.1", "vertex", "image")]
+def test_no_vertex_key_means_no_request_at_all(setup, monkeypatch):
+    install, _ = setup
+    monkeypatch.delenv("VERTEX_API_KEY")
+    install(lambda request: pytest.fail("запрос не должен уйти"))
+    with pytest.raises(image_gen.ImageError, match="VERTEX_API_KEY"):
+        asyncio.run(image_gen.generate("prompt"))
 
 
 def test_falls_back_to_nano_banana_2_when_2_1_is_missing(setup):
@@ -105,13 +101,27 @@ def test_falls_back_to_nano_banana_2_when_2_1_is_missing(setup):
     assert model == "gemini-3.1-flash-image" and seen == ["gemini-nano-banana-2.1", "gemini-3.1-flash-image"]
 
 
-def test_safety_block_does_not_pause_vertex_for_everybody(setup):
+def test_refused_key_stops_at_once(setup):
+    install, _ = setup
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(403, json={"error": {"message": "API key blocked"}})
+
+    install(handler)
+    with pytest.raises(image_gen.ImageError, match="не пускает ключ"):
+        asyncio.run(image_gen.generate("prompt"))
+    assert len(calls) == 1
+
+
+def test_safety_block_does_not_touch_the_shared_vertex_state(setup):
     install, _ = setup
     gcloud.set_provider("vertex")
     install(lambda request: httpx.Response(400, json={"error": {"message": "The prompt was blocked for safety"}}))
     with pytest.raises(image_gen.ImageError):
         asyncio.run(image_gen.generate("prompt"))
-    assert gcloud.active() and gcloud.status()["error"] is None            # ключ не «сломан» из-за одного промпта
+    assert gcloud.active() and gcloud.status()["error"] is None            # текстовые запросы из-за одного промпта не страдают
 
 
 def test_transient_error_is_retried_once(setup):

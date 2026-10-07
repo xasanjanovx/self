@@ -1,8 +1,10 @@
-"""Картинки для вакансий: Nano Banana 2.1 + логотип @ishdasiz снизу слева (07.10).
+"""Картинки для вакансий: Nano Banana 2.1 ТОЛЬКО через Vertex AI + логотип @ishdasiz снизу слева (07.10).
 
 Его выбор: самая качественная версия — «Nano Banana 2.1» (gemini-nano-banana-2.1), запасная — Nano Banana 2 (gemini-3.1-flash-image).
-Идём сначала в Vertex AI (кредит Google Cloud, bot/gcloud.py), не вышло — в AI Studio. Картинка без текста: надписи на узбекском
-модели искажают, а название канала и слоган уже в логотипе; все данные вакансии — в подписи поста.
+Расход — с кредита Google Cloud ($300). AI Studio для картинок НЕ используем никогда («AI Studio вообще не надо»): Vertex не ответил —
+картинки не будет, карточка уйдёт к нему без неё, с кнопкой «Другая картинка». Работает независимо от переключателя «Gemini через…»
+в настройках и не трогает его состояние (пауза ключа и «модели нет» относятся к текстовым запросам).
+Картинка без текста: надписи на узбекском модели искажают, а название канала и слоган уже в логотипе; данные вакансии — в подписи поста.
 """
 from __future__ import annotations
 
@@ -25,10 +27,18 @@ LOGO = Path(__file__).parent / "assets" / "ishdasiz_logo.png"
 LOGO_WIDTH_SHARE = 0.30               # ширина логотипа — доля ширины картинки
 LOGO_MARGIN_SHARE = 0.03              # отступ от левого и нижнего края
 _RETRY = {429, 500, 502, 503, 504}
+_client: Any = None
 
 
 class ImageError(RuntimeError):
-    """Картинку получить не удалось (ни Vertex, ни AI Studio)."""
+    """Картинку получить не удалось (Vertex не ответил)."""
+
+
+def _http() -> Any:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0))
+    return _client
 
 
 def build_prompt(headline: str, scene: str | None = None, company: str | None = None) -> str:
@@ -63,7 +73,7 @@ def _payload(prompt: str) -> dict[str, Any]:
     }
 
 
-async def _try(client: Any, url: str, headers: dict[str, str] | None, payload: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None, str]:
+async def _try(client: Any, url: str, headers: dict[str, str], payload: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None, str]:
     """Один запрос с одним повтором на временные сбои. → (код, json, текст ошибки)."""
     status: int | None = None
     text = ""
@@ -84,35 +94,25 @@ async def _try(client: Any, url: str, headers: dict[str, str] | None, payload: d
     return status, None, text
 
 
-async def generate(prompt: str, *, client: Any | None = None, studio_base: str | None = None) -> tuple[bytes, str]:
-    """Картинка по промпту → (байты как пришли от модели, имя модели). Бросает ImageError, если не вышло нигде."""
-    if client is None or studio_base is None:
-        from .context import ai
-
-        client, studio_base = ai._client, ai.base_url
+async def generate(prompt: str, *, client: Any | None = None) -> tuple[bytes, str]:
+    """Картинка по промпту через Vertex → (байты как пришли от модели, имя модели). Бросает ImageError, если не вышло."""
+    if not gcloud.vertex_key():
+        raise ImageError("нет VERTEX_API_KEY — картинки только через Vertex AI")
+    client = client or _http()
     payload = _payload(prompt)
     errors: list[str] = []
     for model in MODELS:
-        routes: list[tuple[str, str, dict[str, str] | None]] = []
-        if gcloud.use_vertex(model):
-            routes.append(("vertex", gcloud.url(model, "generateContent"), gcloud.headers()))
-        routes.append(("studio", f"{studio_base}/{model}:generateContent", None))  # ключ AI Studio уже в заголовках клиента
-        for provider, url, headers in routes:
-            status, data, text = await _try(client, url, headers, payload)
-            if data is not None:
-                image = _extract(data)
-                if image:
-                    if provider == "vertex":
-                        gcloud.ok()
-                    billing.record(model, data.get("usageMetadata"), kind="image", provider=provider)
-                    return image, model
-                reason = (data.get("promptFeedback") or {}).get("blockReason") or "без картинки"
-                errors.append(f"{model}/{provider}: {reason}")
-                continue
-            errors.append(f"{model}/{provider}: {status} {text[:80]}")
-            # 400 — запрос/содержимое не прошли, ключ тут ни при чём; ключ и доступ разбираем только по остальным кодам
-            if provider == "vertex" and status != 400:
-                gcloud.failed(model, status, text)
+        status, data, text = await _try(client, gcloud.url(model, "generateContent"), gcloud.headers(), payload)
+        if data is not None:
+            image = _extract(data)
+            if image:
+                billing.record(model, data.get("usageMetadata"), kind="image", provider="vertex")
+                return image, model
+            errors.append(f"{model}: {(data.get('promptFeedback') or {}).get('blockReason') or 'ответ без картинки'}")
+            continue
+        errors.append(f"{model}: {status} {text[:80]}")
+        if status in {401, 403}:   # ключ не пускают — вторая модель не поможет
+            raise ImageError("Vertex не пускает ключ: " + errors[-1])
     raise ImageError("; ".join(errors)[:400])
 
 

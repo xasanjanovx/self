@@ -83,6 +83,20 @@ _free_mode: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_free", default=N
 # какой моделью уже начат этот ход агента: «подписи размышлений» модели в истории хода другой модели не подходят —
 # поэтому весь ход (все шаги с инструментами) идёт одной моделью, даже если бесплатный лимит кончился посреди хода
 _turn_model: _cv.ContextVar[str | None] = _cv.ContextVar("gemini_turn_model", default=None)
+# 07.10 автоподбор вакансий: «AI Studio вообще не надо, только Vertex» — запросы внутри vertex_only() идут только в Vertex AI
+# (кредит Google Cloud), без отката на баланс AI Studio, и не зависят от переключателя «Gemini через…»
+_vertex_only: _cv.ContextVar[bool] = _cv.ContextVar("vertex_only", default=False)
+
+
+class vertex_only:  # noqa: N801 — менеджер контекста: `with vertex_only(): await ai.assess_vacancy(...)`
+    def __enter__(self) -> "vertex_only":
+        self._token = _vertex_only.set(True)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        _vertex_only.reset(self._token)
+
+
 _free_paused_until = 0.0
 _free_tts_paused_until = 0.0      # бесплатный ключ не дал озвучку — час озвучиваем платным
 _free_smart_blocked_until = 0.0   # умная модель на бесплатном уровне недоступна / её лимит кончился — до этого времени не пробуем
@@ -439,6 +453,13 @@ class AIService:
             url = f"{self.base_url}/{model}:generateContent"
             _turn_model.set(model)
         payload = _adapt(model, payload)
+        if _vertex_only.get():
+            if not gcloud.vertex_key():
+                raise RuntimeError("нет VERTEX_API_KEY — этот запрос только через Vertex AI")
+            data = await self._post_vertex(model, payload)
+            if data is None:
+                raise RuntimeError("Vertex AI не ответил — этот запрос в AI Studio не отправляем")
+            return data
         if gcloud.use_vertex(model) and (data := await self._post_vertex(model, payload)) is not None:
             return data
         for attempt in range(1, _MAX_ATTEMPTS + 1):

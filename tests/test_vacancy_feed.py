@@ -278,6 +278,10 @@ def _cand(cid, score, status="new", hours_old=1):
 NOON = datetime(2026, 10, 7, 12, 0, tzinfo=feed.TZ)
 
 
+def test_default_is_seven_cards_a_day():
+    assert feed.load()["cap"] == 7 and 7 in feed.CAPS
+
+
 def test_best_candidate_first_within_daily_cap():
     _cand("a", 50)
     _cand("b", 80)
@@ -353,3 +357,69 @@ def test_discover_rates_channels_and_adds_only_good_ones(monkeypatch):
     assert [a["name"] for a in added] == ["good_jobs"]
     assert feed.sources("pending")["good_jobs"]["passing"] >= 5
     assert asyncio.run(feed.discover(own_channel="@ishdasiz")) == []          # уже известные не предлагаем второй раз
+
+
+# ------------------------------------------------------------------ только Vertex (никакого AI Studio)
+def _ai_client(monkeypatch, handler):
+    import httpx
+
+    from bot.context import ai
+
+    monkeypatch.setenv("VERTEX_API_KEY", "VKEY")
+    monkeypatch.setenv("VERTEX_PROJECT", "123")
+    from bot import gcloud
+
+    gcloud.reset_cache()
+    monkeypatch.setattr(ai, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"x-goog-api-key": "STUDIO"}))
+    return ai
+
+
+def test_feed_text_requests_never_reach_ai_studio(monkeypatch):
+    import httpx
+
+    from bot.ai import vertex_only
+
+    hosts: list = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        return httpx.Response(500, text="boom")
+
+    ai = _ai_client(monkeypatch, handler)
+    with vertex_only():
+        with pytest.raises(RuntimeError, match="Vertex"):
+            asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))
+    assert hosts == ["aiplatform.googleapis.com"]
+
+
+def test_feed_text_goes_to_vertex_even_if_settings_say_ai_studio(monkeypatch):
+    import httpx
+
+    from bot import gcloud
+    from bot.ai import vertex_only
+
+    seen: list = []
+
+    def handler(request):
+        seen.append((request.url.host, request.headers["x-goog-api-key"]))
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{}"}]}}], "usageMetadata": {"promptTokenCount": 3}})
+
+    ai = _ai_client(monkeypatch, handler)
+    assert gcloud.chosen() == "studio"
+    with vertex_only():
+        asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))
+    assert seen == [("aiplatform.googleapis.com", "VKEY")]
+    asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))          # без vertex_only всё как раньше — AI Studio
+    assert seen[-1][0] == "generativelanguage.googleapis.com"
+
+
+def test_no_vertex_key_stops_feed_text_requests(monkeypatch):
+    import httpx
+
+    from bot.ai import vertex_only
+
+    ai = _ai_client(monkeypatch, lambda request: httpx.Response(200, json={}))
+    monkeypatch.delenv("VERTEX_API_KEY")
+    with vertex_only():
+        with pytest.raises(RuntimeError, match="VERTEX_API_KEY"):
+            asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))

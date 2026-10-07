@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from . import vacancy as vac
-from .ai import VacancyData, VacancySection
+from .ai import VacancyData, VacancySection, vertex_only
 
 logger = logging.getLogger(__name__)
 
 TZ = timezone(timedelta(hours=5))
-DEFAULT_CAP = 5                  # карточек в день
-CAPS = (3, 5, 10, 15)
+DEFAULT_CAP = 7                  # карточек в день (его выбор 07.10: по 7 вакансий в день)
+CAPS = (3, 5, 7, 10, 15)
 MIN_MEMBERS = 1500               # совсем маленькие каналы не предлагаем
 MAX_AGE_H = 48                   # вакансии старше — не берём
 SEEN_DAYS = 30
@@ -424,7 +424,8 @@ async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = 
         return "skip", "уже видели"
     _bump(source, "seen")
     try:
-        assessment = await ai.assess_vacancy(raw_text)
+        with vertex_only():
+            assessment = await ai.assess_vacancy(raw_text)
     except Exception as exc:
         logger.warning("vacancy_feed: проверка %s/%s не вышла: %s", source, msg_id, exc)
         return "error", str(exc)[:120]
@@ -435,7 +436,8 @@ async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = 
         save()
         return "reject", verdict.reasons
     try:
-        data = await ai.rewrite_vacancy(raw_text, default_region_tag=vac.VACANCY_DEFAULT_REGION_TAG)
+        with vertex_only():
+            data = await ai.rewrite_vacancy(raw_text, default_region_tag=vac.VACANCY_DEFAULT_REGION_TAG)
     except Exception as exc:
         logger.warning("vacancy_feed: оформление %s/%s не вышло: %s", source, msg_id, exc)
         st["seen"].pop(fp, None)
