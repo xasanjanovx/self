@@ -545,3 +545,39 @@ def test_every_card_gets_a_different_design_and_new_picture_changes_it(monkeypat
     before = cands[0]["design"]
     asyncio.run(ui.cb_new_image(FakeCb("vf:img:c0", bot)))
     assert cands[0]["design"] != before and len(used) == 6              # «Другая картинка» — другой дизайн, не тот же
+
+
+# ------------------------------------------------------------------ раз в N часов — одна свежая карточка, прежняя без ответа убирается (08.10)
+def test_every_n_hours_one_fresh_card_replaces_the_unanswered_one(monkeypatch):
+    bot = FakeBot()
+    old = _cand("old", headline="Stariy kerak")
+    old.update(status="carded", card_ids=[555], chat_id=OWNER, card_ts=time.time() - 3 * 3600)
+    best, other = _cand("best", headline="Yangi kerak"), _cand("other", headline="Boshqa kerak")
+    best["posted_ts"], other["posted_ts"] = time.time() - 3600, time.time() - 15 * 3600
+    best["score"] = other["score"] = 70
+    feed.load()["last_card"] = time.time() - 30 * 60                              # недавно уже слали — рано
+    assert asyncio.run(ui.tick(bot))["card"] is False and bot.photos == [] and old["status"] == "carded"
+    feed.load()["last_card"] = time.time() - 3 * 3600                             # прошло больше интервала (2 ч)
+    out = asyncio.run(ui.tick(bot))
+    assert out["card"] is True and len(bot.photos) == 1 and "Yangi kerak" in bot.photos[0]["caption"]   # самая свежая из двух равных
+    assert (OWNER, 555) in bot.deleted and old["status"] == "skipped"            # прежняя карточка убрана
+    assert feed.candidates("carded") == [best]
+    assert asyncio.run(ui.tick(bot))["card"] is False and len(bot.photos) == 1    # и дальше — не раньше чем через интервал
+
+
+def test_next_vacancy_button_keeps_the_open_card(monkeypatch):
+    bot = FakeBot()
+    old = _cand("old", headline="Stariy kerak")
+    old.update(status="carded", card_ids=[555], chat_id=OWNER, card_ts=time.time() - 3 * 3600)
+    _cand("new", headline="Yangi kerak")
+    out = asyncio.run(ui.tick(bot, manual=True))
+    assert out["card"] is True and old["status"] == "carded" and (OWNER, 555) not in bot.deleted     # по его кнопке — ничего не убираем
+
+
+def test_panel_shows_when_the_next_card_comes_and_no_queue_size():
+    feed.load()["last_card"] = time.time() - 30 * 60
+    text = ui.panel_text()
+    assert "Следующая:" in text and "раз в 2 ч" in text and "в очереди" not in text
+    for i in range(120):
+        feed.load()["queue"][f"x{i}"] = {"id": f"x{i}", "status": "new", "source": "s", "created": datetime.now(feed.TZ).isoformat(timespec="seconds")}
+    assert "120" not in ui.panel_text()                                             # размер очереди не показываем

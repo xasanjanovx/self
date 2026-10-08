@@ -322,3 +322,76 @@ def test_honorific_aka_does_not_decide(uid):
         assert found.get("match", {}).get("name") == "SIROJBEK AKAM", (who, found)
     assert phone.find_contact(uid, "Абдулатиф ака", [])["match"]["name"] == "ABDULATIF AKA"
     assert phone.find_contact(uid, "Сирожиддин ака", [])["match"]["name"] == "Sirojiddin Aka"
+
+
+# ------------------------------------------------------------------ «Избранное» (Saved Messages) — JES раньше не находил этот чат
+def _fake_tg(monkeypatch, me_id=5):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    sent: list = []
+    asked: list = []
+
+    class Client:
+        async def send_message(self, peer, text):
+            sent.append((peer, text))
+
+        async def iter_messages(self, peer, limit=None):
+            asked.append(peer)
+            yield SimpleNamespace(out=True, sender_id=me_id, sender=None, message="купить хлеб", media=None, date=datetime.now(timezone.utc))
+
+    async def fake_client():
+        return Client()
+
+    async def no_dialogs(*, fresh=False):
+        return []
+
+    async def fake_log(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tg_user, "configured", lambda: True)
+    monkeypatch.setattr(tg_user, "client", fake_client)
+    monkeypatch.setattr(tg_user, "_me", SimpleNamespace(id=me_id), raising=False)
+    monkeypatch.setattr(tg_user, "dialogs", no_dialogs)
+    monkeypatch.setattr(services, "log_agent", fake_log)
+    return sent, asked
+
+
+def test_self_chat_words_are_recognised():
+    for word in ("избранное", "Избранное", "в избранное", "Saved Messages", "себе", "saqlangan xabarlar"):
+        assert tg_user.is_self_query([word]), word
+    for word in ("мама", "Азиз", "избранный друг Алишер", ""):
+        assert not tg_user.is_self_query([word]), word
+
+
+def test_jes_reads_the_saved_messages(uid, monkeypatch):
+    sent, asked = _fake_tg(monkeypatch)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    result = asyncio.run(phone.make_runner(turn)("telegram_read", {"who": "избранное", "limit": 1}, ctx))
+    assert result["chat"] == "Избранное" and result["messages"][0]["text"] == "купить хлеб" and result["messages"][0]["from"] == "я"
+    assert asked == ["me"]
+
+
+def test_jes_writes_to_the_saved_messages_after_confirmation(uid, monkeypatch):
+    sent, _ = _fake_tg(monkeypatch)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    result = asyncio.run(phone.make_runner(turn)("telegram_send", {"who": "себе", "text": "Купить хлеб"}, ctx))
+    assert result["status"] == "awaiting_confirmation" and "Избранное" in result["ask_exactly"] and sent == []
+    out = asyncio.run(phone.handle(uid, "да", {}))
+    assert sent == [("me", "Купить хлеб")] and "Отправил" in out["say"]
+
+
+def test_telegram_tool_failures_are_reported_not_raised(uid, monkeypatch):
+    _fake_tg(monkeypatch)
+
+    async def boom(queries, alias=None):
+        raise ConnectionError("net")
+
+    monkeypatch.setattr(tg_user, "find_chat", boom)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    read = asyncio.run(phone.make_runner(turn)("telegram_read", {"who": "Алишер"}, ctx))
+    send = asyncio.run(phone.make_runner(turn)("telegram_send", {"who": "Алишер", "text": "привет"}, ctx))
+    assert "ConnectionError" in read["error"] and "ConnectionError" in send["error"]

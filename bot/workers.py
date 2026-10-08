@@ -515,7 +515,8 @@ async def proactive_worker(bot: Bot) -> None:
 
 
 async def vacancy_feed_worker(bot: Bot) -> None:
-    """07.10: автоподбор вакансий — раз в 30 минут читаем одобренные каналы, раз в день-два показываем карточки владельцу."""
+    """07.10: автоподбор вакансий — каналы читаем раз в ~25 минут, а раз в N часов (настройка «Между карточками») владельцу приходит одна
+    карточка: самая свежая и лучшая. Сюда заходим каждые 5 минут, чтобы карточка приходила вовремя."""
     from .handlers import vacancy_feed as feed_ui
 
     logger.info("Vacancy feed worker started")
@@ -527,7 +528,7 @@ async def vacancy_feed_worker(bot: Bot) -> None:
             raise
         except Exception:
             logger.exception("Vacancy feed iteration failed")
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)
 
 
 async def vacancy_guard_worker(bot: Bot) -> None:

@@ -30,13 +30,14 @@ TZ = timezone(timedelta(hours=5))
 DEFAULT_CAP = 7                  # карточек в день (его выбор 07.10: по 7 вакансий в день)
 CAPS = (3, 5, 7, 10, 15, 20, 30)
 MIN_MEMBERS = 1500               # совсем маленькие каналы не предлагаем
-MAX_AGE_H = 48                   # вакансии старше — не берём
+MAX_AGE_H = 24                   # вакансии старше суток не берём: нужны только свежие (его просьба 08.10)
 SEEN_DAYS = 30
-NEW_HOURS = 36                   # не показанная вовремя вакансия протухает
+NEW_HOURS = 24                   # не показанная вовремя вакансия протухает
 CARD_DAYS = 7
 SEND_FROM, SEND_TO = 8, 21       # карточки шлём только днём (Ташкент)
 MAX_OPEN_CARDS = 1               # 07.10 («бот без остановки шлёт вакансии»): по одной — следующая только после его решения по открытой
 PULL_LIMIT = 40
+PULL_EVERY_S = 1500             # каналы читаем раз в ~25 минут, а время карточки проверяем чаще (воркер раз в 5 минут)
 SOURCE_PAUSE_S = 2.0
 SEARCH_PAUSE_S = 1.0
 REQUIRE_SALARY = True            # «нет зарплаты» отбрасываем; «по договорённости/собеседованию» — это зарплата
@@ -47,7 +48,7 @@ KEYWORDS = ("vakansiya", "vakansiyalar", "ish bor", "ish e'lonlari", "bo'sh ish 
 
 # 07.10: каналы, которые он назвал сам, — берём сразу (он их уже одобрил); каждую вакансию из них он всё равно решает карточкой.
 FAVORITE_SOURCES = ("vakansyuz_vacansyuz", "ishtopuz_rasmiy", "ish_keremi")
-MAX_NEW_PER_SOURCE = 12          # столько неотправленных вакансий из одного канала в запасе хватит: дальше не оформляем (и не платим за нейросеть)
+MAX_NEW_PER_SOURCE = 4           # столько неотправленных вакансий из одного канала в запасе хватит: дальше не оформляем (и не платим за нейросеть)
 
 
 # ---------------------------------------------------------------- хранилище
@@ -406,10 +407,11 @@ def card_wait_seconds(now_ts: float | None = None) -> float:
     return max(0.0, float(cfg("card_gap_min")) * 60 - (now_ts - float(load()["last_card"])))
 
 
-def next_card(now: datetime | None = None, *, force: bool = False) -> dict[str, Any] | None:
+def next_card(now: datetime | None = None, *, force: bool = False, replace_open: bool = False) -> dict[str, Any] | None:
     """Лучший не показанный кандидат — если сейчас можно слать карточку. Правила «по одной и редко» (его просьба 07.10):
     включено, дневное окно, не чаще раза в card_gap_min минут, нет открытой карточки без ответа, лимит в день, не пока платный пост на топе.
-    force — он сам нажал «Следующая вакансия»: все эти ограничения снимаются."""
+    force — он сам нажал «Следующая вакансия»: все эти ограничения снимаются. replace_open — открытая карточка без ответа не мешает:
+    раз пора, она будет заменена свежей (за это время она уже старше интервала)."""
     st = load()
     now = now or datetime.now(TZ)
     if not st["enabled"]:
@@ -417,10 +419,45 @@ def next_card(now: datetime | None = None, *, force: bool = False) -> dict[str, 
     if not force:
         if not in_window(now) or hold_left(now.timestamp()) > 0 or card_wait_seconds(now.timestamp()) > 0:
             return None
-        if cards_today() >= int(st["cap"]) or len(candidates("carded")) >= MAX_OPEN_CARDS:
+        if cards_today() >= int(st["cap"]) or (not replace_open and len(candidates("carded")) >= MAX_OPEN_CARDS):
             return None
-    fresh =sorted(candidates("new"), key=lambda c: (-(int(c.get("score") or 0) + views_bonus(c.get("views"))), str(c.get("created") or "")))
+    now_ts = now.timestamp()
+    fresh = sorted(candidates("new"), key=lambda c: (-rank(c, now_ts), str(c.get("created") or "")))
     return fresh[0] if fresh else None
+
+
+def freshness_bonus(posted_ts: Any, now_ts: float | None = None) -> int:
+    """Чем свежее пост источника, тем выше: до +15 (до 3 ч), +10 (до 8 ч), +5 (до 16 ч). Так в карточку попадает свежее и лучшее."""
+    try:
+        age_h = max(0.0, ((now_ts if now_ts is not None else time.time()) - float(posted_ts)) / 3600)
+    except (TypeError, ValueError):
+        return 0
+    return 15 if age_h < 3 else 10 if age_h < 8 else 5 if age_h < 16 else 0
+
+
+def rank(cand: dict[str, Any], now_ts: float | None = None) -> int:
+    """Итоговая оценка для очереди: качество разбора + просмотры оригинала + свежесть."""
+    return int(cand.get("score") or 0) + views_bonus(cand.get("views")) + freshness_bonus(cand.get("posted_ts"), now_ts)
+
+
+def next_card_at(now: datetime | None = None) -> datetime | None:
+    """Когда придёт следующая карточка: интервал от прошлой, не раньше окна и конца защиты платного поста; лимит дня исчерпан — завтра с начала окна."""
+    st = load()
+    if not st["enabled"]:
+        return None
+    now = now or datetime.now(TZ)
+    at = max(now, datetime.fromtimestamp(float(st["last_card"]) + float(cfg("card_gap_min")) * 60, TZ))
+    left = hold_left(now.timestamp())
+    if left > 0:
+        at = max(at, now + timedelta(seconds=left))
+    start, end = window()
+    if cards_today() >= int(st["cap"]) and at.date() == now.date():
+        at = (now + timedelta(days=1)).replace(hour=start, minute=0, second=0, microsecond=0)
+    if at.hour >= end:
+        at = (at + timedelta(days=1)).replace(hour=start, minute=0, second=0, microsecond=0)
+    elif at.hour < start:
+        at = at.replace(hour=start, minute=0, second=0, microsecond=0)
+    return at
 
 
 def views_bonus(views: Any) -> int:
@@ -438,7 +475,9 @@ def cleanup(now: datetime | None = None) -> None:
     for cand in list(st["queue"].values()):
         age = now - datetime.fromisoformat(cand["created"])
         limit = timedelta(hours=NEW_HOURS) if cand.get("status") == "new" else timedelta(days=CARD_DAYS)
-        if cand.get("status") in {"published", "skipped"} or age > limit:
+        stale_post = (cand.get("status") == "new" and cand.get("posted_ts")
+                      and now.timestamp() - float(cand["posted_ts"]) > MAX_AGE_H * 3600)     # сам пост в источнике уже старше суток
+        if cand.get("status") in {"published", "skipped"} or age > limit or stale_post:
             drop_candidate(cand["id"])
     horizon = time.time() - SEEN_DAYS * 86400
     for bucket in ("seen", "published"):
@@ -641,7 +680,7 @@ def log_ad(entry: dict[str, Any]) -> None:
 
 # ---------------------------------------------------------------- разбор одного поста
 async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = None, now: datetime | None = None,
-                   views: int = 0) -> tuple[str, Any]:
+                   views: int = 0, posted: datetime | None = None) -> tuple[str, Any]:
     """Один пост из канала → ("skip", причина) | ("reject", [причины]) | ("queued", кандидат) | ("error", текст).
     Дорогое (оформление поста) — только если проверка прошла. Ошибка нейросети отпечаток не записывает: попробуем на следующем круге."""
     if ai is None:
@@ -692,7 +731,7 @@ async def consider(raw_text: str, *, source: str, msg_id: int, ai: Any | None = 
     cid = hashlib.sha1(f"{source}/{msg_id}".encode()).hexdigest()[:10]
     cand = {"id": cid, "source": source, "msg_id": msg_id, "url": f"https://t.me/{source}/{msg_id}", "status": "new",
             "created": now.isoformat(timespec="seconds"), "key": key, "scene": scene or "", "regen": 0,
-            "views": int(views or 0), "salary": verdict.salary, "score": score(data, verdict, source_quality(source)), "data": data_to_dict(data),
+            "views": int(views or 0), "posted_ts": _ts(posted), "salary": verdict.salary, "score": score(data, verdict, source_quality(source)), "data": data_to_dict(data),
             "reason": str(assessment.get("reason") or "")[:80]}
     st["queue"][cid] = cand
     _bump(source, "queued")
@@ -747,6 +786,15 @@ async def fetch_posts(client: Any, name: str, *, last_id: int = 0, limit: int = 
         raise
 
 
+def _ts(date: datetime | None) -> float:
+    """Время поста источника (unix) или 0, если неизвестно."""
+    if date is None:
+        return 0.0
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date.timestamp()
+
+
 def _age_hours(date: datetime | None, now: datetime) -> float:
     if date is None:
         return 0.0
@@ -756,25 +804,31 @@ def _age_hours(date: datetime | None, now: datetime) -> float:
 
 
 async def pull_source(client: Any, name: str, ai: Any | None = None, now: datetime | None = None) -> dict[str, int]:
-    """Прочитать новые посты одного канала и разобрать. → счётчики. last_id двигаем только по разобранным постам."""
+    """Прочитать новые посты одного канала и разобрать — СНАЧАЛА САМЫЕ СВЕЖИЕ (его просьба 08.10: не копить список в сотню, а брать свежее и
+    лучшее). Старше суток не берём, из одного канала в запасе не больше MAX_NEW_PER_SOURCE. → счётчики.
+    last_id уходит вперёд на самый новый пост круга; при ошибке нейросети остаётся прежним — весь круг повторится (уже разобранное не платное)."""
     now = now or datetime.now(TZ)
     src = load()["sources"][name]
-    posts = await fetch_posts(client, name, last_id=int(src.get("last_id") or 0))
+    last_id = int(src.get("last_id") or 0)
+    posts = await fetch_posts(client, name, last_id=last_id)
     counts = {"posts": len(posts), "queued": 0, "rejected": 0, "skipped": 0, "errors": 0}
-    done_id = int(src.get("last_id") or 0)
-    for post in sorted(posts, key=lambda p: p["id"]):
+    failed = False
+    for post in sorted(posts, key=lambda p: p["id"], reverse=True):
         if _age_hours(post["date"], now) > MAX_AGE_H:
             counts["skipped"] += 1
-        else:
-            if sum(1 for c in candidates("new") if c.get("source") == name) >= MAX_NEW_PER_SOURCE:
-                break  # запаса из этого канала достаточно — остальное разберём, когда очередь схлынет (id дальше не двигаем)
-            result, _ = await consider(post["text"], source=name, msg_id=post["id"], ai=ai, now=now, views=int(post.get("views") or 0))
-            if result == "error":
-                counts["errors"] += 1
-                break  # этот и следующие посты — на следующий круг: id дальше не двигаем
-            counts[{"queued": "queued", "reject": "rejected"}.get(result, "skipped")] += 1
-        done_id = post["id"]
-    src["last_id"] = max(int(src.get("last_id") or 0), done_id)
+            continue
+        if sum(1 for c in candidates("new") if c.get("source") == name) >= MAX_NEW_PER_SOURCE:
+            counts["skipped"] += 1               # запаса из этого канала хватает: остальное старше и нам не нужно
+            continue
+        result, _ = await consider(post["text"], source=name, msg_id=post["id"], ai=ai, now=now, views=int(post.get("views") or 0),
+                                   posted=post["date"])
+        if result == "error":
+            counts["errors"] += 1
+            failed = True
+            break
+        counts[{"queued": "queued", "reject": "rejected"}.get(result, "skipped")] += 1
+    if not failed and posts:
+        src["last_id"] = max(last_id, max(p["id"] for p in posts))
     src["last_pull"] = now.isoformat(timespec="seconds")
     save()
     return counts

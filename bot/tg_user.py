@@ -269,8 +269,31 @@ def public(chat: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in chat.items() if not k.startswith("_")}
 
 
+# «Избранное» (Saved Messages) — чат с самим собой: в dialogs() его нет, поэтому «прочитай избранное», «напиши себе» раньше не находили чат
+_SELF_NORMS = {names.norm(w) for w in (
+    "избранное", "избранные", "избранном", "избранный", "в избранное", "из избранного", "сохранённые", "сохраненные", "сохранённое",
+    "saved messages", "saved", "себе", "самому себе", "saqlangan xabarlar", "saqlangan", "saqlanganlar", "ozimga", "o'zimga", "sevimlilar")}
+
+
+def is_self_query(queries: list[Any]) -> bool:
+    return any(names.norm(q) in _SELF_NORMS for q in queries if q)
+
+
+def _self_chat() -> dict[str, Any]:
+    return {"id": int(getattr(_me, "id", 0) or 0), "name": "Избранное", "username": "", "kind": "user", "unread": 0, "muted": False, "_peer": "me"}
+
+
+def _peer(chat: dict[str, Any]) -> Any:
+    me_id = getattr(_me, "id", None)
+    if chat.get("_peer"):
+        return chat["_peer"]
+    return "me" if me_id and chat.get("id") == me_id else chat["id"]
+
+
 async def find_chat(queries: list[str], alias: str | None = None) -> dict[str, Any]:
     """{"match": чат} | {} — лучший чат сразу, без «кому именно?»: сначала люди, недавние переписки чуть выше."""
+    if is_self_query(queries):
+        return {"match": _self_chat()} if await client() is not None else {}
     chats = await dialogs()
     people = [c for c in chats if c["kind"] == "user"]
     recent = {names.norm(c.get("name")): 0.03 for c in chats[:10]}
@@ -284,7 +307,7 @@ async def send(chat: dict[str, Any], text: str) -> bool:
     c = await client()
     if c is None:
         return False
-    await c.send_message(chat.get("_peer") or chat["id"], text)
+    await c.send_message(_peer(chat), text)
     return True
 
 
@@ -305,7 +328,7 @@ async def recent(chat: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
     if c is None:
         return []
     me_id = getattr(_me, "id", None)
-    out = [_msg_view(m, me_id=me_id, chat_name=chat["name"]) async for m in c.iter_messages(chat.get("_peer") or chat["id"], limit=limit)]
+    out = [_msg_view(m, me_id=me_id, chat_name=chat["name"]) async for m in c.iter_messages(_peer(chat), limit=limit)]
     return list(reversed(out))
 
 

@@ -378,8 +378,13 @@ async def _telegram_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
     if not tg_user.configured():
         return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     queries = [a.get("who")] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
-    found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
+    try:
+        found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
+    except Exception as exc:
+        logger.warning("telegram_send: чаты не прочитались", exc_info=True)
+        return {"error": f"Telegram не ответил ({type(exc).__name__}) — попробуй ещё раз"}
     if "match" not in found:
+        logger.info("telegram_send: чат «%s» не найден (%s)", a.get("who"), queries)
         return {"error": f"Не нашёл чат «{a.get('who')}» среди последних переписок"}
     chat = found["match"]
     pending = {"kind": "tg", "chat_id": chat["id"], "name": chat["name"], "text": text, "who": a.get("who")}
@@ -409,15 +414,20 @@ async def _telegram_read(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -
     if not tg_user.configured():
         return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     who = _str(a.get("who"))
-    if not who:
-        chats = await tg_user.unread()
-        return {"unread_chats": chats} if chats else {"unread_chats": [], "note": "непрочитанных нет"}
-    queries = [who] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
-    found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
-    if "match" not in found:
-        return {"error": f"Не нашёл чат «{who}»"}
-    limit = max(1, min(int(a.get("limit") or 5), 15))
-    return {"chat": found["match"]["name"], "messages": await tg_user.recent(found["match"], limit=limit)}
+    try:
+        if not who:
+            chats = await tg_user.unread()
+            return {"unread_chats": chats} if chats else {"unread_chats": [], "note": "непрочитанных нет"}
+        queries = [who] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
+        found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
+        if "match" not in found:
+            logger.info("telegram_read: чат «%s» не найден (%s)", who, queries)
+            return {"error": f"Не нашёл чат «{who}»"}
+        limit = max(1, min(int(a.get("limit") or 5), 15))
+        return {"chat": found["match"]["name"], "messages": await tg_user.recent(found["match"], limit=limit)}
+    except Exception as exc:
+        logger.warning("telegram_read не вышел", exc_info=True)
+        return {"error": f"Telegram не ответил ({type(exc).__name__}) — попробуй ещё раз"}
 
 
 _TIME_RE = re.compile(r"^(\d{1,2})[:.\s](\d{2})$")

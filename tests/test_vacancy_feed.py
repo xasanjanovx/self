@@ -376,7 +376,8 @@ def test_pull_source_stops_when_the_stock_of_candidates_is_big_enough(monkeypatc
     ai = FakeAI()
     counts = asyncio.run(feed.pull_source(FakeClient([_post(6, GOOD, 2), _post(7, second, 2)]), "jobs_uz", ai))
     assert counts["queued"] == 1 and ai.assess_calls == 1                       # нейросеть на лишнее не тратим
-    assert feed.sources()["jobs_uz"]["last_id"] == 6                            # а второй пост разберём, когда запас схлынет
+    assert feed.candidates("new")[0]["msg_id"] == 7                             # взяли самый свежий из канала, а не самый старый
+    assert feed.sources()["jobs_uz"]["last_id"] == 7                            # старый пост уже не нужен
 
 
 def test_ensure_favorites_adds_his_channels_once_and_respects_removal():
@@ -527,3 +528,46 @@ def test_no_vertex_key_stops_feed_text_requests(monkeypatch):
     with vertex_only():
         with pytest.raises(RuntimeError, match="VERTEX_API_KEY"):
             asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))
+
+
+# ------------------------------------------------------------------ только свежее и лучшее, раз в N часов (08.10)
+def test_fresh_and_best_goes_first_and_old_posts_are_dropped():
+    now_ts = NOON.timestamp()
+    old = _cand("old", 80)
+    old["posted_ts"] = now_ts - 20 * 3600                                       # 20 часов назад
+    new = _cand("new", 70)
+    new["posted_ts"] = now_ts - 1 * 3600                                        # час назад
+    assert feed.freshness_bonus(now_ts - 3600, now_ts) == 15 and feed.freshness_bonus(now_ts - 20 * 3600, now_ts) == 0
+    assert feed.rank(new, now_ts) > feed.rank(old, now_ts)                      # 70+15 против 80+0
+    assert feed.next_card(NOON)["id"] == "new"
+    stale = _cand("stale", 99)
+    stale["posted_ts"] = now_ts - (feed.MAX_AGE_H + 1) * 3600
+    feed.cleanup(NOON)
+    assert "stale" not in feed.load()["queue"] and "new" in feed.load()["queue"]
+
+
+def test_pull_source_takes_the_freshest_posts_first_and_keeps_a_small_stock(monkeypatch):
+    _src()
+    monkeypatch.setattr(feed, "MAX_NEW_PER_SOURCE", 2)
+    phones = ["+998 90 111 11 11", "+998 90 222 22 22", "+998 90 333 33 33", "+998 90 444 44 44"]
+    titles = ["oshpaz", "haydovchi", "tikuvchi", "sotuvchi"]
+    posts = [_post(10 + i, GOOD.replace("barista", titles[i]).replace("+998 90 123 45 67", phones[i]), hours_ago=8 - 2 * i) for i in range(4)]
+    counts = asyncio.run(feed.pull_source(FakeClient(posts), "jobs_uz", FakeAI()))
+    assert counts["queued"] == 2
+    assert sorted(c["msg_id"] for c in feed.candidates("new")) == [12, 13]      # два самых свежих (2 и 0 часов назад)
+    assert feed.sources()["jobs_uz"]["last_id"] == 13
+
+
+def test_next_card_time_follows_the_interval_the_window_and_the_daily_cap():
+    ts = NOON.timestamp()
+    assert feed.next_card_at(NOON) == NOON                                      # карточек ещё не было — можно сразу
+    feed.load()["last_card"] = ts - 30 * 60
+    assert feed.next_card_at(NOON) == NOON + timedelta(minutes=90)              # интервал 2 ч от прошлой
+    feed.load()["last_card"] = ts - 10 * 60
+    feed.set_cfg("card_gap_min", 240)
+    assert feed.next_card_at(NOON) == NOON + timedelta(minutes=230)
+    feed.set_cfg("window_to", 14)                                               # 15:50 уже за окном → завтра с начала окна
+    nxt = feed.next_card_at(NOON)
+    assert nxt.date() == (NOON + timedelta(days=1)).date() and nxt.hour == feed.window()[0]
+    feed.set_enabled(False)
+    assert feed.next_card_at(NOON) is None

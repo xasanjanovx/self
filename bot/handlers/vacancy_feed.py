@@ -59,6 +59,15 @@ def gap_label(minutes: int) -> str:
     return f"{minutes // 60} ч" if minutes % 60 == 0 else f"{minutes} мин"
 
 
+def _next_label() -> str:
+    """Когда придёт следующая карточка: «19:20», «завтра 08:00» или «—», если выключено."""
+    now = datetime.now(feed.TZ)
+    at = feed.next_card_at(now)
+    if at is None:
+        return "—"
+    return f"{at:%H:%M}" if at.date() == now.date() else f"завтра {at:%H:%M}"
+
+
 def guard_line() -> str:
     left = feed.hold_left()
     if left > 0:
@@ -75,9 +84,9 @@ def panel_text() -> str:
         "",
         f"Статус: {'включён ✅' if s['enabled'] else 'выключен ⏸'}",
         f"Каналы: {s['approved']}" + (f" · ждут решения: {s['pending']}" if s["pending"] else ""),
-        f"Сегодня: {s['today']} из {s['cap']} · в очереди: {s['new']} · ждут ответа: {s['carded']}"
+        f"Сегодня: {s['today']} из {s['cap']}" + (f" · ждёт ответа: {s['carded']}" if s["carded"] else "")
         + (f" · отложено: {len(feed.candidates('scheduled'))}" if feed.candidates("scheduled") else ""),
-        f"Окно: {start:02d}:00–{end:02d}:00 · карточка раз в {gap_label(int(feed.cfg('card_gap_min')))}",
+        f"Следующая: {_next_label()} · раз в {gap_label(int(feed.cfg('card_gap_min')))} ({start:02d}:00–{end:02d}:00)",
         guard_line(),
         f"🚫 Реклама: фильтр {'вкл' if feed.cfg('ads_on') else 'выкл'} · удалено {sum(1 for a in ads if a.get('deleted'))}",
     ]
@@ -332,7 +341,7 @@ async def send_card(bot: Bot, chat_id: int, cand: dict[str, Any], *, regenerate:
     shown = post if image else post + "\n\n⚠️ Картинки нет — нажми «Нарисовать картинку»."
     head = f"📥 {h(str(cand['data'].get('headline') or 'Вакансия'))} · из @{cand['source']}"
     ids, file_id, _ = await _send_post(bot, chat_id, shown, image, _card_markup(cand, contact_url, can_publish=bool(image)), head=head)
-    cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image)})
+    cand.update({"status": "carded", "card_ids": ids, "chat_id": chat_id, "file_id": file_id, "has_image": bool(image), "card_ts": time.time()})
     feed.note_card_sent()
     feed.save()
     notes = [n for n in (warning, "✂️ Текст сокращён до 1024 знаков."
@@ -530,7 +539,8 @@ async def cb_new_image(callback: CallbackQuery) -> None:
 
 # ------------------------------------------------------------------ фоновый круг
 async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
-    """Один круг: прочитать каналы → разобрать → (раз в 3 дня) поискать новые → показать одну карточку. Воркер зовёт раз в 30 минут."""
+    """Один круг: (раз в ~25 мин) прочитать каналы → разобрать → (раз в сутки) поискать новые → если пора, показать одну карточку.
+    Воркер зовёт каждые 5 минут, чтобы карточка приходила вовремя."""
     from .. import caller
 
     out: dict[str, Any] = {"pulled": None, "card": False, "note": ""}
@@ -541,10 +551,12 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
     async with _busy:
         feed.ensure_favorites()
         ready_now = manual and feed.next_card(datetime.now(feed.TZ), force=True) is not None   # «Следующая вакансия»: есть готовая — без чтения каналов
-        if feed.sources("approved") and not ready_now:
+        pull_due = manual or time.time() - float(feed.load().get("last_pull_all") or 0) >= feed.PULL_EVERY_S   # воркер заходит часто, каналы читаем реже
+        if feed.sources("approved") and not ready_now and pull_due:
             if caller.user_client() is None:
                 out["note"] = "аккаунт JES не в сети"
             else:
+                feed.load()["last_pull_all"] = time.time()
                 try:
                     out["pulled"] = await feed.pull_all()
                 except feed.FeedUnavailable as exc:
@@ -559,15 +571,27 @@ async def tick(bot: Bot, *, manual: bool = False) -> dict[str, Any]:
             feed.load()["last_discovery"] = time.time()  # сначала отметка: упадёт — не будем долбить каждые полчаса
             feed.save()
             _spawn(_discover_and_report(bot, owner))
-        cand = feed.next_card(now, force=manual)
+        # раз в N часов (настройка «Между карточками») — одна карточка: самая свежая и лучшая. Прежняя без ответа убирается — копить их незачем
+        cand = feed.next_card(now, force=manual, replace_open=not manual)
         if cand is not None:
             try:
                 out["card"] = await send_card(bot, owner, cand)
                 if not out["card"]:
                     out["note"] = out["note"] or "картинка пока не получилась — попробую ещё раз в следующий круг"
+                elif not manual:
+                    await _expire_open_cards(bot, keep=cand["id"])
             except Exception:
                 logger.exception("vacancy_feed: вакансия %s не отправилась", cand["id"])
     return out
+
+
+async def _expire_open_cards(bot: Bot, *, keep: str) -> None:
+    """Карточки, на которые он не ответил за целый интервал, убираем из чата и больше не показываем — на смену пришла свежая."""
+    for old in feed.candidates("carded"):
+        if old["id"] == keep:
+            continue
+        await _delete_card(bot, old)
+        feed.mark_handled(old, "skipped")
 
 
 @router.callback_query(F.data == "vf:now")
