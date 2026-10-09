@@ -1215,6 +1215,7 @@ def announce_prompt(name: str, app: str, lang: str, memory: str = "") -> str:
 
 
 _LANG_CODE = {"ru": "ru-RU", "uz": "uz-UZ", "en": "en-US"}
+_MESSENGER_RU = {"telegram": "Телеграм", "whatsapp": "Вотсап", "viber": "Вайбер", "imo": "Имо", "skype": "Скайп"}
 
 
 def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
@@ -1229,7 +1230,9 @@ def announcement_parts(uid: int, name: str, app: str, lang: str) -> list[tuple]:
     one, anon = _ANNOUNCE_FALLBACK.get(lang, _ANNOUNCE_FALLBACK["ru"])
     uz = lang == "uz"
     messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
-    where = (f" ({messenger})" if uz else f" в {messenger}") if messenger else ""
+    # 09.10: «в Telegram» латиницей русский голос читал на английский лад — по-русски: «в Телеграм», «в Вотсап»
+    shown = _MESSENGER_RU.get(messenger.lower(), messenger) if lang == "ru" else messenger
+    where = (f" ({messenger})" if uz else f" в {shown}") if messenger else ""
     if name and phone.names.as_phone_number(name):
         name = phone.contact_by_number(uid, name) or ""  # номер из его книги — называем человека
     if not name:

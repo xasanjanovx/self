@@ -24,13 +24,13 @@ def test_speakable_uzbek_latin_names():
 def test_announcement_text(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     say = lambda name, app="", lang="ru": phone_live.announcement_text(1, name, app, lang)  # noqa: E731
-    assert say("JES | AI", "Telegram") == "Звонит Джес в Telegram"
+    assert say("JES | AI", "Telegram") == "Звонит Джес в Телеграм"
     assert say("Jarvis") == "Звонит Джес"
     assert say("Мама") == "Звонит мама"
     assert say("Oyijon") == "Звонит мама"
     assert say("+998 90 123 45 67") == "Звонит незнакомый номер"
     assert say("") == "Звонит незнакомый номер"
-    assert say("Mashhur bek aka", "WhatsApp") == "Звонит Mashhur Bek aka в WhatsApp"      # 09.10: имя — узбекской латиницей, по-узбекски
+    assert say("Mashhur bek aka", "WhatsApp") == "Звонит Mashhur Bek aka в Вотсап"      # 09.10: имя — узбекской латиницей, по-узбекски
     assert say("Alisher", "Telegram", "uz") == "Alisher qo'ng'iroq qilyapti (Telegram)"
 
 
@@ -99,8 +99,8 @@ def test_announcement_parts_split_russian_frame_and_uzbek_name():
     from bot import phone_live
 
     parts = phone_live.announcement_parts(77, "Sirojbek aka", "Telegram", "ru")
-    assert parts == [("Звонит", "ru-RU"), ("Sirojbek aka", "uz-UZ", "name"), ("в Telegram", "ru-RU")]
-    assert phone_live.announcement_text(77, "Sirojbek aka", "Telegram", "ru") == "Звонит Sirojbek aka в Telegram"
+    assert parts == [("Звонит", "ru-RU"), ("Sirojbek aka", "uz-UZ", "name"), ("в Телеграм", "ru-RU")]
+    assert phone_live.announcement_text(77, "Sirojbek aka", "Telegram", "ru") == "Звонит Sirojbek aka в Телеграм"
     assert phone_live.announcement_parts(77, "Хусанбой ака", "", "ru") == [("Звонит", "ru-RU"), ("Xusanboy aka", "uz-UZ", "name")]
 
 
@@ -108,7 +108,7 @@ def test_kin_and_helper_and_unknown_stay_one_piece():
     from bot import phone_live
 
     assert phone_live.announcement_parts(77, "Мама", "", "ru") == [("Звонит мама", None)]
-    assert phone_live.announcement_parts(77, "JES | AI", "Telegram", "ru") == [("Звонит Джес в Telegram", None)]
+    assert phone_live.announcement_parts(77, "JES | AI", "Telegram", "ru") == [("Звонит Джес в Телеграм", None)]
     assert phone_live.announcement_parts(77, "", "", "ru") == [("Звонит незнакомый номер", None)]
 
 
