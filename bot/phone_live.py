@@ -1280,7 +1280,7 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     # именем, а все незнакомые номера — одной записью. v5 (09.10): имена по-узбекски — записанное по-русски перезаписывается
     parts = announcement_parts(uid, name, app, persona.lang)
     text = " ".join(part[0] for part in parts)
-    key = hashlib.sha1(f"v7|{NAME_STYLE}|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"v8|{NAME_STYLE}|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"

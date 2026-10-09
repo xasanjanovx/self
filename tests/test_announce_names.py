@@ -278,3 +278,26 @@ def test_similarity_ignores_quotes_around_what_the_listener_wrote():
 
     assert uz_voice.similarity('"Dilshod aka"', "Dilshod aka") == 1.0
     assert uz_voice.similarity("«Jasur»", "Jasur") == 1.0
+
+
+def test_cut_name_keeps_all_words_when_there_is_a_pause_inside_a_long_name():
+    """09.10: «Komiljon aka Jalaquduq» — после «aka» пауза 0.3 с; по первой паузе терялось «Jalaquduq», и оно читалось отдельно как «Yalaquduq»."""
+    import numpy as np
+
+    from bot import uz_voice
+
+    pcm = np.concatenate([_silence(0.25), _speech(0.7), _silence(0.1), _speech(0.35), _silence(0.32), _speech(0.8),   # Komiljon aka | Jalaquduq
+                          _silence(0.6), _speech(0.45), _silence(0.13), _speech(0.55)]).tobytes()                          # qo'ng'iroq qilyapti
+    out = uz_voice.cut_name(pcm)
+    assert out is not None
+    seconds = len(out) / 2 / 24000
+    assert 2.2 <= seconds <= 2.5                      # три слова имени (0.7 + 0.1 + 0.35 + 0.32 + 0.8 = 2.27 + кромки), без хвоста фразы
+
+
+def test_voice_text_puts_a_comma_after_the_honorific_before_the_next_word():
+    from bot import uz_voice
+
+    assert uz_voice.voice_text("Komiljon aka Jalaquduq") == "Komiljon aka, Jalaquduq"
+    assert uz_voice.voice_text("Xusanboy aka") == "Xusanboy aka"                 # обращение в конце — запятая не нужна
+    assert uz_voice.voice_text("Mashhur bek") == "Mashhur bek"
+    assert uz_voice.voice_text("Nafisa opa Axb") == "Nafisa opa, Axb"
