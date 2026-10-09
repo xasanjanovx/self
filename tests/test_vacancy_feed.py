@@ -491,10 +491,11 @@ def test_feed_text_requests_never_reach_ai_studio(monkeypatch):
         return httpx.Response(500, text="boom")
 
     ai = _ai_client(monkeypatch, handler)
+    monkeypatch.setattr("bot.ai._backoff", lambda attempt: 0.0)     # 09.10: Vertex на временных сбоях повторяется — без пауз в тесте
     with vertex_only():
         with pytest.raises(RuntimeError, match="Vertex"):
             asyncio.run(ai._post("gemini-3.5-flash-lite", {"contents": []}))
-    assert hosts == ["aiplatform.googleapis.com"]
+    assert hosts and set(hosts) == {"aiplatform.googleapis.com"}
 
 
 def test_feed_text_goes_to_vertex_even_if_settings_say_ai_studio(monkeypatch):

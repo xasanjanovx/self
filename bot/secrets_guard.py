@@ -105,7 +105,7 @@ async def validate_gemini(key: str) -> tuple[bool, str]:
 
 async def handle(message: Any, uid: int, lang: str = "ru") -> None:
     """Сообщение с ключом: удалить из чата; ключ Gemini владельца — проверить и сохранить; остальное — только предупредить."""
-    from . import access
+    from . import access, gcloud
     from . import ai as ai_mod
 
     kind, value = find(message.text or message.caption or "") or ("secret", "")
@@ -116,7 +116,11 @@ async def handle(message: Any, uid: int, lang: str = "ru") -> None:
     except Exception:
         deleted = False
     tail = ("" if not deleted else (" Xabarni chatdan o‘chirdim." if uz else " Сообщение с ключом я удалил из чата."))
-    if kind == "gemini" and access.is_owner(uid):
+    if kind == "gemini" and access.is_owner(uid) and not gcloud.studio_allowed():
+        # 09.10: «AI Studio пока не используй» — ключ AI Studio не проверяем (это запрос в AI Studio) и не сохраняем
+        text = ("🔑 AI Studio hozircha o‘chirilgan (faqat Vertex) — kalitni tekshirmadim va saqlamadim." if uz
+                else "🔑 AI Studio пока отключён (работаем только через Vertex) — ключ не проверял и не сохранял.") + tail
+    elif kind == "gemini" and access.is_owner(uid):
         ok, why = await validate_gemini(value)
         if ok:
             save_free_key(value)

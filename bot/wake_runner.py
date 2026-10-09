@@ -17,6 +17,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from . import call_dialog as cd
 from . import caller
+from . import phone_link
 from . import prayer
 from . import services
 from . import voice
@@ -205,7 +206,8 @@ async def _dialog_call(profile: Profile, s: wake_mod.WakeSettings, plan: wake_mo
     if live.snooze_minutes:
         await snooze(profile, live.snooze_minutes)
     if live.model or live.dialed:  # звонок состоялся (взяли или нет) — итог оттуда; запасной путь — только при сбое Gemini
-        return {"answered": live.answered, "error": live.error, "state": state, "quiz": asked}
+        return {"answered": live.answered, "error": live.error, "state": state, "quiz": asked,
+                "no_reply": live.no_reply, "heard_peak": live.heard_peak}
     # Gemini Live недоступен — запасной путь: старый пошаговый разговор
     logger.warning("wake: live недоступен (%s), пошаговый режим", live.error)
     greeting_pcm = await _say(cd.greeting(state))
@@ -253,6 +255,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     dialog_text = ""
     result: dict[str, Any] = {}
     if s.call_enabled and caller.available():
+        phone_link.hurry(uid, HURRY_S)   # приложение опрашивает сервер без пауз: громкий сигнал дойдёт сразу, а не через минуту
         if s.talk:
             result = await _dialog_call(profile, s, plan, minutes_left, attempts)
             answered, call_error = bool(result.get("answered")), result.get("error")
@@ -298,6 +301,7 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
     if dialog_text:
         fields["dialog"] = dialog_text[:2000]
     await services.save_wake_log(uid, plan.day, fields)
+    await _loud_backup(bot, profile, attempts, call_error=call_error, answered=answered, confirmed=confirmed, result=result)
     if call_error:
         logger.info("wake call error for %s: %s", uid, call_error)
         if call_error in {"privacy", "peer_unknown", "no_answer"}:
@@ -317,6 +321,36 @@ async def run_attempt(bot: Bot, profile: Profile, s: wake_mod.WakeSettings, plan
         if quiz is not None:
             await _send_quiz_card(bot, profile, quiz)
     return {"attempts": attempts, "answered": answered, "confirmed": confirmed, "call_error": call_error}
+
+
+LOUD_RING_S = 60            # громкий сигнал приложения — столько секунд (замолкает, как только он разблокировал телефон)
+LOUD_RING_ATTEMPTS = 8      # …не дольше стольких неудачных попыток за утро
+HURRY_S = 15 * 60
+LOUD_NOTE = {"ru": "Не слышу вас в звонке (пик громкости {peak}). Включила громкий сигнал на телефоне — возьмите его в руки.",
+             "uz": "Qo'ng'iroqda sizni eshitmadim (ovoz cho'qqisi {peak}). Telefonda baland signal yoqdim — qo'lingizga oling.",
+             "en": "I couldn't hear you in the call (peak level {peak}). I turned on a loud signal on the phone — pick it up."}
+
+
+async def _loud_backup(bot: Bot, profile: Profile, attempts: int, *, call_error: str | None, answered: bool, confirmed: bool,
+                       result: dict[str, Any] | None) -> None:
+    """09.10 его выбор «громкий сигнал, если не взял трубку»: не взял звонок Telegram (или взял и молчит) — приложение на телефоне
+    включает громкий сигнал (поток будильника: слышно и на беззвучном) на минуту; он замолкает сам, когда телефон разблокирован."""
+    if confirmed or attempts > LOUD_RING_ATTEMPTS:
+        return
+    uid = profile.telegram_id
+    silent_pickup = bool(answered and (result or {}).get("no_reply"))
+    if call_error != "no_answer" and not silent_pickup:
+        return
+    pushed = phone_link.push(uid, {"type": "ring_phone", "seconds": LOUD_RING_S})
+    logger.info("wake %s: громкий сигнал на телефон (%s, приложение на связи: %s)", uid,
+                "взял трубку, ответа не слышно" if silent_pickup else "не взял трубку", pushed)
+    if silent_pickup and attempts == 1:
+        try:
+            peak = int((result or {}).get("heard_peak") or 0)
+            await screen_mod_.send_note(bot, uid, LOUD_NOTE.get(profile.lang, LOUD_NOTE["ru"]).format(peak=peak), ttl=6 * 3600,
+                                        disable_notification=False)
+        except Exception:
+            logger.warning("wake loud note failed for %s", uid, exc_info=True)
 
 
 async def _send_quiz_card(bot: Bot, profile: Profile, quiz: Any) -> None:

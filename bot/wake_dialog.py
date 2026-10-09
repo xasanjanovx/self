@@ -28,6 +28,7 @@ LANGS = ("ru", "uz", "en")
 QUIZ_VERDICTS = ("correct", "wrong", "unknown", "other")
 FINAL_VERDICTS = ("up", "not_yet", "other")
 SNOOZE_MAX_MIN = 5
+UNCLEAR_MAX = 2          # не разобрали ответ столько раз подряд — вопрос засчитываем как «принято» (без ошибки) и идём дальше
 
 
 def questions_for(minutes_left: int | None, total: int = islam_quiz.QUESTIONS_PER_DAY) -> int:
@@ -112,6 +113,34 @@ def final_prompt(heard: str) -> str:
         '"other" — не по теме или непонятно.')
 
 
+def listen_quiz_prompt(q: islam_quiz.Q) -> str:
+    """09.10: вместо «расшифровка → оценка по тексту» (сонную речь распознавание коверкало: «Абу Талиб» превратился в «obuvnoy», и верный ответ
+    засчитали ошибкой) — модель слушает ЗАПИСЬ и сразу знает, какой ответ ждём. Один вызов вместо двух."""
+    arabic = f"Арабский текст (если ответ — дуа или аят): {q.ar}\n" if q.ar else ""
+    return (
+        "Человека только что разбудили звонком и задали исламский вопрос. Он отвечает сонным тихим голосом, возможно шёпотом; язык — русский "
+        "или узбекский (бывает смесь; имена и арабские слова — с узбекским произношением). Послушай запись.\n"
+        f"Вопрос: {q.q}\nПравильный ответ: {q.a}\n" + arabic
+        + 'Верни JSON {"text": "...", "verdict": "..."}.\n'
+        "text — что сказано, дословно (узбекский — латиницей; слов нет — пустая строка).\n"
+        'verdict: "correct" — по смыслу верно: главное названо, произношение и акцент не ошибка («Abu Tolib» = «Абу Талиб»; полное имя, '
+        "порядок слов и мелочи не нужны; если частей несколько — верно, когда названо главное или большинство); "
+        '"wrong" — ЧЁТКО слышно, что названо другое; "unknown" — ПРЯМО говорит, что не знает, не помнит или сдаётся; '
+        '"other" — это не ответ: «да», «угу», «проснулся», «алло», встречный вопрос, жалоба, мычание, дыхание, шум — или ты не уверен, что '
+        'расслышал. Сомневаешься между "wrong" и "other" — выбирай "other".')
+
+
+def listen_final_prompt() -> str:
+    return (
+        "Человека разбудили звонком и спросили: «Вы встали? Не ляжете обратно?». Он отвечает сонным голосом; язык — русский или узбекский. "
+        "Послушай запись.\n"
+        'Верни JSON {"text": "...", "verdict": "..."}.\n'
+        "text — что сказано, дословно (узбекский — латиницей; слов нет — пустая строка).\n"
+        'verdict: "up" — ясно говорит, что УЖЕ встал, проснулся, на ногах («встал», «turdim», «uygondim», «уже на ногах»); '
+        '"not_yet" — ещё лежит, «встаю», «сейчас», «ещё минуту», просит подождать, или сонное «да / ага / угу» без ясных слов; '
+        '"other" — не по теме, неразборчиво или тишина.')
+
+
 def parse_verdict(data: Any, allowed: tuple[str, ...]) -> str:
     """Ответ модели-оценщика → один из allowed; всё остальное — пусто (оценщик не ответил как надо)."""
     value = data.get("verdict") if isinstance(data, dict) else data
@@ -137,6 +166,7 @@ _T: dict[str, dict] = {
         "great": "Отлично, {t}!", "wait": "Ещё минуту, {t}, осталось {k}.",
         "time": "Сейчас {h}.", "time_left": "Сейчас {h}, до такбира {n}.",
         "bye": "До такбира {n}. Пусть Аллах примет ваш намаз!", "bye_late": "Пусть Аллах примет ваш намаз!",
+        "deaf": "{T}, я вас почти не слышу. Скажите «да» погромче или поднесите телефон ближе.",
     },
     "uz": {
         "greet": "Xayrli tong, {t}! Uyg'ondingizmi?",
@@ -154,6 +184,7 @@ _T: dict[str, dict] = {
         "great": "Ajoyib, {t}!", "wait": "Bir daqiqa, {t}, {k} qoldi.",
         "time": "Hozir {h}.", "time_left": "Hozir {h}, takbirgacha {n} qoldi.",
         "bye": "Takbirgacha {n} qoldi. Alloh namozingizni qabul qilsin!", "bye_late": "Alloh namozingizni qabul qilsin!",
+        "deaf": "{T}, sizni deyarli eshitmayapman. «Ha» deb balandroq ayting yoki telefonni yaqinroq tuting.",
     },
     "en": {
         "greet": "Good morning, {t}! Are you up?",
@@ -171,6 +202,7 @@ _T: dict[str, dict] = {
         "great": "Great, {t}!", "wait": "One more minute, {t}, {k} left.",
         "time": "It's {h}.", "time_left": "It's {h}, {n} until takbir.",
         "bye": "{n} until takbir. May Allah accept your prayer!", "bye_late": "May Allah accept your prayer!",
+        "deaf": "{T}, I can barely hear you. Say \"yes\" louder or hold the phone closer.",
     },
 }
 
@@ -199,6 +231,8 @@ class WakeFlow:
     nudges: int = 0                       # паузы подряд без его речи
     total_nudges: int = 0
     hear_used: bool = False               # «вы меня слышите?» — не чаще раза за звонок
+    deaf_used: bool = False               # «я вас почти не слышу» уже сказано (один раз за звонок)
+    unclear: int = 0                      # сколько раз подряд не разобрали его ответ на этот вопрос (дважды — принимаем и идём дальше)
     hurries: int = 0                      # сколько раз он торопил фразой «встал, отключайся»
     sleep_asks: int = 0                   # сколько раз просил ещё поспать
     said: int = 0                         # сколько реакций уже сказано (чтобы фразы чередовались)
@@ -325,7 +359,16 @@ class WakeFlow:
             return ""
         self.heard_user = True
         self.nudges = 0
+        self.unclear += 1
+        if self.stage == "quiz" and self.unclear >= UNCLEAR_MAX and self.current() is not None:
+            # слов не разобрать второй раз подряд — речь была, значит он не спит: принимаем, называем ответ, идём к следующему вопросу
+            return self.answer("").say
         return f"{self.t('unclear')} {self._again()}".strip()
+
+    def deaf_hint(self) -> str:
+        """09.10 проверка слуха: из трубки почти нет звука, а он молчит — просим сказать «да» громче / поднести телефон. Один раз за звонок."""
+        self.deaf_used = True
+        return self.t("deaf")
 
     def hear_reply(self) -> str:
         """Он сам спросил «алло / вы меня слышите»: подтверждаем и возвращаем к делу — это не считается нашим «слышите ли»."""
@@ -382,7 +425,11 @@ class WakeFlow:
         if q is None:
             return Move()
         if verdict == "other":
-            return Move(say=f"{self.t('unclear')} {self._again()}")   # не ответ — тот же вопрос, ничего не засчитываем
+            self.unclear += 1
+            if self.unclear < UNCLEAR_MAX:
+                return Move(say=f"{self.t('unclear')} {self._again()}")   # не ответ — тот же вопрос, ничего не засчитываем
+            verdict = ""   # 09.10: утром не разобрали два ответа подряд и зациклились на одном вопросе — принимаем и идём дальше
+        self.unclear = 0
         if verdict in {"correct", "wrong", "unknown"} and self.on_result:
             self.on_result(q.id, verdict == "correct")
         if verdict == "correct":
@@ -431,4 +478,5 @@ def build(*, lang: str, title: str, day_quiz: list[islam_quiz.Q], minutes_left: 
 
 
 __all__ = ["WakeFlow", "Move", "build", "questions_for", "minutes_text", "questions_text", "quiz_prompt", "final_prompt", "parse_verdict",
+           "listen_quiz_prompt", "listen_final_prompt", "UNCLEAR_MAX",
            "heard_means_up", "is_hurry", "has_words", "QUIZ_VERDICTS", "FINAL_VERDICTS"]

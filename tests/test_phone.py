@@ -395,3 +395,97 @@ def test_telegram_tool_failures_are_reported_not_raised(uid, monkeypatch):
     read = asyncio.run(phone.make_runner(turn)("telegram_read", {"who": "Алишер"}, ctx))
     send = asyncio.run(phone.make_runner(turn)("telegram_send", {"who": "Алишер", "text": "привет"}, ctx))
     assert "ConnectionError" in read["error"] and "ConnectionError" in send["error"]
+
+
+# ------------------------------------------------------------------ 09.10: «JES не видит сообщения в Telegram и пропущенные»
+def _fake_digest(monkeypatch, *, unread=(), missed=(), latest=()):
+    async def fake_unread(*a, **k):
+        return list(unread)
+
+    async def fake_missed(*a, **k):
+        return list(missed)
+
+    async def fake_latest(*a, **k):
+        return list(latest)
+
+    monkeypatch.setattr(tg_user, "configured", lambda: True)
+    monkeypatch.setattr(tg_user, "unread", fake_unread)
+    monkeypatch.setattr(tg_user, "missed_calls", fake_missed)
+    monkeypatch.setattr(tg_user, "latest", fake_latest)
+
+
+def test_what_is_new_in_telegram_gives_unread_and_missed_calls(uid, monkeypatch):
+    unread = [{"chat": "Алишер", "kind": "user", "unread": 2, "messages": [{"from": "Алишер", "text": "позвони", "time": "09.10 09:56"}]}]
+    missed = [{"from": "Мама", "count": 1, "last": "09.10 08:10"}]
+    _fake_digest(monkeypatch, unread=unread, missed=missed)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    out = asyncio.run(phone.make_runner(turn)("telegram_read", {}, ctx))
+    assert out["unread_chats"] == unread and out["missed_telegram_calls"] == missed and "latest_chats" not in out
+
+
+def test_nothing_unread_still_shows_the_latest_messages_instead_of_nothing(uid, monkeypatch):
+    latest = [{"chat": "Алишер", "kind": "user", "messages": [{"from": "Алишер", "text": "ок", "time": "09.10 09:56"}]}]
+    _fake_digest(monkeypatch, latest=latest)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    out = asyncio.run(phone.make_runner(turn)("telegram_read", {}, ctx))
+    assert out["unread_chats"] == [] and out["latest_chats"] == latest and "нет" in out["note"]
+
+
+def test_search_for_the_word_favorites_reads_the_saved_messages(uid, monkeypatch):
+    """08.10 20:39 модель искала слово «Избранное» по всем чатам вместо чтения чата с самим собой."""
+    sent, asked = _fake_tg(monkeypatch)
+    turn = phone.PhoneTurn(uid=uid)
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    result = asyncio.run(phone.make_runner(turn)("telegram_search", {"query": "Избранное", "limit": 1}, ctx))
+    assert result["chat"] == "Избранное" and result["messages"][0]["text"] == "купить хлеб" and asked == ["me"]
+
+
+def test_message_time_is_shown_in_his_time_zone_not_the_server_utc():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    msg = SimpleNamespace(out=False, sender_id=5, sender=None, message="привет", media=None, date=datetime(2026, 10, 9, 4, 56, tzinfo=timezone.utc))
+    assert tg_user._msg_view(msg, me_id=1, chat_name="Алишер", tz=ZoneInfo("Asia/Tashkent"))["time"] == "09.10 09:56"
+    assert tg_user._msg_view(msg, me_id=1, chat_name="Алишер")["time"] == "09.10 09:56"       # без зоны — Ташкент по умолчанию
+
+
+def test_missed_telegram_calls_skip_the_helper_account_and_outgoing(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from bot import caller
+
+    class PhoneCallDiscardReasonMissed: ...
+    class PhoneCallDiscardReasonHangup: ...
+    class MessageActionPhoneCall:
+        def __init__(self, reason):
+            self.reason = reason
+
+    now = datetime.now(timezone.utc)
+    history = {
+        1: [SimpleNamespace(date=now - timedelta(hours=2), out=False, action=MessageActionPhoneCall(PhoneCallDiscardReasonMissed())),
+            SimpleNamespace(date=now - timedelta(hours=3), out=False, action=MessageActionPhoneCall(PhoneCallDiscardReasonHangup())),
+            SimpleNamespace(date=now - timedelta(hours=60), out=False, action=MessageActionPhoneCall(PhoneCallDiscardReasonMissed()))],
+        2: [SimpleNamespace(date=now - timedelta(hours=1), out=False, action=MessageActionPhoneCall(PhoneCallDiscardReasonMissed()))],   # помощник JES
+        3: [SimpleNamespace(date=now - timedelta(hours=1), out=True, action=MessageActionPhoneCall(PhoneCallDiscardReasonMissed()))],    # он не дозвонился
+    }
+
+    class Client:
+        async def iter_messages(self, peer, limit=None):
+            for m in history[peer]:
+                yield m
+
+    async def fake_client():
+        return Client()
+
+    async def fake_dialogs(*, fresh=False):
+        return [{"id": i, "name": n, "kind": "user", "unread": 0, "muted": False, "_peer": i} for i, n in ((1, "Мама"), (2, "Джес"), (3, "Алишер"))]
+
+    monkeypatch.setattr(tg_user, "client", fake_client)
+    monkeypatch.setattr(tg_user, "dialogs", fake_dialogs)
+    monkeypatch.setattr(caller, "helper_id", 2)
+    out = asyncio.run(tg_user.missed_calls(hours=48))
+    assert [(r["from"], r["count"]) for r in out] == [("Мама", 1)]      # старше 48 ч, не пропущенное, помощник и исходящее — не в счёт

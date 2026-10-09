@@ -115,15 +115,34 @@ class Segmenter:
     """Звук с телефона → фразы: от ~0.3 с до начала речи до паузы VAD_SILENCE_MS. Порог — как у SpeechGate
     (шум подстраивается сам). Тишина, щелчки и кашель никуда не уходят — за них не платим."""
 
-    def __init__(self, rate: int = INPUT_RATE, silence_ms: int = VAD_SILENCE_MS) -> None:
+    def __init__(self, rate: int = INPUT_RATE, silence_ms: int = VAD_SILENCE_MS, *, min_rms: float = 350.0, factor: float = 2.5,
+                 floor: float = 300.0, floor_min: float = 50.0, floor_max: float = 3000.0) -> None:
         self.rate = rate  # телефон — 16 кГц; звонок Telegram (bot/cheap_voice.py) — 24 кГц
         self.silence_s = silence_ms / 1000  # пауза, после которой фраза кончилась (звонок — короче: ответ быстрее)
-        self.floor = 300.0
+        # 09.10 будильник «не слышит»: он отвечает сонным шёпотом, а порог 350 (−40 дБ) его не замечал. Подъём берёт чувствительнее
+        # (min_rms ~110, шум × 3, старт с низкого шума): тишина и шум после порога всё равно отсекаются по длине речи и расшифровкой
+        self.min_rms = min_rms
+        self.factor = factor
+        self.floor = floor
+        self.floor_min = floor_min    # ниже этого шум не опускаем (у подъёма 25: порог = min_rms)
+        self.floor_max = floor_max    # …и выше не поднимаем: тихий голос не должен «выучиться» как шум (у подъёма 300)
         self.active = False
+        self.last_rms = 0.0           # громкость последнего куска
+        self.peak_rms = 0.0           # самый громкий кусок с последнего сброса (reset_stats)
+        self.peak_all = 0.0           # …и за всё время (проверка слуха: звук из трубки вообще есть?)
+        self.total_s = self.audible_s = self.loud_s = 0.0
         self._pre: deque[bytes] = deque()
         self._pre_s = 0.0
         self._buf = bytearray()
         self._speech_s = self._quiet_s = self._len_s = 0.0
+
+    def reset_stats(self) -> None:
+        self.peak_rms = 0.0
+
+    def stats(self) -> str:
+        """«всего 240 с, слышно (>110) 31 с, громко (>350) 12 с, пик 2300, шум ~35» — слышит ли он нас вообще (для журнала звонка)."""
+        return (f"всего {self.total_s:.0f} с, слышно (>110) {self.audible_s:.0f} с, громко (>350) {self.loud_s:.0f} с, "
+                f"пик {self.peak_rms:.0f}, шум ~{self.floor:.0f}")
 
     def feed(self, pcm: bytes) -> tuple[bool, bytes | None, bool]:
         """→ (в этом куске началась речь, готовая фраза или None, фразу отбросили как шум)."""
@@ -134,9 +153,17 @@ class Segmenter:
             return False, None, False
         dur = len(x) / self.rate
         rms = float(np.sqrt(np.mean(x * x)))
-        loud = rms > max(self.floor * 2.5, 350.0)
+        self.last_rms = rms
+        self.peak_rms = max(self.peak_rms, rms)
+        self.peak_all = max(self.peak_all, rms)
+        self.total_s += dur
+        if rms > 110.0:
+            self.audible_s += dur
+        if rms > 350.0:
+            self.loud_s += dur
+        loud = rms > max(self.floor * self.factor, self.min_rms)
         if not loud and rms > 0:
-            self.floor = min(3000.0, max(50.0, self.floor * 0.95 + rms * 0.05))
+            self.floor = min(self.floor_max, max(self.floor_min, self.floor * 0.95 + rms * 0.05))
         if not self.active:
             if not loud:
                 self._pre.append(pcm)

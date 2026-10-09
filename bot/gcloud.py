@@ -7,6 +7,11 @@ VERTEX_API_KEY в .env сервера.
 Надёжность: запрос к Vertex не вышел (ключ заблокирован, модели там нет, сбой) — тот же запрос сразу идёт в AI Studio, JES не
 замолкает. Ключ/доступ сломан — Vertex на паузе 10 минут (не тратим лишний круг на каждый ответ); модели нет — эта модель
 всегда через AI Studio. Кредит кончился по сроку — сам возвращаемся на AI Studio.
+
+09.10, его слова: «вообще не используй пока API из Google AI Studio, только Google Cloud Vertex». Пока studio_allowed() == False
+(по умолчанию), ничего из этого отката нет: все запросы Gemini — только в Vertex, при сбое — ошибка (с повторами на временных
+сбоях), а не тихий уход в AI Studio; бесплатный ключ и переключатель «AI Studio» выключены; срок кредита ничего не переключает.
+Вернуть прежнее поведение — ALLOW_AI_STUDIO=1 в .env сервера.
 """
 from __future__ import annotations
 
@@ -73,6 +78,11 @@ def vertex_key() -> str:
     return (os.getenv("VERTEX_API_KEY") or "").strip()
 
 
+def studio_allowed() -> bool:
+    """Можно ли вообще ходить в Google AI Studio (generativelanguage.googleapis.com). По умолчанию нет — только Vertex (09.10)."""
+    return (os.getenv("ALLOW_AI_STUDIO") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _today() -> date:
     return datetime.now(timezone(timedelta(hours=5))).date()
 
@@ -86,12 +96,17 @@ def trial_until() -> date:
 
 
 def chosen() -> str:
-    """Что выбрано в настройках (studio | vertex) — без учёта пауз."""
+    """Что выбрано в настройках (studio | vertex) — без учёта пауз. AI Studio закрыт — всегда vertex."""
+    if not studio_allowed():
+        return "vertex"
     return "vertex" if _load().get("provider") == "vertex" else "studio"
 
 
 def active() -> bool:
-    """Сейчас идём в Vertex: выбран, есть ключ, кредит не истёк, ключ не на паузе."""
+    """Сейчас идём в Vertex: выбран, есть ключ, кредит не истёк, ключ не на паузе. AI Studio закрыт — просто есть ключ:
+    переключаться некуда, поэтому ни срок кредита, ни пауза после сбоя Vertex не отключают (иначе запрос ушёл бы мимо)."""
+    if not studio_allowed():
+        return bool(vertex_key())
     if chosen() != "vertex" or not vertex_key():
         return False
     if _today() > trial_until():
@@ -104,6 +119,8 @@ def active() -> bool:
 
 
 def use_vertex(model: str) -> bool:
+    if not studio_allowed():
+        return bool(vertex_key())
     return active() and model not in _bad_models and model not in STUDIO_ONLY
 
 
@@ -117,6 +134,8 @@ def live_ready() -> bool:
 
 
 def use_vertex_live() -> bool:
+    if not studio_allowed():
+        return bool(vertex_key())
     return active() and "live" not in _bad_models
 
 
@@ -146,6 +165,9 @@ def headers() -> dict[str, str]:
 
 def set_provider(name: str) -> None:
     global _paused_until
+    if not studio_allowed():
+        logger.info("gcloud: AI Studio закрыт (ALLOW_AI_STUDIO не включён) — остаёмся на Vertex, выбор %r не применён", name)
+        return
     st = _load()
     st["provider"] = "vertex" if name == "vertex" else "studio"
     st["changed_at"] = datetime.now(timezone.utc).isoformat()
@@ -180,15 +202,19 @@ def failed(model: str, status: int | None, text: str) -> None:
     """Vertex отказал — запомнить почему (видно в настройках) и решить, надолго ли в обход."""
     global _paused_until
     low = str(text or "").lower()
+    fallback = studio_allowed()    # откат в AI Studio закрыт — не помечаем модели «плохими» и не ставим паузу: идти больше некуда
     if model == "live":
-        _bad_models.add("live")
-        why = f"живой голос через Vertex не подключился ({low[:120]}) — он идёт через AI Studio"
+        if fallback:
+            _bad_models.add("live")
+        why = f"живой голос через Vertex не подключился ({low[:120]})" + (" — он идёт через AI Studio" if fallback else "")
     elif status == 404 or "not found" in low or "is not supported" in low:
-        _bad_models.add(model)
-        why = f"модели {model} нет в Vertex — она идёт через AI Studio"
+        if fallback:
+            _bad_models.add(model)
+        why = f"модели {model} нет в Vertex" + (" — она идёт через AI Studio" if fallback else "")
     elif status in {400, 401, 403} and ("api_key" in low or "permission" in low or "blocked" in low or "disabled" in low
                                          or "billing" in low or "unauthenticated" in low):
-        _paused_until = time.monotonic() + KEY_PAUSE_S
+        if fallback:
+            _paused_until = time.monotonic() + KEY_PAUSE_S
         why = "ключ не пускают в Vertex AI: " + (
             "у сервисного аккаунта ключа нет роли «Vertex AI User» (Agent Platform User)" if "iam_permission_denied" in low
             or "permission 'aiplatform" in low
@@ -197,7 +223,7 @@ def failed(model: str, status: int | None, text: str) -> None:
             else "нет оплаты/кредита на проекте" if "billing" in low else low[:120])
     else:
         why = f"сбой {status}: {low[:120]}"
-    logger.warning("gcloud: Vertex не ответил (%s) — этот запрос через AI Studio", why)
+    logger.warning("gcloud: Vertex не ответил (%s)%s", why, " — этот запрос через AI Studio" if fallback else " — AI Studio закрыт, запрос не выполнен")
     st = _load()
     st["error"], st["error_at"] = why, datetime.now(timezone.utc).isoformat()
     _save()
@@ -217,23 +243,33 @@ async def probe(client, model: str = "gemini-3.5-flash-lite") -> tuple[bool, str
         _paused_until = 0.0
         _bad_models.discard(model)
         ok()
-        if not project():  # номер проекта нужен живому голосу — Vertex сам называет его в ответе «модели нет»
-            try:
-                miss = await client.post(url("jes-no-such-model", "generateContent"), json=body, headers=headers())
-                found = re.search(r"projects/(\d+)/", miss.text)
-                if found:
-                    _load()["project"] = found.group(1)
-                    _save()
-            except Exception:
-                logger.debug("gcloud: номер проекта не узнал", exc_info=True)
-        return True, "Vertex работает: ответы, расшифровка" + (", живой голос" if project() else "") + " · озвучка — через AI Studio"
+        await ensure_project(client)
+        return True, ("Vertex работает: ответы, расшифровка, озвучка" if not studio_allowed() else
+                      "Vertex работает: ответы, расшифровка") + (", живой голос" if project() else "") + (
+            "" if not studio_allowed() else " · озвучка — через AI Studio")
     failed(model, response.status_code, response.text)
     return False, str(_load().get("error") or response.status_code)
 
 
+async def ensure_project(client) -> str:  # noqa: ANN001 — httpx.AsyncClient
+    """Номер проекта нужен живому голосу — Vertex сам называет его в ответе «модели нет». Уже знаем — ничего не спрашиваем."""
+    if not project() and vertex_key():
+        body = {"contents": [{"role": "user", "parts": [{"text": "x"}]}], "generationConfig": {"maxOutputTokens": 1}}
+        try:
+            miss = await client.post(url("jes-no-such-model", "generateContent"), json=body, headers=headers())
+            found = re.search(r"projects/(\d+)/", miss.text)
+            if found:
+                _load()["project"] = found.group(1)
+                _save()
+        except Exception:
+            logger.debug("gcloud: номер проекта не узнал", exc_info=True)
+    return project()
+
+
 def status() -> dict[str, Any]:
     st = _load()
-    return {"chosen": chosen(), "active": active(), "has_key": bool(vertex_key()), "trial_until": trial_until().isoformat(),
+    return {"chosen": chosen(), "active": active(), "ai_studio_allowed": studio_allowed(), "has_key": bool(vertex_key()),
+            "trial_until": trial_until().isoformat(),
             "days_left": (trial_until() - _today()).days, "error": st.get("error"), "error_at": st.get("error_at"),
             "limit": daily_limit(), "bad_models": sorted(_bad_models)}
 
@@ -246,4 +282,5 @@ def reset_cache() -> None:
     _bad_models.clear()
 
 
-__all__ = ["active", "use_vertex", "url", "headers", "set_provider", "failed", "ok", "status", "daily_limit", "chosen"]
+__all__ = ["active", "use_vertex", "url", "headers", "set_provider", "failed", "ok", "status", "daily_limit", "chosen", "studio_allowed",
+           "ensure_project"]

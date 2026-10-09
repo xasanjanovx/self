@@ -5,6 +5,7 @@ from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMa
 from . import categories as cats
 from . import emoji as _pe
 from . import finance as fin
+from . import gcloud
 
 Lang = str
 
@@ -423,7 +424,10 @@ def jarvis_settings_keyboard(lang: str, *, voice: str, call_lang: str, voice_mod
     if owner:  # 29.09: токены по моделям — только владельцу
         rows.append([_btn("📊 " + ("Tokenlar" if uz else "Токены по моделям"), "jarvis:tokens:today")])
     if gai is not None:  # 29.09, только владельцу: через что работает Gemini — его баланс AI Studio или кредит Vertex ($300 / 90 дней)
-        rows.append([pick("🟦 AI Studio", "jarvis:gai:studio", gai == "studio"), pick("☁️ Vertex · $300", "jarvis:gai:vertex", gai == "vertex")])
+        if gai == "vertex" and not gcloud.studio_allowed():   # 09.10: AI Studio отключён — переключать не на что, кнопки «AI Studio» нет
+            rows.append([pick("☁️ Vertex AI", "jarvis:gai:vertex", True)])
+        else:
+            rows.append([pick("🟦 AI Studio", "jarvis:gai:studio", gai == "studio"), pick("☁️ Vertex · $300", "jarvis:gai:vertex", gai == "vertex")])
         rows.append([_btn("🩺 " + ("Vertexni tekshirish" if uz else "Проверить Vertex"), "jarvis:gtest")])
         if gai == "vertex":
             rows.append([pick(f"${v:g}/" + ("kun" if uz else "день"), f"jarvis:glimit:{v:g}", gai_limit == v) for v in (1.0, 2.0, 3.0, 5.0)])

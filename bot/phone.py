@@ -407,24 +407,32 @@ async def _cancel_send(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> 
     return {"ok": True, "cancelled": True}
 
 
-@ptool("telegram_read", "Прочитать Telegram владельца: без who — непрочитанное во всех чатах («что мне написали?», «есть новые сообщения?»); "
-       "с who — последние сообщения в переписке с человеком («что пишет Алишер?»).",
-       {"who": P("STRING", "с кем переписка (необязательно)"), "variants": VARIANTS, "limit": P("INTEGER", "сколько сообщений, по умолчанию 5")})
+@ptool("telegram_read", "Читает Telegram: без who — что нового, непрочитанное и пропущенные звонки; с who — переписка или «избранное». "
+       "Нового нет — вернёт последние сообщения («что мне написали», «пропущенные», «последнее сообщение от мамы», «прочитай избранное»).",
+       {"who": P("STRING", "с кем переписка (необязательно); «избранное» — его заметки себе"), "variants": VARIANTS,
+        "limit": P("INTEGER", "сколько сообщений, по умолчанию 5")})
 async def _telegram_read(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
         return {"error": "Telegram не подключён: в приложении JES → раздел Telegram → «Подключить»"}
     who = _str(a.get("who"))
+    tz = getattr(ctx.profile, "tz", None)
     try:
         if not who:
-            chats = await tg_user.unread()
-            return {"unread_chats": chats} if chats else {"unread_chats": [], "note": "непрочитанных нет"}
+            # 09.10 «JES не видит сообщения и пропущенные»: раньше — только непрочитанное, и при «пусто» он говорил «ничего нет», хотя
+            # сообщение пришло и уже прочитано. Теперь — непрочитанное, пропущенные звонки Telegram и (если нового нет) последние переписки
+            chats, missed = await asyncio.gather(tg_user.unread(tz=tz), tg_user.missed_calls(tz=tz))
+            out: dict[str, Any] = {"unread_chats": chats, "missed_telegram_calls": missed}
+            if not chats:
+                out["note"] = "непрочитанных личных сообщений нет" + ("" if missed else " и пропущенных звонков Telegram нет")
+                out["latest_chats"] = await tg_user.latest(tz=tz)
+            return out
         queries = [who] + [v for v in (a.get("variants") or []) if isinstance(v, str)]
         found = await tg_user.find_chat(queries, alias=alias_for(turn.uid, "tg", queries))
         if "match" not in found:
             logger.info("telegram_read: чат «%s» не найден (%s)", who, queries)
             return {"error": f"Не нашёл чат «{who}»"}
         limit = max(1, min(int(a.get("limit") or 5), 15))
-        return {"chat": found["match"]["name"], "messages": await tg_user.recent(found["match"], limit=limit)}
+        return {"chat": found["match"]["name"], "messages": await tg_user.recent(found["match"], limit=limit, tz=tz)}
     except Exception as exc:
         logger.warning("telegram_read не вышел", exc_info=True)
         return {"error": f"Telegram не ответил ({type(exc).__name__}) — попробуй ещё раз"}
@@ -799,7 +807,7 @@ async def _play_media(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> d
     return res
 
 
-@ptool("telegram_search", "Найти в его Telegram по словам — во всех чатах, группах и каналах («найди в телеграме, где писали про квартиру»).",
+@ptool("telegram_search", "Найти в его Telegram сообщения, где ЕСТЬ слова («найди в телеграме, где писали про квартиру»). Прочитать чат или избранное — telegram_read.",
        {"query": P("STRING", "слова для поиска"), "limit": P("INTEGER", "сколько сообщений, по умолчанию 6")}, ("query",))
 async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if not tg_user.configured():
@@ -807,7 +815,14 @@ async def _telegram_search(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any])
     query = _str(a.get("query"))
     if not query:
         return {"error": "что искать?"}
-    found = await tg_user.search(query, max(1, min(15, int(a.get("limit") or 6))))
+    tz = getattr(ctx.profile, "tz", None)
+    limit = max(1, min(15, int(a.get("limit") or 6)))
+    if tg_user.is_self_query([query]):
+        # 08.10 он сказал «посмотри в избранном» — модель искала слово «Избранное» по всем чатам; это не поиск, а чат с самим собой
+        found_chat = await tg_user.find_chat([query])
+        if "match" in found_chat:
+            return {"chat": "Избранное", "messages": await tg_user.recent(found_chat["match"], limit=limit, tz=tz)}
+    found = await tg_user.search(query, limit, tz=tz)
     return {"messages": found} if found else {"messages": [], "note": "ничего не нашлось"}
 
 

@@ -80,11 +80,12 @@ def _new_client(session: str = "") -> Any:
 
 
 def display_name(entity: Any) -> str:
+    """Имя чата или человека. 09.10: «шрифтовые» буквы (𝑀𝑎𝑠ℎ𝑥𝑢𝑟𝑏𝑒𝑘) и значки — в обычный текст: голос иначе читает набор знаков."""
     title = getattr(entity, "title", None)
     if title:
-        return str(title)
+        return names.plain(title) or str(title)
     parts = [getattr(entity, "first_name", None) or "", getattr(entity, "last_name", None) or ""]
-    name = " ".join(p for p in parts if p).strip()
+    name = names.plain(" ".join(p for p in parts if p).strip())
     return name or (getattr(entity, "username", None) or "") or str(getattr(entity, "id", ""))
 
 
@@ -311,7 +312,19 @@ async def send(chat: dict[str, Any], text: str) -> bool:
     return True
 
 
-def _msg_view(msg: Any, *, me_id: int | None, chat_name: str) -> dict[str, Any]:
+def _tz(tz: Any = None) -> Any:
+    """Часовой пояс для времени сообщений. 09.10: сервер живёт по UTC, и JES называл время на 5 часов раньше («пришло в 04:56» вместо 09:56)."""
+    if tz is not None:
+        return tz
+    from zoneinfo import ZoneInfo
+
+    try:
+        return ZoneInfo(os.getenv("OWNER_TZ") or os.getenv("APP_TIMEZONE") or "Asia/Tashkent")
+    except Exception:
+        return None
+
+
+def _msg_view(msg: Any, *, me_id: int | None, chat_name: str, tz: Any = None) -> dict[str, Any]:
     sender = "я" if getattr(msg, "out", False) or getattr(msg, "sender_id", None) == me_id else chat_name
     sender_entity = getattr(msg, "sender", None)
     if sender != "я" and sender_entity is not None:
@@ -320,19 +333,19 @@ def _msg_view(msg: Any, *, me_id: int | None, chat_name: str) -> dict[str, Any]:
     if not text and getattr(msg, "media", None) is not None:
         text = "[" + type(msg.media).__name__.replace("MessageMedia", "").lower() + "]"
     when = getattr(msg, "date", None)
-    return {"from": sender, "text": text[:400], "time": when.astimezone().strftime("%d.%m %H:%M") if when else ""}
+    return {"from": sender, "text": text[:400], "time": when.astimezone(_tz(tz)).strftime("%d.%m %H:%M") if when else ""}
 
 
-async def recent(chat: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+async def recent(chat: dict[str, Any], limit: int = 6, tz: Any = None) -> list[dict[str, Any]]:
     c = await client()
     if c is None:
         return []
     me_id = getattr(_me, "id", None)
-    out = [_msg_view(m, me_id=me_id, chat_name=chat["name"]) async for m in c.iter_messages(_peer(chat), limit=limit)]
+    out = [_msg_view(m, me_id=me_id, chat_name=chat["name"], tz=tz) async for m in c.iter_messages(_peer(chat), limit=limit)]
     return list(reversed(out))
 
 
-async def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
+async def search(query: str, limit: int = 8, tz: Any = None) -> list[dict[str, Any]]:
     """Поиск по всем его чатам, группам и каналам (как строка поиска в Telegram): свежие совпадения первыми."""
     c = await client()
     if c is None:
@@ -342,18 +355,18 @@ async def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
     async for m in c.iter_messages(None, search=query, limit=limit):
         chat = getattr(m, "chat", None)
         name = getattr(chat, "title", None) or " ".join(x for x in (getattr(chat, "first_name", None), getattr(chat, "last_name", None)) if x) or "чат"
-        out.append(_msg_view(m, me_id=me_id, chat_name=name))
+        out.append(_msg_view(m, me_id=me_id, chat_name=name, tz=tz))
     return out
 
 
-async def unread(limit_chats: int = 8, per_chat: int = 3) -> list[dict[str, Any]]:
+async def unread(limit_chats: int = 8, per_chat: int = 3, tz: Any = None) -> list[dict[str, Any]]:
     """Непрочитанное: личные чаты первыми, затем группы без звука в конце."""
     chats = [c for c in await dialogs(fresh=True) if c["unread"] > 0]
     chats.sort(key=lambda c: (c["kind"] != "user", c["muted"]))
     out = []
     for chat in chats[:limit_chats]:
         try:
-            msgs = await recent(chat, limit=min(per_chat, chat["unread"]))
+            msgs = await recent(chat, limit=min(per_chat, chat["unread"]), tz=tz)
         except Exception:
             logger.warning("tg_user recent failed for %s", chat["id"], exc_info=True)
             msgs = []
@@ -361,5 +374,48 @@ async def unread(limit_chats: int = 8, per_chat: int = 3) -> list[dict[str, Any]
     return out
 
 
-__all__ = ["configured", "status", "login_start", "login_finish", "logout", "stop", "dialogs", "find_chat", "send", "recent", "unread", "public",
+async def latest(limit_chats: int = 4, tz: Any = None) -> list[dict[str, Any]]:
+    """Последние сообщения в его переписках (даже прочитанные): «что мне последнее писали», когда непрочитанного нет.
+    Свежие личные переписки первыми; в каждой — последнее входящее и ответ после него, если был."""
+    chats = [c for c in await dialogs() if c["kind"] == "user"][:limit_chats]
+    results = await asyncio.gather(*(recent(c, limit=2, tz=tz) for c in chats), return_exceptions=True)
+    out = []
+    for chat, msgs in zip(chats, results):
+        if isinstance(msgs, Exception) or not msgs:
+            continue
+        out.append({"chat": chat["name"], "kind": chat["kind"], "messages": msgs})
+    return out
+
+
+async def missed_calls(hours: int = 48, chats_limit: int = 12, tz: Any = None) -> list[dict[str, Any]]:
+    """Пропущенные звонки Telegram за последние hours часов: кто и когда (звонки лежат в переписке сервисными сообщениями; поиск по
+    всем чатам Telegram такой фильтр не принимает — смотрим свежие личные переписки). Наш же аккаунт-помощник (подъём) не в счёт."""
+    from datetime import datetime, timedelta, timezone
+
+    from . import caller
+
+    c = await client()
+    if c is None:
+        return []
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    chats = [d for d in await dialogs() if d["kind"] == "user" and d["id"] != caller.helper_id][:chats_limit]
+
+    async def one(chat: dict[str, Any]) -> dict[str, Any] | None:
+        times = []
+        async for m in c.iter_messages(_peer(chat), limit=15):
+            if m.date < since:
+                break
+            action = getattr(m, "action", None)
+            if type(action).__name__ == "MessageActionPhoneCall" and not m.out and type(getattr(action, "reason", None)).__name__.endswith("Missed"):
+                times.append(m.date)
+        if not times:
+            return None
+        return {"from": chat["name"], "count": len(times), "last": times[0].astimezone(_tz(tz)).strftime("%d.%m %H:%M")}
+
+    found = await asyncio.gather(*(one(d) for d in chats), return_exceptions=True)
+    return [r for r in found if isinstance(r, dict)]
+
+
+__all__ = ["configured", "status", "login_start", "login_finish", "logout", "stop", "dialogs", "find_chat", "send", "recent", "unread", "latest",
+           "missed_calls", "search", "public",
            "edit_post"]

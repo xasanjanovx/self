@@ -218,10 +218,40 @@ COOLDOWN_WINDOW_S = 60.0
 COOLDOWN_S = 20
 _rejects: dict[int, list[float]] = {}
 
+# 09.10 «иногда вообще не отвечает, даже когда чётко говорю Джес»: за вечер телефон слал ~270 проверок в час, распознаватель слышал в них
+# «с» (голос его, z 4–5, а слово из-за короткого куска потеряно), и пауза 20 с после серии отказов закрывала телефон на пятую часть
+# суток — его настоящее «Джес» в паузе вообще не проверялось. Теперь:
+#   • отказ, где голос его (HIS_*), в серию не считается — пауза только от чужих звуков и шума;
+#   • голос его, а слово не расслышано (≤ 2 слов) — второе мнение: Gemini слушает запись целиком (~1 с, доли цента).
+HIS_SCORE = 0.60          # сходство голоса — это точно он…
+HIS_BANK = 0.90           # …или запись почти как его подтверждённые «Джес»…
+HIS_Z = 3.0               # …или нормированная оценка высокая при сходстве не ниже HIS_Z_SCORE
+HIS_Z_SCORE = 0.40
+SECOND_MAX_WORDS = 2      # короче этого — «слово потеряно»; длиннее — обычная речь, а не обращение
+SECOND_STRONG_WORDS = 5   # …но при самом уверенном голосе слушаем и фразу до 5 слов, если она начинается похоже на имя («жэс открой ютуб»)
+SECOND_GAP_S = 3.0        # не чаще раза в 3 с
+SECOND_PER_DAY = 600
+SECOND_TIMEOUT_S = 2.6    # телефон ждёт ответа 4 с
+_second_state: dict[str, Any] = {"at": 0.0, "day": "", "n": 0}
+MISS_KEEP = 40            # записей «его голос, а имя не принято» — DATA_DIR/wake_miss (послушать и понять, что не так)
 
-def _cooldown(uid: int | None, confident: bool) -> int:
-    """Ещё один отказ: сколько секунд телефону не присылать неуверенные срабатывания (0 — можно)."""
-    if uid is None or confident:
+
+def his_voice(voice: dict[str, Any]) -> bool:
+    """Голос на записи — его (достаточно уверенно, чтобы не считать отказ шумом)."""
+    def num(key: str) -> float:
+        try:
+            return float(voice.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    score, bank, z = num("score"), num("bank"), num("z")
+    return score >= HIS_SCORE or bank >= HIS_BANK or (score >= HIS_Z_SCORE and z >= HIS_Z)
+
+
+def _cooldown(uid: int | None, confident: bool, counts: bool = True) -> int:
+    """Ещё один отказ: сколько секунд телефону не присылать неуверенные срабатывания (0 — можно).
+    counts=False — отказ с его голосом (слово не расслышано): в серию не идёт."""
+    if uid is None or confident or not counts:
         return 0
     now = time.monotonic()
     recent = [t for t in _rejects.get(uid, []) if now - t <= COOLDOWN_WINDOW_S] + [now]
@@ -277,7 +307,7 @@ async def wake_check(request: web.Request) -> web.Response:
                                       "cooldown": _cooldown(uid, bool(data.get("confident")))})
         if verdict.get("fast"):
             return web.json_response({"ok": False, "text": verdict["text"], "fast": True,
-                                      "cooldown": _cooldown(uid, bool(data.get("confident")))})
+                                      "cooldown": _cooldown(uid, bool(data.get("confident")), counts=not verdict.get("his"))})
         return web.json_response({"ok": False, "text": verdict["text"], "command": False})
     if uid is not None:
         from . import watch
@@ -340,6 +370,19 @@ async def judge_wake(uid: int | None, audio: bytes, *, confident: bool = False, 
             # 28.09: «не реагировать на видео, даже если там я сам говорю «Джес»»: пока телефон играет видео, «Джес» — только
             # первым словом и голосом, точно похожим на его живой (без эхоподавления звук видео доходит до микрофона целиком)
             ok, why = False, "играет видео: имя не первым словом или голос не точно его"
+        said = heard["text"]
+        his = his_voice(voice)
+        if not ok and his and not media and source == "телефон":
+            # 09.10: голос его, а слово потеряно («с», «в», пусто, «же стоит») — пусть послушает Gemini целиком
+            words = wakeword.words(heard["text"])
+            if len(words) <= SECOND_MAX_WORDS or (len(words) <= SECOND_STRONG_WORDS and strong and wakeword.name_like(words[0])):
+                opinion = await second_opinion(audio)
+                if opinion is not None and opinion["ok"]:
+                    ok, after, why, said = True, opinion["after"], f"второе мнение (Gemini): «{opinion['text'][:40]}»", opinion["text"] or said
+                elif opinion is not None:
+                    why = "второе мнение (Gemini): имени нет"
+            if not ok:
+                _keep_miss(audio, heard["text"], voice)
         if ok and uid is not None:
             voiceprint.remember(uid, voice.get("_emb"))  # его «JES» — образец голоса для фраз этого разговора
             if voice.get("sure") and heard["name"] and not media and source == "телефон":
@@ -351,8 +394,8 @@ async def judge_wake(uid: int | None, audio: bytes, *, confident: bool = False, 
                     (" [видео" + (", эхоподавление]" if aec else "]")) if media else "", f" — {why}" if why else "")
         if not ok:
             _reject(uid, f"{tag}не «Джес»: «{heard['text'][:60]}»", source=source)
-            return {"ok": False, "text": heard["text"], "fast": True}
-        return {"ok": True, "text": heard["text"], "after": after, "voice": voice.get("score"), "fast": True}
+            return {"ok": False, "text": heard["text"], "fast": True, "his": his}
+        return {"ok": True, "text": said, "after": after, "voice": voice.get("score"), "fast": True}
     try:
         raw = await ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
                                 model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200)
@@ -366,6 +409,52 @@ async def judge_wake(uid: int | None, audio: bytes, *, confident: bool = False, 
     if not ok:
         _reject(uid, f"{tag}не «Джес» (Gemini)", source=source)
     return {"ok": ok, "text": str(verdict.get("text") or ""), "after": after}
+
+
+async def second_opinion(audio: bytes) -> dict[str, Any] | None:
+    """Голос его, а локальный распознаватель имени не услышал: Gemini слушает запись целиком.
+    → {"ok", "text", "after"}; None — не спрашивали (лимит) или Gemini не успел/не ответил (тогда как раньше — отказ)."""
+    from . import wakeword
+
+    now = time.monotonic()
+    day = time.strftime("%Y-%m-%d")
+    state = _second_state
+    if state["day"] != day:
+        state["day"], state["n"] = day, 0
+    if state["n"] >= SECOND_PER_DAY or now - state["at"] < SECOND_GAP_S:
+        return None
+    state["at"], state["n"] = now, state["n"] + 1
+    try:
+        raw = await asyncio.wait_for(
+            ai.generate([{"text": _WAKE_PROMPT}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}}],
+                        model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200), timeout=SECOND_TIMEOUT_S)
+        verdict = json.loads(raw) if str(raw).strip().startswith("{") else {}
+    except Exception as exc:
+        logger.info("wake check: второе мнение не получено (%s)", type(exc).__name__)
+        return None
+    text = str(verdict.get("text") or "").strip()
+    after = str(verdict.get("after") or "").strip()
+    words = wakeword.words(text)
+    # модель могла выдумать имя из шума: в её же расшифровке должно быть слово, похожее на «Джес», в начале фразы
+    named = bool(verdict.get("name")) and bool(words) and (wakeword.match(text)[0] or any(wakeword.name_like(w) for w in words[:3]))
+    logger.info("wake check: второе мнение (Gemini) — %s «%s»", "имя есть" if named else "имени нет", text[:60])
+    return {"ok": named, "text": text, "after": after}
+
+
+def _keep_miss(audio: bytes, text: str, voice: dict[str, Any]) -> None:
+    """Записи, где голос его, а имя не принято, — DATA_DIR/wake_miss (последние MISS_KEEP): послушать и понять, что не так."""
+    try:
+        from .tg_user import data_dir
+
+        folder = data_dir() / "wake_miss"
+        folder.mkdir(parents=True, exist_ok=True)
+        label = re.sub(r"\W+", "_", text.lower()).strip("_")[:20] or "empty"
+        score = int(float(voice.get("score") or 0) * 100)
+        (folder / f"{int(time.time() * 1000)}_{score}_{label}.wav").write_bytes(audio)
+        for old in sorted(folder.glob("*.wav"))[:-MISS_KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("wake miss: не записала", exc_info=True)
 
 
 async def wake_plan(request: web.Request) -> web.Response:

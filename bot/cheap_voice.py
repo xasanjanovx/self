@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import random
 import re
@@ -39,6 +40,11 @@ STT_WAIT_S = 2.5            # расшифровка обычно готова �
 HISTORY_MESSAGES = 16
 HISTORY_CHARS = 10000
 SAY_CHUNK = 9600               # голос Microsoft — кусками по 0.2 с
+WAKE_MIN_RMS = 110.0           # 09.10 подъём: сонный шёпот тише обычного порога (350) — слушаем чувствительнее
+WAKE_FACTOR = 3.0
+DEAF_PEAK = 60.0               # 09.10 проверка слуха: пик громкости из трубки ниже этого к первой паузе — его почти не слышно
+DEAF_AFTER_NUDGES = 1          # …проверяем, когда уже была одна реплика в тишину (≈ 7–10 с после «Проснулись?»)
+BARGE_MIN_RMS = 350.0          # …но «перебил» на подъёме — только настоящая речь (остаток эха не должен обрывать JES)
 CALL_SILENCE_MS = 700          # 29.09: фраза кончилась — 0.7 с тишины (было 1 с, как на телефоне): каждый ответ на 0.3 с раньше
 QUICK_MAX_S = 2.2              # короткая фраза («алло», «спасибо») — сначала свой распознаватель (~0.1 с) и записанный ответ
 SLOW_TOOLS = {"web_search", "research", "bot_task", "weather", "currency_rates", "send_to_chat"}  # пока ищет — «Секунду, сэр» записанным голосом
@@ -154,8 +160,18 @@ class CheapSession(_Session):
         """Звук из трубки → фразы. Говорит поверх ответа JES — перебил: замолкаем."""
         from .phone_cheap import Segmenter
 
-        seg = Segmenter(RATE, silence_ms=CALL_SILENCE_MS)
+        wake = self.mode == "wake"
+        seg = (Segmenter(RATE, silence_ms=CALL_SILENCE_MS, min_rms=WAKE_MIN_RMS, factor=WAKE_FACTOR, floor=80.0, floor_min=25.0,
+                       floor_max=120.0) if wake
+               else Segmenter(RATE, silence_ms=CALL_SILENCE_MS))
+        self._seg = seg
         loop = asyncio.get_running_loop()
+        try:
+            await self._listen_loop(seg, incoming, loop, wake)
+        finally:
+            logger.info("call %s: входящий звук (что слышит JES): %s", self.uid, seg.stats())
+
+    async def _listen_loop(self, seg, incoming: asyncio.Queue, loop, wake: bool) -> None:  # noqa: ANN001
         overlap_s = 0.0
         overlapped = False
         while not self.stop.is_set():
@@ -174,7 +190,8 @@ class CheapSession(_Session):
                 # расшифровка, и повтор второй раз не отвечаем
                 overlapped = loop.time() - self._voice_at < ECHO_WINDOW_S or self.thinking
             if seg.active and self.out:
-                overlap_s += len(chunk) / 2 / RATE
+                if not wake or seg.last_rms >= BARGE_MIN_RMS:
+                    overlap_s += len(chunk) / 2 / RATE
                 if overlap_s >= BARGE_IN_S:
                     self.interrupt()
             elif not seg.active:
@@ -328,7 +345,11 @@ class CheapSession(_Session):
         try:
             if not overlapped and len(pcm) / 2 / RATE <= QUICK_MAX_S and await self._quick_wake(wav):
                 return
-            heard = await self._transcribe(wav)
+            # 09.10: на вопросе дня и «вы встали?» модель слушает ЗАПИСЬ и сразу оценивает (знает ждомый ответ) — один вызов вместо двух
+            # и без искажённой расшифровки («Абу Талиб» → «obuvnoy» → «неверно»)
+            heard, verdict = await self._hear_answer(pcm)
+            if not heard:
+                heard, verdict = await self._transcribe(wav), ""
             seconds = len(pcm) / 2 / RATE
             if not heard and seconds >= UNHEARD_MIN_S:
                 heard = await self._transcribe_soft(pcm)   # сонный шёпот: усилить и расшифровать мягче (07.10 «молчу» стоило ответа)
@@ -346,9 +367,40 @@ class CheapSession(_Session):
                 return
             self.result.transcript.append("он: " + heard)
             self.last_heard = heard
-            await self._flow_turn(heard)
+            await self._flow_turn(heard, verdict)
         finally:
             self.thinking = False
+
+    async def _hear_answer(self, pcm: bytes) -> tuple[str, str]:
+        """(расшифровка, оценка) на этапах «вопрос дня» и «вы встали?»: Gemini слушает запись (усиленную, если тихая). Нет ответа — ("", "")."""
+        from . import watch
+        from .phone_api import clean_transcript
+        from .phone_live import pcm_to_wav
+
+        flow = self.flow
+        if flow is None or flow.stage not in {"quiz", "final"}:
+            return "", ""
+        if flow.stage == "quiz":
+            question = flow.current()
+            if question is None:
+                return "", ""
+            prompt, allowed = wake_dialog.listen_quiz_prompt(question), wake_dialog.QUIZ_VERDICTS
+        else:
+            prompt, allowed = wake_dialog.listen_final_prompt(), wake_dialog.FINAL_VERDICTS
+        wav = pcm_to_wav(watch.boost(pcm), RATE)
+        started = time.monotonic()
+        try:
+            raw = await asyncio.wait_for(
+                ai.generate([{"text": prompt}, {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode()}}],
+                            model=ai.transcribe_model, temperature=0.0, json_mode=True, max_tokens=200), timeout=GRADE_TIMEOUT_S + 3)
+            data = json.loads(raw) if str(raw).strip().startswith("{") else {}
+        except Exception as exc:
+            logger.warning("wake flow: модель не смогла послушать ответ: %s", str(exc)[:160])
+            return "", ""
+        text = clean_transcript(str(data.get("text") or ""))
+        verdict = wake_dialog.parse_verdict(data, allowed)
+        logger.info("wake flow: послушала ответ за %.1f с — «%s», оценка «%s»", time.monotonic() - started, text[:60], verdict or "-")
+        return text, verdict if text else ""
 
     async def _transcribe_soft(self, pcm: bytes) -> str:
         """Вторая попытка, когда обычная вернула пусто, а речь была: усиливаем тихую запись и просим писать всё, что слышно, даже тихо."""
@@ -426,19 +478,21 @@ class CheapSession(_Session):
             return ""
         return wake_dialog.parse_verdict(data, allowed)
 
-    async def _flow_turn(self, heard: str) -> None:
+    async def _flow_turn(self, heard: str, verdict: str = "") -> None:
+        """verdict — оценка, которую дала модель, слушавшая запись (_hear_answer); пусто — оценим по тексту, как раньше."""
         flow = self.flow
         assert flow is not None
         started, stage = time.monotonic(), flow.stage
         move = flow.route(heard)
-        verdict = ""
+        if move.grade != ("quiz" if stage == "quiz" else "final"):
+            verdict = ""
         if move.grade == "quiz":
             question = flow.current()
             assert question is not None
-            verdict = await self._grade(wake_dialog.quiz_prompt(question, heard), wake_dialog.QUIZ_VERDICTS)
+            verdict = verdict or await self._grade(wake_dialog.quiz_prompt(question, heard), wake_dialog.QUIZ_VERDICTS)
             move = flow.answer(verdict)
         elif move.grade == "final":
-            verdict = await self._grade(wake_dialog.final_prompt(heard), wake_dialog.FINAL_VERDICTS)
+            verdict = verdict or await self._grade(wake_dialog.final_prompt(heard), wake_dialog.FINAL_VERDICTS)
             move = flow.final_answer(verdict, heard)
         if move.confirm:
             self.result.confirmed = True
@@ -457,8 +511,18 @@ class CheapSession(_Session):
         flow = self.flow
         if flow is None:
             return
-        text = flow.nudge()
-        logger.info("wake flow: тишина, этап %s, пауза №%s → «%s»", flow.stage, flow.nudges, text[:80])
+        seg = getattr(self, "_seg", None)
+        # проверка слуха: он взял трубку, а звука почти нет — скажем об этом (один раз), а не будем молча задавать вопросы в пустоту
+        if (seg is not None and not self.heard_user and not flow.deaf_used and flow.total_nudges >= DEAF_AFTER_NUDGES
+                and seg.peak_all < DEAF_PEAK):
+            text = flow.deaf_hint()
+        else:
+            text = flow.nudge()
+        heard_note = ""
+        if seg is not None:
+            heard_note = f" · за паузу пик громкости {seg.peak_rms:.0f} (речь начинается с ~{max(seg.floor * seg.factor, seg.min_rms):.0f})"
+            seg.reset_stats()
+        logger.info("wake flow: тишина, этап %s, пауза №%s%s → «%s»", flow.stage, flow.nudges, heard_note, text[:80])
         await self.say(text)
 
     async def _wake_nudger(self) -> None:
@@ -697,6 +761,10 @@ async def run_call(profile: Profile, persona: Persona, dial: asyncio.Task, *, mo
             greeting = None
     await _converse(sess, call, greeting, topic)
     logger.info("call %s: итог (экономно) — реплик %s, действия %s", sess.uid, len(sess.result.transcript), sess.result.actions)
+    seg = getattr(sess, "_seg", None)
+    if mode == "wake" and seg is not None:
+        sess.result.no_reply = not sess.heard_user
+        sess.result.heard_peak = round(seg.peak_all)
     if sess.flow is not None:
         f = sess.flow
         logger.info("wake flow: итог — этап %s, вопросов пройдено %s/%s, пауз подряд %s (всего %s), «слышите ли» %s, подтвердил %s, отложил %s",

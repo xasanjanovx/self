@@ -107,12 +107,14 @@ def test_wake_check_foreign_voice_is_rejected_first(wake):
 def test_wake_check_asks_gemini_only_without_recognizer(wake):
     """Пустая запись (кашель, стук) — не имя и без Gemini (26.09: из-за неё JES открывался сам); Gemini — только без распознавателя."""
     calls, setup = wake
+    phone_api._second_state.update(at=0.0, day="", n=0)
     setup(heard={"text": "", "name": False, "after": "", "ms": 20})
     assert _check()["ok"] is False
-    assert calls["gemini"] == 0
+    # 09.10: голос его (0.6), а слова нет — Gemini слушает запись «вторым мнением»; выдуманное им имя из шума («джарвис») не принимается
+    assert calls["gemini"] == 1
     setup(heard=None)  # распознавателя нет
     _check()
-    assert calls["gemini"] == 1
+    assert calls["gemini"] == 2
 
 
 def test_wake_check_confident_detector_with_silence_is_rejected(wake):
@@ -269,8 +271,9 @@ def test_mirror_is_read_from_data_dir(tmp_path, monkeypatch):
     assert services.persona_overrides(10, persona_mod.Persona()).mirror is False
 
 
-def test_phone_waits_one_second_of_silence():
-    assert phone_live.VAD_SILENCE_MS == 1000
+def test_phone_waits_three_quarters_of_a_second_of_silence():
+    """09.10: было 1000 мс (его выбор 25.09), но «JES отвечает слишком медленно» — пауза стала короче."""
+    assert phone_live.VAD_SILENCE_MS == 750
 
 
 def _profile_stub():

@@ -421,7 +421,10 @@ async def _ai_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
                       "ai_studio_balance": "см. balance_usd; None — он ещё не называл остаток в AI Studio: попроси назвать и вызови set_ai_balance"},
         "answer_rules": GCLOUD_RULES,
         "services": {
-            "Google AI Studio (Gemini API)": "два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)",
+            "Google AI Studio (Gemini API)": ("два ключа: платный (предоплата, остаток — balance) и бесплатный (лимиты в минуту/день)"
+                                              if gcloud.studio_allowed() else
+                                              "ОТКЛЮЧЁН по его просьбе (09.10): Gemini работает только через Google Cloud Vertex AI, "
+                                              "бесплатный ключ и баланс AI Studio не используются"),
             "сервер": "Hetzner, 167.235.249.200, Docker: бот JES (codex-self-bot) и бот Ishdasiz (codex-ishdasiz-bot)",
             "база данных": "Supabase (Postgres): траты, задачи, заметки, напоминания, настройки",
             "Telegram": "бот @flowuzrobot; аккаунт-помощник для звонков @djes_ai" + ("" if caller.available() else " (сейчас не подключён)"),

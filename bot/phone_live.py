@@ -46,14 +46,15 @@ from .live_call import MAX_SECONDS, _decode, _jsonable, _send_to_chat, _Session
 logger = logging.getLogger(__name__)
 
 INPUT_RATE = 16000
-# он выбрал: ждать 1 секунду тишины — не обрывать на полуслове, если задумался посреди фразы
-VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 1000)
+# 25.09 он выбрал 1 секунду тишины — не обрывать на полуслове; 09.10 «JES отвечает слишком медленно» — эта секунда была самой большой
+# долей ожидания после фразы (Live ждёт её целиком, потом думает). 0.75 с: пауза между словами в фразе обычно короче
+VAD_SILENCE_MS = int(os.getenv("PHONE_VAD_SILENCE_MS") or 750)
 OWNER_STRICT = (os.getenv("PHONE_OWNER_STRICT") or "1") != "0"  # «только мой голос» и посреди разговора
 # мгновенные команды (bot/instant.py): фразу держим, пока он не замолчит, — локальный распознаватель и разбор ~0.1 с;
 # команда — выполняем сами, без Gemini; нет — отдаём фразу Gemini целиком (задержка ответа почти та же: Gemini всё
 # равно ждёт секунду тишины)
 INSTANT = (os.getenv("PHONE_INSTANT") or "1") != "0"
-INSTANT_SILENCE_S = 0.55   # столько тишины после речи — фраза кончилась
+INSTANT_SILENCE_S = 0.5    # столько тишины после речи — фраза кончилась
 INSTANT_MIN_S = 0.35       # короче — это не команда
 INSTANT_MAX_S = 6.0        # длиннее — это разговор, не команда: сразу в Gemini
 GREET = "[Он позвал тебя по имени и ждёт. Откликнись одним-двумя словами («Да?», «Слушаю»), без приветствий.]"
@@ -254,6 +255,7 @@ class PhoneLive(_Session):
         self._ipass = False                    # длинная фраза уже ушла в Gemini — её хвост тоже прямо туда
         self.idle_limit = IDLE_END_ECONOMY if billing.over_limit() else IDLE_END_S
         self._last_model_audio = time.monotonic()
+        self._audio_in_turn = False            # 09.10: первый звук ответа этого хода уже записан в журнал (замер задержки)
         self._ended = False
         self._streams: set[str] = set()        # идёт камера / показ экрана
         self._stream_on_at = 0.0
@@ -420,6 +422,8 @@ class PhoneLive(_Session):
                 # и только его речь (OwnerGate): телевизор и чужие голоса — нет
                 was_active = self.gate.active
                 chunks = await self.owner.filter(self.gate.feed(bytes(msg.data)), self.gate.active)
+                if self.gate.active and not was_active:
+                    self._audio_in_turn = False   # заговорил снова — новый ход, замер сначала
                 chunks = await self._instant(gem, chunks)
                 for chunk in chunks:
                     await self.to_gemini(gem, {"realtimeInput": {"audio": {"data": base64.b64encode(chunk).decode(),
@@ -546,11 +550,16 @@ class PhoneLive(_Session):
                 billing.record(self.result.model or live_call.MODELS[0], data["usageMetadata"], kind="live", provider=getattr(self, "provider", "studio"))
             sc = data.get("serverContent") or {}
             if sc.get("interrupted"):
+                self._audio_in_turn = False
                 await self.to_phone({"type": "interrupted"})
             for part in ((sc.get("modelTurn") or {}).get("parts") or []):
                 blob = part.get("inlineData") or {}
                 if blob.get("data"):
                     self._last_model_audio = time.monotonic()
+                    if not self._audio_in_turn:
+                        # замер: сколько после конца его фразы до первого звука ответа (журнал — видно, что тормозит)
+                        self._audio_in_turn = True
+                        logger.info("phone live: первый звук ответа через %.1f с после конца его фразы", self._last_model_audio - self.gate.last_voice)
                     await self.to_phone(base64.b64decode(blob["data"]))
             if (t := (sc.get("inputTranscription") or {}).get("text")) and not foreign_script(t):
                 self._in_text.append(t)
@@ -559,6 +568,7 @@ class PhoneLive(_Session):
                 self._out_text.append(t)
                 await self.to_phone({"type": "jarvis", "text": t})
             if sc.get("turnComplete"):
+                self._audio_in_turn = False
                 self._flush_transcript()
                 await self.to_phone({"type": "turn_complete"})
             if "toolCall" in data:
@@ -638,6 +648,7 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
     """Один инструмент телефона — и в Live (PhoneLive), и в экономном режиме (phone_cheap): действия уходят на телефон,
     карточки — на панель. sess: uid, profile, turn, runner, ctx, result, to_phone()."""
     logger.info("phone tool %s %s", name, json.dumps(args, ensure_ascii=False)[:200])
+    t_tool = time.monotonic()
     if name in _TOOL_STATUS:
         await sess.to_phone({"type": "status", "text": _TOOL_STATUS[name]})
     if sess.turn.device.get("locked") and name in NEED_UNLOCK:
@@ -672,6 +683,9 @@ async def exec_tool(sess, name: str, args: dict[str, Any]) -> dict[str, Any]:  #
         sess.result.actions.append(name)
         if (card := result_card(name, args, result)) is not None:
             await sess.to_phone({"type": "card", "card": card})
+    took = time.monotonic() - t_tool
+    if took >= 0.4:
+        logger.info("phone tool %s готов за %.1f с", name, took)
     return result
 
 
@@ -1147,6 +1161,7 @@ async def greetings(uid: int) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ «Звонит мама» — кто звонит, голосом бота
 _LANG_NAMES = {"ru": "русском", "uz": "узбекском (латиница)", "en": "английском"}
+NAME_STYLE = (os.getenv("ANNOUNCE_NAME_STYLE") or "uz").strip().lower()   # uz — имя узбекской латиницей | ru — русской транслитерацией
 _ANNOUNCE_FALLBACK = {"ru": ("Звонит {name}", "Вам звонят"), "uz": ("{name} qo'ng'iroq qilyapti", "Sizga qo'ng'iroq"),
                       "en": ("{name} is calling", "Incoming call")}
 
@@ -1217,7 +1232,9 @@ def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
     if kin:
         # свои (он сказал, кто брат/мама, или так и записан) — «Звонит брат»
         return (f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + where
-    spoken = phone.names.speakable(name, lang)
+    # 09.10 «все имена в контактах узбекские — читай по-узбекски»: имя уходит в озвучку узбекской латиницей («Звонит Sirojbek aka»), а не русской
+    # транслитерацией («Сирожбек ака», которую голос читает с аканьем). ANNOUNCE_NAME_STYLE=ru вернёт прежнее чтение.
+    spoken = phone.names.speakable(name, lang) if NAME_STYLE == "ru" else phone.names.speakable_uz(name)
     return (one.format(name=spoken) + where) if spoken else anon
 
 
@@ -1235,9 +1252,9 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     name = str(name or "").strip()[:80]
     app = str(app or "").strip()[:30]
     # v4 (28.09): кэш по готовой фразе, а не по имени — фраза без модели и считается мгновенно. Номер из книги звучит
-    # именем, а все незнакомые номера — одной записью
+    # именем, а все незнакомые номера — одной записью. v5 (09.10): имена по-узбекски — записанное по-русски перезаписывается
     text = announcement_text(uid, name, app, persona.lang)
-    key = hashlib.sha1(f"v4|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"v5|{NAME_STYLE}|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"

@@ -593,8 +593,11 @@ def gcloud_lines(profile: Profile) -> list[str]:
              + f" ({max(0, s['days_left'])} {profile.tr('дн.', 'kun')})"]
     if s["chosen"] == "vertex":
         lines.append(f"📈 {profile.tr('Лимит в день', 'Kunlik limit')}: ${s['limit']:g} · {profile.tr('сегодня', 'bugun')} ${billing.spent_today():.2f}")
+    if not s["ai_studio_allowed"]:
+        lines.append("🚫 " + profile.tr("AI Studio отключён — всё только через Vertex", "AI Studio o‘chirilgan — hammasi faqat Vertex orqali"))
     if s.get("error"):
-        lines.append(f"⚠️ {h(s['error'])} — {profile.tr('пока идёт через AI Studio', 'hozircha AI Studio orqali')}")
+        lines.append(f"⚠️ {h(s['error'])} — " + (profile.tr('пока идёт через AI Studio', 'hozircha AI Studio orqali') if s["ai_studio_allowed"]
+                                                else profile.tr('запросы не проходят, AI Studio отключён', 'so‘rovlar o‘tmayapti, AI Studio o‘chirilgan')))
     return lines
 
 

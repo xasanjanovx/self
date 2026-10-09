@@ -284,6 +284,32 @@ def speakable(name: Any, lang: str = "ru") -> str:
     return " ".join(words)
 
 
+def plain(name: Any) -> str:
+    """Имя без украшений: «𝑀𝑎𝑠ℎ𝑥𝑢𝑟𝑏𝑒𝑘» (математический курсив), «𝐀𝐝𝐚𝐤𝐡𝐚𝐦𝐨𝐯 🇺🇿», «SIROJIDDIN aka 📱2» → буквы и цифры как обычный текст.
+    09.10: голос и модель не умеют читать «шрифтовые» буквы — имя звучало бы как набор значков."""
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", str(name or ""))
+    text = "".join(ch for ch in text if ch.isalnum() or ch in " '’ʻʼ‘`-.")
+    return " ".join(text.split())
+
+
+def speakable_uz(name: Any) -> str:
+    """09.10 «все имена в контактах узбекские — читай по-узбекски»: имя для озвучки узбекской латиницей. Русский голос читал «Onajonim» как
+    «Онажоним» с аканьем («анажаним») и русским ударением; узбекская запись в латинице озвучивается по-узбекски (проверено: «Сирожбек ака»
+    и «Sirojbek aka» звучат по-разному). Кириллица в книге («Хусанбой ака», «Ғайрат») — тоже в латиницу. Пометки («I», «Inv», «ofis»), цифры и
+    значки — прочь: «SIROJIDDIN aka 📱2» → «Sirojiddin aka»."""
+    from .free_voice import uz_latin
+
+    words = []
+    for raw in re.findall(r"[^\W\d_]+(?:['ʻʼ’‘`][^\W\d_]+)*", plain(name)):
+        if raw.lower() in _JUNK_WORDS or len(raw) <= 2:
+            continue
+        word = uz_latin(raw.lower()) if re.search(r"[а-яёўқғҳ]", raw.lower()) else raw.lower()
+        words.append(word[:1].upper() + word[1:])
+    return " ".join(words)
+
+
 SELF_WORDS = {"mne", "menya", "sebe", "menga", "meni", "ozimga", "me", "myself"}
 
 

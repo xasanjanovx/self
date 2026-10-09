@@ -79,6 +79,8 @@ class LiveResult:
     mutated: bool = False
     model: str | None = None
     dialed: bool = False               # звонок дошёл до телефона (взяли или нет) — это не сбой Gemini
+    no_reply: bool = False             # wake: трубку взяли, а ни одной его фразы не услышали (спит с телефоном / микрофон не слышит)
+    heard_peak: float = 0.0            # wake: самый громкий кусок звука из трубки за звонок (rms) — слышит ли JES его вообще
 
 
 # ------------------------------------------------------------------ промпт и инструменты
@@ -273,10 +275,12 @@ PHONE_RULES = (
     "На вопросы отвечай по существу, без «не могу»; свежие факты — web_search; сейчас {year} год.\n"
     "ЕГО ДАННЫЕ — bot_task, просьбой целиком: трата, еда, задача, напоминание, «сколько потратил», погода, исправить, удалить, "
     "цели, долги, отчёты, подъём.\n"
-    "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком: SMS, «что мне написали», фонарик, громкость, маршрут, такси "
-    "(без адреса — просто «такси»), WhatsApp, YouTube, галерея, яркость, не беспокоить, журнал звонков, курс, намаз, запомнить, отменить.\n"
+    "TELEGRAM И ЗВОНКИ — сразу, без phone_task: «что мне написали / новые / пропущенные» — telegram_read без who; «что пишет Алишер», "
+    "«прочитай избранное» — telegram_read(who); «кто звонил» — recent_calls; «перезвони» — call_back. Перескажи коротко: от кого и о чём.\n"
+    "ПРОЧЕЕ НА ТЕЛЕФОНЕ — phone_task, просьбой целиком: SMS, фонарик, громкость, маршрут, такси "
+    "(без адреса — просто «такси»), WhatsApp, YouTube, галерея, яркость, не беспокоить, курс, намаз, запомнить, отменить.\n"
     "ЛЮДИ: звони только тому, кого он назвал сейчас; «позвони мне» — phone_call(who=«мне»): помощник JES позвонит ему в Telegram. "
-    "В variants — другие написания (мама → ойи, ona, oyijon). Сообщения уходят после «да» — confirm_send, «нет» — cancel_send.\n"
+    "В variants — другие написания (мама → ойи, ona, oyijon). Сообщения уходят после «да» — confirm_send, «нет» — cancel_send. Имена людей узбекские: произноси по-узбекски, не по-русски.\n"
     "ВИДЕТЬ: камера — look, экран — screen_look; кадр придёт с результатом — сразу ответь по нему. Нажимать в других "
     "приложениях не умеешь. need_unlock — одной фразой попроси разблокировать.\n"
     "Разговор НЕ закрывается сам: после ответа молча жди. Речь, обращённую не к тебе (кто-то рядом, телевизор), — не отвечай. "
@@ -306,13 +310,16 @@ PHONE_SKIP_TOOLS = {"complete_tasks", "get_wake", "expect_photo", "ai_status", "
 # 27.09: записи (трата, еда, задача, напоминание), «сколько потратил» и погода — через bot_task (Flash-Lite со всеми
 # инструментами): эти 6 описаний были 40% текста, который Live оплачивает в каждой реплике. Команды, которые должны
 # сработать мгновенно (звонок, будильник, приложение, камера), остаются в Live.
+# 09.10 «JES отвечает слишком медленно»: «что мне написали», «кто звонил», «перезвони на пропущенный» шли Live → phone_task → Flash-Lite →
+# инструмент → Flash-Lite → Live (2.5–3 с после его фразы). Эти три — сразу в Live: один шаг
 PHONE_LIVE_CORE = {"end_call", "phone_call", "telegram_send", "confirm_send", "cancel_send", "set_alarm", "set_timer", "open_app",
-                   "media", "look", "screen_look", "web_search", "research", "bot_task", "send_to_chat", "where_am_i", "phone_usage"}
+                   "media", "look", "screen_look", "web_search", "research", "bot_task", "send_to_chat", "where_am_i", "phone_usage",
+                   "telegram_read", "recent_calls", "call_back"}
 PHONE_DESC_LIMIT = 120   # описание инструмента в голосе телефона (знаков)
 PHONE_PARAM_LIMIT = 50
 _PHONE_TASK = {"name": "phone_task",
-               "description": "Всё остальное на телефоне: SMS, прочитать Telegram, фонарик, громкость, маршрут, такси, WhatsApp, YouTube, "
-                              "галерея, яркость, не беспокоить, звонки: журнал/перезвонить, настройки, курс, намаз, запомнить, отменить последнее, "
+               "description": "Всё остальное на телефоне: SMS, фонарик, громкость, маршрут, такси, WhatsApp, YouTube, "
+                              "галерея, яркость, не беспокоить, настройки, курс, намаз, запомнить, отменить последнее, "
                               "«продолжи урок» (YouTube с того места, где остановился).",
                "parameters": {"type": "OBJECT", "properties": {"request": {"type": "STRING", "description": "просьба целиком, как он сказал, с именами и числами"}},
                               "required": ["request"]}}
@@ -533,6 +540,23 @@ class _Session:
         # 29.09: выбран Vertex AI (кредит Google Cloud) — сначала он; не вышло — как обычно, AI Studio
         from . import gcloud
 
+        if not gcloud.studio_allowed():
+            # 09.10: AI Studio закрыт — живой голос только через Vertex; не вышло — ошибка (звонок/телефон сообщат о сбое), не тихий откат
+            if not gcloud.vertex_key():
+                raise RuntimeError("нет VERTEX_API_KEY — живой голос только через Vertex AI (AI Studio закрыт)")
+            if not gcloud.project():
+                import httpx
+
+                async with httpx.AsyncClient(timeout=15) as http:
+                    await gcloud.ensure_project(http)
+            if not gcloud.project():
+                raise RuntimeError("не знаю номер проекта Google Cloud — задайте VERTEX_PROJECT в .env (нужен живому голосу Vertex)")
+            for attempt in (1, 2):
+                if (ws := await self._connect_vertex(session, MODELS[0])) is not None:
+                    return ws
+                if attempt == 1:
+                    await asyncio.sleep(0.5)
+            raise RuntimeError("живой голос через Vertex не подключился: " + str(gcloud.status().get("error") or "нет ответа"))
         if gcloud.live_ready() and (ws := await self._connect_vertex(session, MODELS[0])) is not None:
             return ws
         # сначала с жёстким языком речи (languageCode); модель не приняла — та же модель без него.
@@ -583,7 +607,10 @@ class _Session:
         """Живой голос через Vertex AI (ключ VERTEX_API_KEY). Отказ — None: вызывающий подключится к AI Studio."""
         from . import gcloud
 
-        for rich in (True, False):
+        rich_modes = (True, False)
+        i = 0
+        while i < len(rich_modes):
+            rich = rich_modes[i]
             try:
                 ws = await session.ws_connect(gcloud.live_url(), headers=gcloud.headers(), heartbeat=20, max_msg_size=0)
             except Exception as exc:
@@ -603,12 +630,20 @@ class _Session:
                 self.provider = "vertex"
                 self.result.model = model
                 gcloud.ok()
-                logger.info("live: Vertex AI, модель %s, голос %s, язык %s, расширенный режим %s", model, self.persona.voice,
-                            self.persona.lang, rich)
+                logger.info("live: Vertex AI, модель %s, голос %s, язык %s, расширенный режим %s, экономия %s", model, self.persona.voice,
+                            self.persona.lang, rich, _extras_level.get(model, 2))
                 return ws
             error = f"{getattr(msg, 'extra', None) or getattr(msg, 'data', '')!s}"[:300]
             await ws.close()
-            if rich:
+            # 09.10: Vertex отказал проекту в «размышлениях» (thinkingConfig: "project is not allowlisted to customize the thinking
+            # level") — как и в AI Studio, снимаем экономные настройки по одной (уровень запоминается до перезапуска) и пробуем снова
+            level = _extras_level.get(model, 2)
+            if level > 0 and _extras_rejected(error):
+                _extras_level[model] = level - 1
+                logger.warning("live: Vertex не принял экономные настройки модели %s (уровень %s: %s) — пробую проще", model, level, error[:120])
+                continue
+            i += 1
+            if i < len(rich_modes):
                 continue  # без жёсткого языка — вдруг Vertex не принял его
             gcloud.failed("live", None, f"setup: {error}")
         return None

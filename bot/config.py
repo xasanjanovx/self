@@ -107,7 +107,7 @@ def load_settings() -> Settings:
         supabase_url=_required("SUPABASE_URL"),
         supabase_service_role_key=_required("SUPABASE_SERVICE_ROLE_KEY"),
         db_table_prefix=os.getenv("DB_TABLE_PREFIX", "").strip(),
-        gemini_api_key=_required("GEMINI_API_KEY"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),    # ключ AI Studio: с 09.10 не нужен — запросы идут через Vertex (VERTEX_API_KEY)
         gemini_model=_gemini_model("GEMINI_MODEL"),
         gemini_vision_model=_gemini_model("GEMINI_VISION_MODEL"),
         gemini_transcribe_model=_gemini_model("GEMINI_TRANSCRIBE_MODEL"),

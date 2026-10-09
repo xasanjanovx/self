@@ -9,3 +9,7 @@ os.environ["SUPABASE_URL"] = "https://dummy.supabase.co"
 os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.sig"
 os.environ["GEMINI_API_KEY"] = "test-key"
 os.environ["GEMINI_MODEL"] = "gemini-2.5-flash"
+# В проде AI Studio закрыт (09.10, gcloud.studio_allowed()) — Gemini только через Vertex. Старые тесты проверяют именно режим
+# «Vertex с откатом в AI Studio», поэтому по умолчанию здесь он включён; закрытый режим — tests/test_vertex_only.py
+# (monkeypatch.delenv("ALLOW_AI_STUDIO")).
+os.environ["ALLOW_AI_STUDIO"] = "1"

@@ -445,3 +445,141 @@ def test_test_call_asks_the_questions_but_remembers_nothing(tmp_path, monkeypatc
     _talk(flow, "да")
     _talk(flow, "не знаю", "unknown")
     assert islam_quiz.progress(7, plan.day) == 2 and not islam_quiz._load(7).get("missed")
+
+
+# ------------------------------------------------------------------ 09.10: громкий сигнал приложения, если не взял трубку; проверка слуха
+def _loud_env(monkeypatch, *, dialog_result):  # noqa: ANN001
+    from types import SimpleNamespace
+
+    from bot import caller, phone_link, services, wake as wake_mod, wake_runner
+
+    pushed: list = []
+    notes: list = []
+
+    async def dialog(profile, s, plan, minutes_left, attempt=1):  # noqa: ANN001
+        return dialog_result
+
+    async def save(uid, day, fields):  # noqa: ANN001
+        return {}
+
+    async def note(bot, uid, text, **kw):  # noqa: ANN001, ANN003
+        notes.append(text)
+
+    class Bot:
+        async def send_message(self, *a, **k):  # noqa: ANN002, ANN003
+            return SimpleNamespace(message_id=1)
+
+        async def delete_message(self, *a, **k):  # noqa: ANN002, ANN003
+            return True
+
+    monkeypatch.setattr(caller, "available", lambda: True)
+    monkeypatch.setattr(wake_runner, "_dialog_call", dialog)
+    monkeypatch.setattr(services, "save_wake_log", save)
+    monkeypatch.setattr(wake_runner.screen_mod_, "send_note", note)
+    monkeypatch.setattr(phone_link, "push", lambda uid, action: pushed.append((uid, action)) or True)
+    from bot import call_assistant
+
+    async def intro(profile):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(call_assistant, "helper_intro", intro)
+    now = datetime.now(timezone.utc)
+    plan = wake_mod.DayPlan(day=date(2026, 10, 9), active=True, takbir="05:20", takbir_at=now + timedelta(minutes=20), wake_at=now)
+    wake_runner._active.pop(7, None)
+    asyncio.run(wake_runner.run_attempt(Bot(), _profile(), wake_mod.WakeSettings(), plan, None))
+    wake_runner._active.pop(7, None)
+    return pushed, notes
+
+
+def test_unanswered_call_rings_the_phone_loudly(monkeypatch):
+    from types import SimpleNamespace
+
+    pushed, notes = _loud_env(monkeypatch, dialog_result={"answered": False, "error": "no_answer", "state": SimpleNamespace(confirmed=False, transcript=[])})
+    assert pushed == [(7, {"type": "ring_phone", "seconds": 60})] and notes == []
+
+
+def test_picked_up_but_silent_rings_and_tells_what_it_heard(monkeypatch):
+    from types import SimpleNamespace
+
+    pushed, notes = _loud_env(monkeypatch, dialog_result={"answered": True, "error": None, "no_reply": True, "heard_peak": 12,
+                                                          "state": SimpleNamespace(confirmed=False, transcript=[])})
+    assert pushed == [(7, {"type": "ring_phone", "seconds": 60})]
+    assert len(notes) == 1 and "12" in notes[0] and "не слышу" in notes[0].lower()
+
+
+def test_normal_answered_call_does_not_ring(monkeypatch):
+    from types import SimpleNamespace
+
+    pushed, notes = _loud_env(monkeypatch, dialog_result={"answered": True, "error": None, "no_reply": False,
+                                                          "state": SimpleNamespace(confirmed=False, transcript=["он: да"])})
+    assert pushed == [] and notes == []
+
+
+def test_confirmed_wake_or_too_many_attempts_never_ring(monkeypatch):
+    from bot import phone_link, wake_runner
+
+    pushed: list = []
+    monkeypatch.setattr(phone_link, "push", lambda uid, action: pushed.append(action) or True)
+    profile = _profile()
+    asyncio.run(wake_runner._loud_backup(None, profile, 1, call_error="no_answer", answered=False, confirmed=True, result={}))
+    asyncio.run(wake_runner._loud_backup(None, profile, wake_runner.LOUD_RING_ATTEMPTS + 1, call_error="no_answer", answered=False,
+                                         confirmed=False, result={}))
+    assert pushed == []                                          # подтвердил подъём / слишком много неудачных попыток — сигнал не нужен
+    asyncio.run(wake_runner._loud_backup(None, profile, 2, call_error="no_answer", answered=False, confirmed=False, result={}))
+    assert pushed == [{"type": "ring_phone", "seconds": wake_runner.LOUD_RING_S}]
+
+
+def test_phone_link_hurry_flag_goes_to_the_app():
+    from bot import phone_link
+
+    phone_link._hurry_until.clear()
+    assert phone_link.hurrying(7) is False
+    phone_link.hurry(7, 60)
+    assert phone_link.hurrying(7) is True
+    out = asyncio.run(phone_link.pull(7, wait=0.01))
+    assert out["hurry"] is True
+    phone_link._hurry_until.clear()
+
+
+def test_deaf_hint_is_said_once_when_the_call_has_no_sound(tmp_path, monkeypatch):
+    from datetime import date
+
+    from bot import islam_quiz
+    from tests.test_wake_session import _Wake  # noqa: PLC0415 — готовая сессия подъёма
+
+    w = _Wake(monkeypatch, tmp_path)
+    from bot.phone_cheap import Segmenter
+
+    w.sess._seg = Segmenter(24000, silence_ms=700, min_rms=110.0, factor=3.0, floor=80.0, floor_min=25.0, floor_max=120.0)
+    w.sess.flow.total_nudges = 1                                  # одна реплика в тишину уже была
+    said: list = []
+
+    async def say(text):  # noqa: ANN001
+        said.append(text)
+
+    w.sess.say = say
+    asyncio.run(w.sess.nudge_once())
+    assert said and "почти не слышу" in said[0] and w.sess.flow.deaf_used
+    asyncio.run(w.sess.nudge_once())
+    assert "почти не слышу" not in said[1]                        # второй раз — обычная лестница подъёма
+    assert islam_quiz and date
+
+
+def test_no_deaf_hint_when_the_line_is_alive(tmp_path, monkeypatch):
+    from tests.test_wake_session import _Wake  # noqa: PLC0415
+
+    w = _Wake(monkeypatch, tmp_path)
+    from bot.phone_cheap import Segmenter
+
+    seg = Segmenter(24000, silence_ms=700, min_rms=110.0, factor=3.0, floor=80.0, floor_min=25.0, floor_max=120.0)
+    seg.peak_all = 400.0                                          # звук из трубки есть — он просто молчит/спит
+    w.sess._seg = seg
+    w.sess.flow.total_nudges = 1
+    said: list = []
+
+    async def say(text):  # noqa: ANN001
+        said.append(text)
+
+    w.sess.say = say
+    asyncio.run(w.sess.nudge_once())
+    assert said and "почти не слышу" not in said[0]

@@ -25,12 +25,22 @@ _events: dict[int, asyncio.Event] = {}
 _seen: dict[int, float] = {}
 _state: dict[int, dict[str, Any]] = {}
 _asleep: dict[int, bool] = {}
+_hurry_until: dict[int, float] = {}   # пока идёт подъём: приложению не спать между запросами (громкий сигнал дойдёт сразу)
 
 
 def _event(uid: int) -> asyncio.Event:
     if uid not in _events:
         _events[uid] = asyncio.Event()
     return _events[uid]
+
+
+def hurry(uid: int, seconds: float) -> None:
+    """Подъём: ближайшие seconds секунд приложение опрашивает сервер без пауз между запросами (ответ pull содержит hurry=True)."""
+    _hurry_until[uid] = max(_hurry_until.get(uid, 0.0), time.monotonic() + seconds)
+
+
+def hurrying(uid: int) -> bool:
+    return time.monotonic() < _hurry_until.get(uid, 0.0)
 
 
 def online(uid: int) -> bool:
@@ -105,10 +115,10 @@ async def pull(uid: int, *, wait: float = PULL_WAIT_S) -> dict[str, Any]:
     from . import watch
 
     w = watch._watches.get(uid)
-    out: dict[str, Any] = {"actions": actions, "asleep": asleep(uid), "watch": bool(w is not None and w.fresh)}
+    out: dict[str, Any] = {"actions": actions, "asleep": asleep(uid), "watch": bool(w is not None and w.fresh), "hurry": hurrying(uid)}
     if asleep(uid) != sleeping:
         logger.info("phone link: телефону — %s", "он уснул, микрофон спит" if asleep(uid) else "он проснулся")
     return out
 
 
-__all__ = ["push", "pull", "online", "note_state", "in_hand", "set_asleep", "asleep", "PULL_WAIT_S"]
+__all__ = ["hurry", "hurrying", "push", "pull", "online", "note_state", "in_hand", "set_asleep", "asleep", "PULL_WAIT_S"]

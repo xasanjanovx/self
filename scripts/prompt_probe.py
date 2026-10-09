@@ -1,5 +1,5 @@
 """Сколько токенов уходит на инструкцию и инструменты в каждой реплике (телефон / Live-звонок / агент чата).
-Считает бесплатный countTokens Gemini — ничего не тратит.
+Считает countTokens Vertex AI (09.10: AI Studio не используем) — генерации нет, почти бесплатно.
 
     docker exec -w /app -e PYTHONPATH=/app codex-self-bot python scripts/prompt_probe.py [uid]
 """
@@ -11,9 +11,11 @@ import sys
 
 
 async def count(http, settings, text: str) -> int:  # noqa: ANN001
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-lite:countTokens"
+    from bot import gcloud
+
+    url = gcloud.url(settings.gemini_model, "countTokens")
     body = {"contents": [{"role": "user", "parts": [{"text": text}]}]}
-    async with http.post(url, json=body, headers={"x-goog-api-key": settings.gemini_api_key}) as r:
+    async with http.post(url, json=body, headers=gcloud.headers()) as r:
         data = await r.json()
         return int(data.get("totalTokens") or 0)
 

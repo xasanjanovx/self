@@ -42,8 +42,11 @@ _saved_free_key: str | None = None   # ключ, который он присл�
 
 
 def free_key() -> str:
-    """Бесплатный ключ: из .env или присланный боту (проверенный и сохранённый)."""
+    """Бесплатный ключ: из .env или присланный боту (проверенный и сохранённый). Это ключ AI Studio — пока он закрыт
+    (gcloud.studio_allowed(), 09.10: «только Vertex»), ключа «нет»: бесплатный уровень, озвучка и умная модель через него не идут."""
     global _saved_free_key
+    if not gcloud.studio_allowed():
+        return ""
     if FREE_API_KEY:
         return FREE_API_KEY
     if _saved_free_key is None:
@@ -358,7 +361,8 @@ class AIService:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=15.0),
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-            headers={"x-goog-api-key": self.api_key},
+            # ключ AI Studio клиенту не даём, пока AI Studio закрыт: каждый запрос в Vertex несёт свой ключ (gcloud.headers())
+            headers={"x-goog-api-key": self.api_key} if gcloud.studio_allowed() and self.api_key else {},
         )
 
     async def close(self) -> None:
@@ -369,6 +373,8 @@ class AIService:
 
     # ------------------------------------------------------------- models
     async def list_available_models(self) -> set[str]:
+        if not gcloud.studio_allowed():
+            return set()
         response = await self._client.get(self.base_url, params={"pageSize": 200})
         response.raise_for_status()
         names: set[str] = set()
@@ -382,6 +388,12 @@ class AIService:
 
     async def ensure_models(self) -> None:
         """Если модель из env недоступна для ключа — подменяем на рабочую."""
+        if not gcloud.studio_allowed():
+            # список моделей — запрос в AI Studio, а он закрыт: модели из .env как есть (в Vertex они проверены), озвучка — модель Vertex
+            self.tts_model = gcloud.vertex_model(FAST_TTS_MODEL)
+            logger.info("Gemini: только Vertex AI (AI Studio закрыт) — models text=%s vision=%s transcribe=%s agent=%s tts=%s",
+                        self.text_model, self.vision_model, self.transcribe_model, self.agent_model, self.tts_model)
+            return
         try:
             available = await self.list_available_models()
         except Exception as exc:
@@ -459,12 +471,13 @@ class AIService:
             url = f"{self.base_url}/{model}:generateContent"
             _turn_model.set(model)
         payload = _adapt(model, payload)
-        if _vertex_only.get():
+        if _vertex_only.get() or not gcloud.studio_allowed():
             if not gcloud.vertex_key():
                 raise RuntimeError("нет VERTEX_API_KEY — этот запрос только через Vertex AI")
-            data = await self._post_vertex(model, payload)
+            # AI Studio закрыт — откатиться некуда, поэтому временные сбои (429/5xx/сеть) повторяем, а не сдаёмся с первого
+            data = await self._post_vertex(model, payload, attempts=_MAX_ATTEMPTS)
             if data is None:
-                raise RuntimeError("Vertex AI не ответил — этот запрос в AI Studio не отправляем")
+                raise RuntimeError(f"Vertex AI не ответил ({gcloud.status().get('error') or 'нет ответа'}) — этот запрос в AI Studio не отправляем")
             return data
         if gcloud.use_vertex(model) and (data := await self._post_vertex(model, payload)) is not None:
             return data
@@ -499,20 +512,29 @@ class AIService:
                 await asyncio.sleep(delay)
         raise RuntimeError("unreachable")
 
-    async def _post_vertex(self, model: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """29.09: сначала Vertex AI (кредит Google Cloud, bot/gcloud.py). Не вышло — None, и запрос идёт в AI Studio."""
-        try:
-            response = await self._client.post(gcloud.url(model, "generateContent"), json=payload, headers=gcloud.headers())
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            gcloud.failed(model, None, type(exc).__name__)
+    async def _post_vertex(self, model: str, payload: dict[str, Any], *, attempts: int = 1) -> dict[str, Any] | None:
+        """29.09: сначала Vertex AI (кредит Google Cloud, bot/gcloud.py). Не вышло — None, и запрос идёт в AI Studio
+        (если он не закрыт — тогда вызывающий бросает ошибку). attempts > 1 — повторы на временных сбоях."""
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self._client.post(gcloud.url(model, "generateContent"), json=payload, headers=gcloud.headers())
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                status, body = None, type(exc).__name__
+            else:
+                if response.status_code == 200:
+                    data = response.json()
+                    gcloud.ok()
+                    billing.record(model, data.get("usageMetadata"), kind=_usage_kind(model, payload), provider="vertex")
+                    return data
+                status, body = response.status_code, response.text
+            if (status is None or status in _RETRY_STATUSES) and attempt < attempts:
+                delay = _backoff(attempt)
+                logger.warning("Vertex transient error %d/%d (%s): %s — retry in %.1fs", attempt, attempts, model, status or body, delay)
+                await asyncio.sleep(delay)
+                continue
+            gcloud.failed(model, status, body)
             return None
-        if response.status_code != 200:
-            gcloud.failed(model, response.status_code, response.text)
-            return None
-        data = response.json()
-        gcloud.ok()
-        billing.record(model, data.get("usageMetadata"), kind=_usage_kind(model, payload), provider="vertex")
-        return data
+        return None
 
     @staticmethod
     def _first_candidate(data: dict[str, Any]) -> dict[str, Any]:
@@ -701,13 +723,20 @@ class AIService:
         # 28.09: бесплатный уровень — только по просьбе (free=True). 29.09: в голосе он давал 429 уже к утру (квота ~5 фраз
         # в день, экономия за месяц $0.005), а каждая неудачная попытка — лишний запрос перед платным
         routes: list[tuple[str, str, dict[str, str]]] = []
+        studio = gcloud.studio_allowed()
         if gcloud.use_vertex(model):  # 29.09: кредит Google Cloud (Vertex AI) — первым
             routes.append(("vertex", gcloud.url(model, "streamGenerateContent?alt=sse"), gcloud.headers()))
-        key = free_key() if free else None
+            if not studio:    # 09.10: AI Studio закрыт — запасной маршрут только повторный заход в Vertex
+                routes.append(("vertex", gcloud.url(model, "streamGenerateContent?alt=sse"), gcloud.headers()))
+        key = free_key() if free else None    # пока AI Studio закрыт, free_key() пуст
         if key and _time.monotonic() > _free_tts_paused_until:
             routes.append(("free", url, {"x-goog-api-key": key}))
-        routes.append(("paid", url, {}))
-        for route, route_url, headers in routes:
+        if studio:
+            routes.append(("paid", url, {}))
+        if not routes:
+            raise RuntimeError("нет VERTEX_API_KEY — озвучка только через Vertex AI (AI Studio закрыт)")
+        last_error = ""
+        for n, (route, route_url, headers) in enumerate(routes):
             usage: dict[str, Any] | None = None
             whole = bytearray() if cached is not None else None
             complete = False
@@ -716,6 +745,9 @@ class AIService:
                     body = (await response.aread()).decode("utf-8", "replace")
                     if route == "vertex":
                         gcloud.failed(model, response.status_code, body)
+                        last_error = f"{response.status_code}: {body[:200]}"
+                        if not studio and response.status_code in _RETRY_STATUSES and n + 1 < len(routes):
+                            await asyncio.sleep(_backoff(1))
                         continue
                     if route == "free":
                         logger.info("free key TTS: %s %s — озвучиваю платным", response.status_code, body[:120])
@@ -751,6 +783,7 @@ class AIService:
             if complete and whole:
                 _tts_cache_save(cached, bytes(whole))
             return
+        raise RuntimeError(f"TTS {gcloud.vertex_model(model)} через Vertex: {last_error or 'нет ответа'}")
 
     async def generate_json(self, prompt: str, **kwargs: Any) -> Any:
         text = await self.generate([{"text": prompt}], json_mode=True, **kwargs)

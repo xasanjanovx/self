@@ -226,7 +226,9 @@ def test_unreadable_speech_asks_to_repeat_once_and_keeps_the_recording(monkeypat
     dumps = list((tmp_path / "wake_dump").glob("*.wav"))
     assert dumps                                                                   # запись сохранена — можно послушать, что он говорил
     w.sess._unheard_at = -1e9                                                      # прошло 12 с — можно ещё раз
-    assert asyncio.run(w.say()).startswith("я: Не разобрала.")
+    third = asyncio.run(w.say())
+    # 09.10: второй раз подряд слов не разобрать — не зацикливаемся на одном вопросе: принимаем, называем ответ, идём дальше
+    assert third.startswith("я: Принято.") and w.qs[0].a in third and "Второй вопрос" in third
 
 
 def test_short_click_is_not_speech(monkeypatch, tmp_path):
@@ -239,3 +241,86 @@ def test_short_click_is_not_speech(monkeypatch, tmp_path):
         return w.sess.result.transcript[before:]
 
     assert asyncio.run(run()) == []
+
+
+# ------------------------------------------------------------------ 09.10: модель слушает запись и сразу оценивает
+def _listen(monkeypatch, w, answers):  # noqa: ANN001
+    """ai.generate (модель слушает звук) вернёт по очереди answers — словари {"text", "verdict"} или исключение."""
+    from bot.context import ai
+
+    seen: list = []
+
+    async def generate(parts, **kw):  # noqa: ANN001, ANN003
+        import json
+
+        seen.append(parts)
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return json.dumps(a, ensure_ascii=False)
+
+    monkeypatch.setattr(ai, "generate", generate)
+    return seen
+
+
+def test_answer_is_heard_and_graded_in_one_call_with_the_expected_answer(monkeypatch, tmp_path):
+    w = _Wake(monkeypatch, tmp_path, heard=["да, проснулся"])      # приветствие — обычная расшифровка
+    seen = _listen(monkeypatch, w, [{"text": "Abu Tolib", "verdict": "correct"}])
+
+    async def run():
+        await w.say()                          # приветствие → первый вопрос
+        return await w.say()                   # ответ на первый вопрос — слушает модель
+
+    second = asyncio.run(run())
+    assert second.startswith(("я: Верно", "я: Правильно", "я: Молодец"))
+    assert not w.prompts                                       # отдельная оценка по тексту не понадобилась
+    prompt = seen[0][0]["text"]
+    assert w.qs[0].q in prompt and w.qs[0].a in prompt and "Abu Tolib" in prompt    # модель знает, какой ответ ждём
+    assert seen[0][1]["inline_data"]["mime_type"] == "audio/wav"
+    assert "он: Abu Tolib" in w.sess.result.transcript
+
+
+def test_unsure_listener_means_repeat_not_mistake_and_two_in_a_row_move_on(monkeypatch, tmp_path):
+    w = _Wake(monkeypatch, tmp_path, heard=["да"])
+    _listen(monkeypatch, w, [{"text": "obuvnoy", "verdict": "other"}, {"text": "pe sho", "verdict": "other"}])
+
+    async def run():
+        await w.say()
+        first = await w.say()
+        second = await w.say()
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert "Не разобрала" in first and w.qs[0].q in first and w.sess.flow.idx == 1 or "Не разобрала" in first
+    assert "Принято" in second and w.qs[0].a in second and "Второй вопрос" in second    # дважды не разобрали — идём дальше, ошибкой не считаем
+    assert islam_quiz._load(1).get("missed", []) == []
+
+
+def test_listener_down_falls_back_to_transcription_and_text_grade(monkeypatch, tmp_path):
+    w = _Wake(monkeypatch, tmp_path, verdicts=["correct"], heard=["да", "Абу Талиб"])
+    _listen(monkeypatch, w, [RuntimeError("503")])
+
+    async def run():
+        await w.say()
+        return await w.say()
+
+    second = asyncio.run(run())
+    assert second.startswith(("я: Верно", "я: Правильно", "я: Молодец")) and len(w.prompts) == 1
+
+
+def test_wake_call_listens_more_sensitively_than_a_normal_call():
+    from bot.phone_cheap import Segmenter
+
+    def tone(rms: int) -> bytes:
+        return b"".join(int(rms * (1 if i % 2 else -1)).to_bytes(2, "little", signed=True) for i in range(480))   # 20 мс @ 24 кГц
+
+    normal = Segmenter(24000, silence_ms=700)
+    wake = Segmenter(24000, silence_ms=700, min_rms=110.0, factor=3.0, floor=80.0, floor_min=25.0, floor_max=120.0)
+    for seg in (normal, wake):
+        for _ in range(200):                        # 4 с тихой комнаты: шум ~20 — порог подъёма опускается к минимуму
+            seg.feed(tone(20))
+        for _ in range(25):                         # сонный шёпот ~150 rms
+            seg.feed(tone(150))
+    assert not normal.active                        # обычный звонок такой шёпот пропускает (порог 350)
+    assert wake.active and wake.peak_rms > 140      # подъём его слышит
+    assert "пик" in wake.stats()
