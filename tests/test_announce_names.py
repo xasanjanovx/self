@@ -92,3 +92,65 @@ def test_old_russian_reading_is_still_available_and_cache_is_new(tmp_path, monke
     monkeypatch.setattr(phone_live, "NAME_STYLE", "ru")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     assert phone_live.announcement_text(77, "Mashhur bek aka", "", "ru") == "Звонит Машхур Бек Ака"
+
+
+# ------------------------------------------------------------------ 09.10: «Звонит» по-русски, имя — Gemini по-узбекски, тем же голосом
+def test_announcement_parts_split_russian_frame_and_uzbek_name():
+    from bot import phone_live
+
+    parts = phone_live.announcement_parts(77, "Sirojbek aka", "Telegram", "ru")
+    assert parts == [("Звонит", "ru-RU"), ("Sirojbek Aka", "uz-UZ"), ("в Telegram", "ru-RU")]
+    assert phone_live.announcement_text(77, "Sirojbek aka", "Telegram", "ru") == "Звонит Sirojbek Aka в Telegram"
+    assert phone_live.announcement_parts(77, "Хусанбой ака", "", "ru") == [("Звонит", "ru-RU"), ("Xusanboy Aka", "uz-UZ")]
+
+
+def test_kin_and_helper_and_unknown_stay_one_piece():
+    from bot import phone_live
+
+    assert phone_live.announcement_parts(77, "Мама", "", "ru") == [("Звонит мама", None)]
+    assert phone_live.announcement_parts(77, "JES | AI", "Telegram", "ru") == [("Звонит Джес в Telegram", None)]
+    assert phone_live.announcement_parts(77, "", "", "ru") == [("Звонит незнакомый номер", None)]
+
+
+def test_uzbek_persona_reads_everything_in_uzbek():
+    from bot import phone_live
+
+    parts = phone_live.announcement_parts(77, "Sirojbek aka", "", "uz")
+    assert parts and all(lang == "uz-UZ" for _t, lang in parts) and parts[0][0] == "Sirojbek Aka"
+
+
+def test_synthesize_parts_gives_each_piece_its_language_and_joins_them():
+    import asyncio
+
+    from bot.ai import AIService
+
+    seen: list = []
+
+    class Fake(AIService):
+        def __init__(self):  # noqa: D107
+            pass
+
+        async def speak_stream(self, text, *, voice="Kore", model="m", free=False, language=None):  # noqa: ANN001
+            seen.append((text, language, voice))
+            yield (b"\x01\x00" * 2400) if language == "ru-RU" else (b"\x02\x00" * 4800)
+
+    pcm = asyncio.run(Fake().synthesize_parts([("Звонит", "ru-RU"), ("Sirojbek Aka", "uz-UZ")], voice="Sulafat"))
+    assert seen == [("Звонит", "ru-RU", "Sulafat"), ("Sirojbek Aka", "uz-UZ", "Sulafat")]
+    assert pcm is not None and len(pcm) == 4800 + 3360 + 9600          # кусок, пауза 70 мс, кусок
+
+    class Broken(Fake):
+        async def speak_stream(self, text, *, voice="Kore", model="m", free=False, language=None):  # noqa: ANN001
+            if language == "uz-UZ":
+                raise RuntimeError("boom")
+            yield b"\x01\x00" * 100
+
+    assert asyncio.run(Broken().synthesize_parts([("Звонит", "ru-RU"), ("Sirojbek Aka", "uz-UZ")])) is None   # не вышло — обычная озвучка
+
+
+def test_tts_cache_key_depends_on_language_only_when_given(tmp_path, monkeypatch):
+    from bot import ai as ai_mod
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    plain = ai_mod._tts_cache_path("m", "Sulafat", "Звонит")
+    assert plain == ai_mod._tts_cache_path("m", "Sulafat", "Звонит", None)           # прежние записи не теряются
+    assert plain != ai_mod._tts_cache_path("m", "Sulafat", "Звонит", "ru-RU")

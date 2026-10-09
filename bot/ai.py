@@ -186,7 +186,7 @@ def voice_tag(voice: str) -> str:
     return voice if now == FAST_TTS_MODEL else f"{voice}@{now}"
 
 
-def _tts_cache_path(model: str, voice: str, text: str) -> Path | None:
+def _tts_cache_path(model: str, voice: str, text: str, language: str | None = None) -> Path | None:
     """Файл озвучки короткой фразы (29.09 его просьба «записать голоса, чтобы не тратить каждый раз токены»).
     Только на сервере (DATA_DIR задан) — тесты и локальный запуск диск не трогают."""
     folder = _os.getenv("DATA_DIR")
@@ -195,7 +195,8 @@ def _tts_cache_path(model: str, voice: str, text: str) -> Path | None:
         return None
     import hashlib
 
-    return Path(folder) / "tts_cache" / (hashlib.sha1(f"{model}|{voice}|{text}".encode()).hexdigest()[:20] + ".pcm")
+    key = f"{model}|{voice}|{text}" + (f"|{language}" if language else "")   # без языка ключ прежний — записанные фразы остаются
+    return Path(folder) / "tts_cache" / (hashlib.sha1(key.encode()).hexdigest()[:20] + ".pcm")
 
 
 def _tts_cache_save(path: Path | None, pcm: bytes) -> None:
@@ -662,6 +663,23 @@ class AIService:
                 sources.append((str(web.get("title") or "источник")[:40], str(web["uri"])))
         return "\n".join(texts).strip(), sources[:4]
 
+    async def synthesize_parts(self, parts: list[tuple[str, str | None]], *, voice: str = "Kore", gap_s: float = 0.07) -> bytes | None:
+        """Фраза из кусков на разных языках одним голосом: [("Звонит", "ru-RU"), ("Sirojbek aka", "uz-UZ")]. Каждый кусок озвучивается
+        со своим languageCode (имя читается по-узбекски, а не русской транскрипцией), куски склеиваются с короткой паузой.
+        Любой кусок не вышел — None (вызывающий озвучит всю фразу обычным способом)."""
+        async def one(text: str, language: str | None) -> bytes:
+            return b"".join([chunk async for chunk in self.speak_stream(text, voice=voice, language=language)])
+
+        try:
+            pcms = await asyncio.gather(*(one(text, language) for text, language in parts if text.strip()))
+        except Exception as exc:
+            logger.warning("TTS parts failed: %s", str(exc)[:200])
+            return None
+        if not pcms or any(not p for p in pcms):
+            return None
+        silence = b"\x00\x00" * int(24000 * gap_s)
+        return silence.join(pcms)
+
     async def synthesize(self, text: str, *, voice: str = "Kore") -> bytes | None:
         """Текст → речь (PCM s16le, 24 kHz, mono). None, если TTS-модель недоступна."""
         if not text.strip():
@@ -700,12 +718,13 @@ class AIService:
         logger.error("TTS gave up after 3 attempts (finish=%s)", last.get("finishReason"))
         return None
 
-    async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL, free: bool = False):
+    async def speak_stream(self, text: str, *, voice: str = "Kore", model: str = FAST_TTS_MODEL, free: bool = False,
+                           language: str | None = None):
         """Текст → речь потоком (PCM s16le, 24 kHz, mono): первые куски звука — через ~0.6 с, пока модель договаривает.
         gemini-3.8-flash-lite-tts — не preview (без дневной квоты preview-TTS) и дешевле голоса Live в 4–10 раз.
         29.09: короткая фраза, которую уже озвучивали («Да, сэр, слышу вас», «Секунду»), — с диска: мгновенно и $0."""
         global _free_tts_paused_until
-        cached = _tts_cache_path(tts_model_now(model), voice, text)
+        cached = _tts_cache_path(tts_model_now(model), voice, text, language)
         if cached is not None and cached.exists():
             pcm = cached.read_bytes()
             try:
@@ -716,9 +735,12 @@ class AIService:
                 yield pcm[i: i + _TTS_CACHE_CHUNK]
             return
         url = f"{self.base_url}/{model}:streamGenerateContent?alt=sse"
+        speech: dict[str, Any] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
+        if language:
+            speech["languageCode"] = language   # 09.10: язык озвучки — фраза «Звонит» по-русски, а имя по-узбекски тем же голосом
         payload = {
             "contents": [{"role": "user", "parts": [{"text": text}]}],
-            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}},
+            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": speech},
         }
         # 28.09: бесплатный уровень — только по просьбе (free=True). 29.09: в голосе он давал 429 уже к утру (квота ~5 фраз
         # в день, экономия за месяц $0.005), а каждая неудачная попытка — лишний запрос перед платным

@@ -1214,9 +1214,18 @@ def announce_prompt(name: str, app: str, lang: str, memory: str = "") -> str:
     )
 
 
+_LANG_CODE = {"ru": "ru-RU", "uz": "uz-UZ", "en": "en-US"}
+
+
 def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
     """«Звонит мама», «Звонит Машхур бек ака в Telegram», «Звонит Джес» — без модели: быстро, бесплатно и без искажений
     (28.09: модель читала «JES | AI» как «Джарвис», «Mashhur bek» как «Махурбек»)."""
+    return " ".join(text for text, _lang in announcement_parts(uid, name, app, lang))
+
+
+def announcement_parts(uid: int, name: str, app: str, lang: str) -> list[tuple[str, str | None]]:
+    """Фраза кусками с языком озвучки. 09.10 его слова: «имя пусть Gemini читает по-узбекски, а “Звонит” по-русски»: имя контакта — свой
+    кусок (uz-UZ), остальное — на языке разговора. Остальные фразы («Звонит мама», «Звонит Джес») — одним куском, как раньше."""
     one, anon = _ANNOUNCE_FALLBACK.get(lang, _ANNOUNCE_FALLBACK["ru"])
     uz = lang == "uz"
     messenger = app if app.lower() in {"telegram", "whatsapp", "viber", "imo", "skype"} else ""
@@ -1225,17 +1234,30 @@ def announcement_text(uid: int, name: str, app: str, lang: str) -> str:
         name = phone.contact_by_number(uid, name) or ""  # номер из его книги — называем человека
     if not name:
         # 26.09: несохранённый номер — так и сказать
-        return ("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + where
+        return [(("Notanish raqam qo'ng'iroq qilyapti" if uz else "Звонит незнакомый номер") + where, None)]
     if phone.names.ASSISTANT_NAMES.search(name):
-        return ("JES qo'ng'iroq qilyapti" if uz else "Звонит Джес") + where  # помощник JES (будильник, «позвони мне»)
+        return [(("JES qo'ng'iroq qilyapti" if uz else "Звонит Джес") + where, None)]  # помощник JES (будильник, «позвони мне»)
     kin = phone.kin_of(uid, name) or phone.names.kin_word(phone.names.kin_root(name) or "")
     if kin:
         # свои (он сказал, кто брат/мама, или так и записан) — «Звонит брат»
-        return (f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + where
-    # 09.10 «все имена в контактах узбекские — читай по-узбекски»: имя уходит в озвучку узбекской латиницей («Звонит Sirojbek aka»), а не русской
-    # транслитерацией («Сирожбек ака», которую голос читает с аканьем). ANNOUNCE_NAME_STYLE=ru вернёт прежнее чтение.
-    spoken = phone.names.speakable(name, lang) if NAME_STYLE == "ru" else phone.names.speakable_uz(name)
-    return (one.format(name=spoken) + where) if spoken else anon
+        return [((f"{_KIN_UZ.get(kin, kin)} qo'ng'iroq qilyapti" if uz else f"Звонит {kin}") + where, None)]
+    if NAME_STYLE == "ru":
+        spoken = phone.names.speakable(name, lang)
+        return [((one.format(name=spoken) + where) if spoken else anon, None)]
+    # 09.10: имя — узбекской латиницей, отдельным куском с языком uz-UZ; «Звонит» и «в Telegram» — по-русски (язык разговора)
+    spoken = phone.names.speakable_uz(name)
+    if not spoken:
+        return [(anon, None)]
+    head, _sep, tail = one.partition("{name}")
+    here = _LANG_CODE.get(lang, "ru-RU")
+    parts: list[tuple[str, str | None]] = []
+    if head.strip():
+        parts.append((head.strip(), here))
+    parts.append((spoken, "uz-UZ"))
+    after = (tail + where).strip()
+    if after:
+        parts.append((after.strip(), here))
+    return parts
 
 
 def clean_announcement(text: str) -> str:
@@ -1253,8 +1275,9 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
     app = str(app or "").strip()[:30]
     # v4 (28.09): кэш по готовой фразе, а не по имени — фраза без модели и считается мгновенно. Номер из книги звучит
     # именем, а все незнакомые номера — одной записью. v5 (09.10): имена по-узбекски — записанное по-русски перезаписывается
-    text = announcement_text(uid, name, app, persona.lang)
-    key = hashlib.sha1(f"v5|{NAME_STYLE}|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
+    parts = announcement_parts(uid, name, app, persona.lang)
+    text = " ".join(t for t, _lang in parts)
+    key = hashlib.sha1(f"v6|{NAME_STYLE}|{ai_mod.voice_tag(persona.voice)}|{persona.lang}|{text}".encode()).hexdigest()[:16]
     folder = data_dir() / "announce"
     folder.mkdir(exist_ok=True)
     cache_file = folder / f"{key}.json"
@@ -1262,7 +1285,9 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
         return json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    pcm = await ai.synthesize(text, voice=persona.voice)
+    pcm = await ai.synthesize_parts(parts, voice=persona.voice) if len(parts) > 1 else None   # имя — свой кусок по-узбекски (09.10)
+    if not pcm:
+        pcm = await ai.synthesize(text, voice=persona.voice)
     out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else ""}
     if pcm:
         try:
