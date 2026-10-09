@@ -306,7 +306,7 @@ def speakable_uz(name: Any) -> str:
         if raw.lower() in _JUNK_WORDS or len(raw) <= 2:
             continue
         word = uz_latin(raw.lower()) if re.search(r"[а-яёўқғҳ]", raw.lower()) else raw.lower()
-        words.append(word[:1].upper() + word[1:])
+        words.append(word if word in HONORIFICS and words else word[:1].upper() + word[1:])   # «aka», «opa» — не имя: строчными
     return " ".join(words)
 
 

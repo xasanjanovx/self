@@ -663,15 +663,21 @@ class AIService:
                 sources.append((str(web.get("title") or "источник")[:40], str(web["uri"])))
         return "\n".join(texts).strip(), sources[:4]
 
-    async def synthesize_parts(self, parts: list[tuple[str, str | None]], *, voice: str = "Kore", gap_s: float = 0.07) -> bytes | None:
+    async def synthesize_parts(self, parts: list[tuple], *, voice: str = "Kore", gap_s: float = 0.07,
+                               special: dict[str, Any] | None = None) -> bytes | None:
         """Фраза из кусков на разных языках одним голосом: [("Звонит", "ru-RU"), ("Sirojbek aka", "uz-UZ")]. Каждый кусок озвучивается
         со своим languageCode (имя читается по-узбекски, а не русской транскрипцией), куски склеиваются с короткой паузой.
-        Любой кусок не вышел — None (вызывающий озвучит всю фразу обычным способом)."""
-        async def one(text: str, language: str | None) -> bytes:
+        Кусок — (текст, язык) или (текст, язык, вид); для вида из special озвучка своя. Любой кусок не вышел — None (озвучат всю фразу обычно)."""
+        async def one(text: str, language: str | None, kind: str = "") -> bytes:
+            if kind and special and kind in special:
+                # особый кусок (имя по-узбекски — bot/uz_voice.py): свой способ озвучки; не вышел — обычная озвучка куска
+                pcm = await special[kind](text)
+                if pcm:
+                    return pcm
             return b"".join([chunk async for chunk in self.speak_stream(text, voice=voice, language=language)])
 
         try:
-            pcms = await asyncio.gather(*(one(text, language) for text, language in parts if text.strip()))
+            pcms = await asyncio.gather(*(one(*part) for part in parts if part[0].strip()))
         except Exception as exc:
             logger.warning("TTS parts failed: %s", str(exc)[:200])
             return None
