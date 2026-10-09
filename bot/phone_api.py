@@ -882,7 +882,7 @@ async def announce(request: web.Request) -> web.Response:
     from . import deeds
 
     deeds.note(uid, "incoming_call", {"who": name, "app": app}, src="телефон", dedupe_s=180)
-    return web.json_response(await phone_live.announce(uid, name, app))
+    return web.json_response(await phone_live.announce(uid, name, app, quick=True))   # во время звонка — без долгого подбора лучшего дубля
 
 
 async def greetings(request: web.Request) -> web.Response:

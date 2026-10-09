@@ -237,7 +237,9 @@ def test_say_name_records_takes_and_keeps_the_one_that_sounds_right(tmp_path, mo
 
             with wave.open(io.BytesIO(base64.b64decode(parts[1]["inline_data"]["data"]))) as w:
                 frames = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-            return heard[int(frames.max() // 2000 * 2000)] if frames.max() >= 2000 else ""
+            import json
+
+            return json.dumps({"heard": heard[int(frames.max() // 2000 * 2000)] if frames.max() >= 2000 else "", "aka": "neutral"})
 
     ai = FakeAI()
     pcm = asyncio.run(uz_voice.say_name(ai, "Dilshod aka", voice="Sulafat"))
@@ -294,10 +296,123 @@ def test_cut_name_keeps_all_words_when_there_is_a_pause_inside_a_long_name():
     assert 2.2 <= seconds <= 2.5                      # три слова имени (0.7 + 0.1 + 0.35 + 0.32 + 0.8 = 2.27 + кромки), без хвоста фразы
 
 
-def test_voice_text_puts_a_comma_after_the_honorific_before_the_next_word():
+def test_voice_text_has_no_comma_and_respells_j_in_later_words():
     from bot import uz_voice
 
-    assert uz_voice.voice_text("Komiljon aka Jalaquduq") == "Komiljon aka, Jalaquduq"
-    assert uz_voice.voice_text("Xusanboy aka") == "Xusanboy aka"                 # обращение в конце — запятая не нужна
-    assert uz_voice.voice_text("Mashhur bek") == "Mashhur bek"
-    assert uz_voice.voice_text("Nafisa opa Axb") == "Nafisa opa, Axb"
+    # запятая после «aka» делала из него обращение (зовут человека) — её нет; «J» второго слова пишем «Dj» ([dʒ])
+    assert uz_voice.voice_text("Komiljon aka Jalaquduq") == "Komiljon aka Djalaquduq"
+    assert uz_voice.voice_text("Jahongir aka Itpark") == "Jahongir aka Itpark"       # первое слово — как есть
+    assert uz_voice.voice_text("Xusanboy aka") == "Xusanboy aka"
+    assert uz_voice.voice_text("Nafisa opa Axb") == "Nafisa opa Axb"
+    assert uz_voice.voice_text("Bobur aka Jyoti") == "Bobur aka Djyoti"
+
+
+
+def test_takes_where_aka_sounds_like_a_call_out_lose_to_neutral_ones(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    import numpy as np
+
+    from bot import uz_voice
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    amps = (2000, 4000, 6000)
+    takes = [np.concatenate([_silence(0.2), _speech(0.8, amp=a), _silence(0.5), _speech(1.0)]).tobytes() for a in amps]
+    verdicts = {2000: ("Akmal aka", "vocative"), 4000: ("Akmal aka", "vocative"), 6000: ("Akmal aka", "neutral")}   # как слышно и как прозвучало «aka»
+
+    class FakeAI:
+        n = 0
+
+        async def speak_stream(self, text, *, voice="Kore", model="m", free=False, language=None):  # noqa: ANN001
+            self.n += 1
+            yield takes[(self.n - 1) % 3]
+
+        async def generate(self, parts, **kw):  # noqa: ANN001, ANN003
+            import base64
+            import io
+            import wave
+
+            with wave.open(io.BytesIO(base64.b64decode(parts[1]["inline_data"]["data"]))) as w:
+                frames = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+            heard, aka = verdicts[int(round(frames.max() / 2000)) * 2000]
+            return json.dumps({"heard": heard, "aka": aka})
+
+    pcm = asyncio.run(uz_voice.say_name(FakeAI(), "Akmal aka", voice="Sulafat", takes=3))
+    assert pcm is not None and int(np.frombuffer(pcm, dtype=np.int16).max()) > 5000      # выбран третий дубль: «aka» — часть имени, не обращение
+    assert uz_voice.score("Akmal aka", True, "Akmal aka") < uz_voice.score("Akmal aka", False, "Akmal aka")
+
+
+def test_call_time_announce_is_quick_when_the_name_is_not_ready_and_final_when_it_is(tmp_path, monkeypatch):
+    import asyncio
+
+    from bot import phone_live, services, uz_voice
+    from bot.context import ai
+    from bot.persona import Persona
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    calls: list = []
+
+    async def persona(u):  # noqa: ANN001
+        return Persona(lang="ru")
+
+    async def parts(self_or_parts, *a, special=None, **k):  # noqa: ANN001, ANN002, ANN003
+        pcm = await special["name"]("Sirojbek aka")
+        return b"\x01\x00" * 2400 + (pcm or b"")
+
+    async def quick(ai_, name, *, voice):  # noqa: ANN001
+        calls.append(("quick", name))
+        return b"\x02\x00" * 4800
+
+    async def best(ai_, name, *, voice, takes=5):  # noqa: ANN001
+        calls.append(("best", name))
+        return b"\x03\x00" * 4800
+
+    monkeypatch.setattr(services, "persona", persona)
+    monkeypatch.setattr(ai, "synthesize_parts", parts, raising=False)
+    monkeypatch.setattr(uz_voice, "quick_name", quick)
+    monkeypatch.setattr(uz_voice, "say_name", best)
+    ready = {"v": False}
+    monkeypatch.setattr(uz_voice, "cached", lambda name, voice: ready["v"])
+
+    async def run_quick():
+        out = await phone_live.announce(77, "Sirojbek aka", "Telegram", quick=True)
+        await asyncio.sleep(0.05)               # фоновая запись лучшего дубля
+        return out
+
+    out = asyncio.run(run_quick())
+    assert out["final"] is False and out["wav"]                                  # быстрый черновик: приложение его не запомнит
+    assert ("quick", "Sirojbek aka") in calls and ("best", "Sirojbek aka") in calls           # лучший дубль записывается в фоне
+    assert not list((tmp_path / "announce").glob("*.json"))                      # черновик не кэшируется и на сервере
+
+    calls.clear()
+    ready["v"] = True                                                            # лучший дубль готов (фон или заранее)
+    out = asyncio.run(phone_live.announce(77, "Sirojbek aka", "Telegram", quick=True))
+    assert out["final"] is True and [c[0] for c in calls] == ["best"]            # из готового: быстро и окончательно
+    assert list((tmp_path / "announce").glob("*.json"))
+
+
+def test_prefetch_covers_every_contact_once_at_a_time(tmp_path, monkeypatch):
+    import asyncio
+
+    from bot import phone, phone_live
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    phone.save_contacts(77, [{"n": "Shuxrat Aka", "p": ["+998901234567"]}, {"n": "Muxriddin", "p": ["+998901234568"]}, {"n": "Taksi", "p": ["112"]}])
+    asked: list = []
+
+    async def fake_announce(uid, name, app="", *, quick=False):  # noqa: ANN001
+        asked.append((name, app, quick))
+        return {"wav": "x"}
+
+    async def no_pieces(uid):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(phone_live, "announce", fake_announce)
+    monkeypatch.setattr(phone_live, "_prefetch_pieces", no_pieces)
+    monkeypatch.setattr(phone_live, "PREFETCH_GAP_S", 0)
+    done = asyncio.run(phone_live.prefetch_announcements(77))
+    names = [n for n, _a, _q in asked]
+    assert {"Shuxrat Aka", "Muxriddin", "Taksi", ""} <= set(names) and done == len(names)
+    assert all(q is False for _n, _a, q in asked)                                # заранее — лучшее качество, не быстрый черновик
+    assert phone_live._prefetching is False

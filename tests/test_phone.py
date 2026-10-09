@@ -489,3 +489,16 @@ def test_missed_telegram_calls_skip_the_helper_account_and_outgoing(monkeypatch)
     monkeypatch.setattr(caller, "helper_id", 2)
     out = asyncio.run(tg_user.missed_calls(hours=48))
     assert [(r["from"], r["count"]) for r in out] == [("Мама", 1)]      # старше 48 ч, не пропущенное, помощник и исходящее — не в счёт
+
+
+def test_blocked_call_log_is_reported_not_called_empty(uid):
+    """09.10: HyperOS отдаёт пустой журнал при выданном разрешении — JES говорил «пропущенных нет». Теперь — как это включить."""
+    turn = phone.PhoneTurn(uid=uid, device={"calls": [], "calls_blocked": True})
+    ctx = agent.tools.ToolContext(profile=_profile(), text="")
+    run = phone.make_runner(turn)
+    out = asyncio.run(run("recent_calls", {}, ctx))
+    assert "закрыт системой" in out["error"] and "Журнал вызовов" in out["hint"]
+    out = asyncio.run(run("call_back", {"which": "last_missed"}, ctx))
+    assert "закрыт системой" in out["error"]
+    ok = phone.PhoneTurn(uid=uid, device={"calls": [{"name": "Мама", "number": "+99890", "type": "missed", "when": "09:00"}]})
+    assert asyncio.run(phone.make_runner(ok)("recent_calls", {}, ctx))["calls"][0]["kind"] == "пропущенный"

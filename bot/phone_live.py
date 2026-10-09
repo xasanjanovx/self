@@ -1170,15 +1170,44 @@ _KIN_UZ = {"мама": "Onangiz", "папа": "Dadangiz", "брат": "Akangiz",
            "сестрёнка": "Singlingiz", "жена": "Rafiqangiz", "муж": "Turmush o'rtog'ingiz", "бабушка": "Buvingiz", "дедушка": "Bobongiz"}
 
 
-PREFETCH_GAP_S = 7.0   # пауза между записью фраз (лимит озвучки Google в минуту)
+PREFETCH_GAP_S = 2.5   # пауза между именами (каждое имя — несколько дублей и прослушивание; на Vertex лимиты свободнее, чем были у AI Studio)
+PREFETCH_MAX = 600
+_prefetching = False
+
+
+async def _prefetch_pieces(uid: int) -> None:
+    """Короткие русские куски фразы («Звонит», «в Телеграм»…) — заранее: звонок через мессенджер тоже собирается из готового."""
+    persona = await services.persona(uid)
+    code = _LANG_CODE.get(persona.lang, "ru-RU")
+    pieces = ["Звонит", *[f"в {shown}" for shown in _MESSENGER_RU.values()]] if persona.lang == "ru" else []
+    for text in pieces:
+        try:
+            async for _chunk in ai.speak_stream(text, voice=persona.voice, language=code):
+                pass
+        except Exception:
+            logger.debug("prefetch piece failed: %s", text, exc_info=True)
 
 
 async def prefetch_announcements(uid: int) -> int:
-    """«Звонит мама/брат…» и 20 самых частых — голосом заранее (один раз ~$0.0006 на человека): при звонке — сразу и бесплатно."""
+    """09.10 «чтобы звонок читался мгновенно»: «Звонит мама/брат…» и ВСЕ контакты из книги — голосом заранее (имя читается по-узбекски лучшим из
+    нескольких дублей, ~8 с на имя — во время звонка столько ждать нельзя). Идёт фоном, по имени за раз; записанные (кэш) — без паузы."""
+    global _prefetching
+    if _prefetching:
+        return 0
+    _prefetching = True
+    try:
+        await _prefetch_pieces(uid)
+        return await _prefetch_all(uid)
+    finally:
+        _prefetching = False
+
+
+async def _prefetch_all(uid: int) -> int:
     people = [v for k, v in (phone.aliases(uid).get("phone") or {}).items() if phone.names.kin_root(k) == k]
     people += [n for n in phone.frequent_contacts(uid) if n not in people]
+    people += [str(c.get("name") or "") for c in phone.load_contacts(uid) if c.get("name") and str(c.get("name")) not in people]
     done = 0
-    for name in [*people, ""]:  # "" — незнакомый номер
+    for name in [*people[:PREFETCH_MAX], ""]:  # "" — незнакомый номер
         # 28.09: у озвучки Google лимит запросов в минуту — пачкой по 25 фраз часть не записывалась (429). Теперь по одной
         # с паузой, не вышло — ещё раз через 20 с; уже записанные (кэш) — без паузы
         for attempt in range(2):
@@ -1267,8 +1296,9 @@ def clean_announcement(text: str) -> str:
     return str(text or "").strip().strip("«»\"'").splitlines()[0].strip() if str(text or "").strip() else ""
 
 
-async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
-    """Фраза «Звонит мама» и её голос (WAV в base64). Кэш — по имени, приложению и голосу."""
+async def announce(uid: int, name: str, app: str = "", *, quick: bool = False) -> dict[str, Any]:
+    """Фраза «Звонит мама» и её голос (WAV в base64). Кэш — по имени, приложению и голосу. quick — запрос прямо во время звонка: имени ещё нет
+    в готовых — один быстрый дубль сразу (ответ с final=False: приложение его не запоминает), а лучший запишется в фоне на следующий раз."""
     import hashlib
 
     from .tg_user import data_dir
@@ -1290,14 +1320,23 @@ async def announce(uid: int, name: str, app: str = "") -> dict[str, Any]:
         pass
     from . import uz_voice
 
+    draft = False
+
     async def uz_name(spoken: str) -> bytes | None:
+        nonlocal draft
+        if quick and not uz_voice.cached(spoken, persona.voice):
+            fast = await uz_voice.quick_name(ai, spoken, voice=persona.voice)
+            if fast:
+                draft = True
+                phone._later(uz_voice.say_name(ai, spoken, voice=persona.voice))   # лучший дубль — на следующий звонок
+                return fast
         return await uz_voice.say_name(ai, spoken, voice=persona.voice)
 
     pcm = await ai.synthesize_parts(parts, voice=persona.voice, special={"name": uz_name}) if len(parts) > 1 else None   # имя по-узбекски (09.10)
     if not pcm:
         pcm = await ai.synthesize(text, voice=persona.voice)
-    out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else ""}
-    if pcm:
+    out = {"text": text, "wav": base64.b64encode(pcm_to_wav(pcm)).decode() if pcm else "", "final": not draft}
+    if pcm and not draft:
         try:
             cache_file.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
         except OSError:

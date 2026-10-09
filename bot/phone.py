@@ -568,12 +568,19 @@ def recent_calls(device: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# 09.10: «пропущенные не находит» — на HyperOS разрешение «Журнал звонков» выдано, а система всё равно отдаёт пустой журнал (отдельная настройка Xiaomi)
+_CALLS_BLOCKED = {"error": "журнал звонков закрыт системой телефона: Xiaomi прячет его отдельной настройкой",
+                  "hint": "скажи одной фразой: Настройки → Приложения → JES → Другие разрешения → «Журнал вызовов» → Разрешить"}
+
+
 @ptool("recent_calls", "Кто звонил / кому звонил он: журнал последних звонков телефона («кто мне звонил?», «пропущенные есть?»).")
 async def _recent_calls(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     calls = recent_calls(turn.device)
     if not calls:
         if turn.device.get("calls_denied"):
             return {"error": "нет доступа к журналу звонков", "hint": "попроси в приложении JES выдать «Журнал звонков»"}
+        if turn.device.get("calls_blocked"):
+            return _CALLS_BLOCKED
         return {"calls": [], "note": "журнал пуст"}
     return {"calls": calls}
 
@@ -586,6 +593,8 @@ async def _call_back(turn: PhoneTurn, ctx: ToolContext, a: dict[str, Any]) -> di
     for c in recent_calls(turn.device):
         if c["number"] and (want is None or c["kind"] in want):
             return _action(turn, "call", number=c["number"], name=c["name"] or c["number"])
+    if turn.device.get("calls_blocked"):
+        return _CALLS_BLOCKED
     return {"error": "в журнале нет подходящего звонка"}
 
 
