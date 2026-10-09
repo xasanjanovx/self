@@ -62,7 +62,7 @@ def test_kin_announce_without_model(uid, monkeypatch):
     monkeypatch.setattr(ai, "generate", no_llm)
     monkeypatch.setattr(ai, "synthesize", tts)
     assert asyncio.run(phone_live.announce(uid, "SIROJBEK AKAM", ""))["text"] == "Звонит брат"
-    assert asyncio.run(phone_live.announce(uid, "+998 90 123 45 67", "Telegram"))["text"] == "Звонит незнакомый номер в Telegram"
+    assert asyncio.run(phone_live.announce(uid, "+998 90 123 45 67", "Telegram"))["text"] == "Звонит незнакомый номер в Телеграм"
 
 
 def test_recent_lines_in_phone_prompt():
